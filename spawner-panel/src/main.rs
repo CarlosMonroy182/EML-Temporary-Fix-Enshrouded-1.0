@@ -1,7 +1,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod emblems;
+mod icons;
+mod items;
 mod map;
+mod tiles;
 mod powers;
 mod theme;
 mod wiki;
@@ -34,6 +37,7 @@ struct Entry {
     search: String,
     kind: emblems::Kind,
     internal: bool,
+    icon_keys: Vec<String>,
 }
 
 #[derive(Default)]
@@ -76,6 +80,7 @@ pub struct Place {
 pub enum Tab {
     Creatures,
     Objects,
+    Items,
     Map,
     Powers,
     Pvp,
@@ -88,6 +93,7 @@ pub enum Tab {
 enum Mode {
     Creatures,
     Objects,
+    Items,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -111,6 +117,9 @@ pub struct App {
     tab: Tab,
     creatures: Catalog,
     objects: Catalog,
+    item_cat: Catalog,
+    items: items::ItemsState,
+    downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
     map: map::MapState,
     level: u32,
@@ -325,6 +334,7 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
             search: format!("{} {}", label, faction_label(&group)).to_lowercase(),
             kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
+            icon_keys: icons::enemy_keys(parts[0]),
             alias: None,
             icon_file: None,
             label,
@@ -337,6 +347,55 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
         return Err("La lista de enemigos está vacía.".to_string());
     }
     Ok(out)
+}
+
+fn index_item(rows: &[items::Item], index: usize) -> Option<&items::Item> {
+    rows.get(index)
+}
+
+fn load_item_catalog(dir: &Path) -> (Catalog, Vec<items::Item>) {
+    match items::load_items(dir) {
+        Ok(rows) => {
+            let entries: Vec<Entry> = rows
+                .iter()
+                .map(|it| {
+                    let mut keys = icons::name_keys(&it.name);
+                    for k in icons::name_keys(&pretty(&it.debug)) {
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                    Entry {
+                        guid: it.guid.clone(),
+                        raw: it.debug.clone(),
+                        label: it.name.clone(),
+                        alias: None,
+                        icon_file: None,
+                        group: it.group.clone(),
+                        boss: false,
+                        search: format!("{} {} {} {}", it.name, it.debug, it.group, it.slot).to_lowercase(),
+                        kind: item_kind(&it.group),
+                        internal: it.group == "Personalización",
+                        icon_keys: keys,
+                    }
+                })
+                .collect();
+            (Catalog { entries, ..Default::default() }, rows)
+        }
+        Err(e) => (Catalog { error: Some(e), ..Default::default() }, Vec::new()),
+    }
+}
+
+fn item_kind(group: &str) -> emblems::Kind {
+    match group {
+        "Armas" | "Armas a distancia" | "Munición" => emblems::Kind::Fang,
+        "Armaduras" | "Ropa cosmética" => emblems::Kind::Helm,
+        "Escudos" => emblems::Kind::Shield,
+        "Gemas de arma" | "Materiales" | "Anillos" | "Tintes" => emblems::Kind::Gem,
+        "Comida y pociones" | "Comida de animales" => emblems::Kind::Tree,
+        "Herramientas" | "Equipo y accesorios" => emblems::Kind::Cog,
+        _ => emblems::Kind::Crate,
+    }
 }
 
 fn load_objects(dir: &Path) -> Result<Vec<Entry>, String> {
@@ -357,6 +416,7 @@ fn load_objects(dir: &Path) -> Result<Vec<Entry>, String> {
             search: format!("{} {} {}", label, name, group).to_lowercase(),
             kind: emblems::kind_of_object(name, &group),
             internal: is_internal_object(name, &group) || !components.contains("Transform"),
+            icon_keys: icons::name_keys(&label),
             alias: None,
             icon_file: None,
             label,
@@ -412,6 +472,9 @@ fn load_icon(ctx: &egui::Context, dir: &Path, entry: &Entry) -> Option<TextureHa
     if let Some(file) = &entry.icon_file {
         paths.push(base.join(file));
     }
+    for key in &entry.icon_keys {
+        paths.push(icons::wiki_file(dir, key));
+    }
     paths.push(base.join(format!("{}.png", entry.guid)));
     for path in paths {
         let Ok(bytes) = std::fs::read(&path) else { continue };
@@ -427,7 +490,7 @@ fn load_icon(ctx: &egui::Context, dir: &Path, entry: &Entry) -> Option<TextureHa
 fn group_label(mode: Mode, group: &str) -> String {
     match mode {
         Mode::Creatures => faction_label(group).to_string(),
-        Mode::Objects => group.to_string(),
+        Mode::Objects | Mode::Items => group.to_string(),
     }
 }
 
@@ -451,6 +514,23 @@ impl App {
             }
             Err(e) => Catalog { error: Some(e), ..Default::default() },
         };
+        let (item_cat, item_rows) = load_item_catalog(&dir);
+        let (saved_stats, saved_balance) = items::load_saved(&dir);
+        let balance_base = items::load_balance(&dir);
+        let mut balance = balance_base.clone();
+        for (k, v) in saved_balance {
+            balance.insert(k, v);
+        }
+        let item_state = items::ItemsState {
+            rows: item_rows,
+            balance_base,
+            balance,
+            saved: saved_stats,
+            level: 0,
+            rarity: 0,
+            amount: 1,
+            ..Default::default()
+        };
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
         let get_f = |key: &str, default: f32| cfg.get(key).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(default);
         let get_b = |key: &str| cfg.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -462,6 +542,7 @@ impl App {
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
             Ok("objects") => Tab::Objects,
+            Ok("items") => Tab::Items,
             Ok("map") => Tab::Map,
             Ok("powers") => Tab::Powers,
             _ => Tab::Creatures,
@@ -473,6 +554,9 @@ impl App {
             tab: preview_tab,
             creatures,
             objects,
+            item_cat,
+            items: item_state,
+            downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
             map: map::MapState::default(),
             level: get_u("spawn_level", 20).clamp(1, 100),
@@ -498,12 +582,14 @@ impl App {
         #[cfg(feature = "linux-preview")]
         if let Ok(q) = std::env::var("M182_PREVIEW_SEARCH") {
             app.creatures.search = q.clone();
+            app.item_cat.search = q.clone();
             app.objects.search = q;
         }
         #[cfg(feature = "linux-preview")]
         if std::env::var("M182_PREVIEW_SELECT").is_ok() {
             app.creatures.selected = Some(120.min(app.creatures.entries.len().saturating_sub(1)));
             app.objects.selected = Some(30.min(app.objects.entries.len().saturating_sub(1)));
+            app.item_cat.selected = Some(40.min(app.item_cat.entries.len().saturating_sub(1)));
         }
         app.cleanup_stale_request();
         app
@@ -525,6 +611,7 @@ impl App {
         match mode {
             Mode::Creatures => &self.creatures,
             Mode::Objects => &self.objects,
+            Mode::Items => &self.item_cat,
         }
     }
 
@@ -571,7 +658,7 @@ impl App {
                 ("spawn_damage", json!(self.damage)),
                 ("spawner", json!(true)),
             ]),
-            Mode::Objects => Ok(()),
+            Mode::Objects | Mode::Items => Ok(()),
         };
         let result = saved.and_then(|_| {
             let mut request = json!({
@@ -583,8 +670,24 @@ impl App {
                 request["level"] = json!(self.level);
                 request["health"] = json!(self.effective_health());
                 request["damage"] = json!(self.damage);
+            } else if mode == Mode::Objects {
+                request["object"] = json!(true);
             } else {
                 request["object"] = json!(true);
+                request["count"] = json!(1);
+                if let Some(item) = index_item(&self.items.rows, index) {
+                    if !item.give_guid.is_empty() {
+                        request["template"] = json!(item.give_guid);
+                        request["item"] = json!(item.id);
+                        request["item_level"] = json!(self.items.level);
+                        request["item_rarity"] = json!(self.items.rarity);
+                        request["item_amount"] = json!(self.items.amount);
+                        request["default_level"] = json!(item.give_level);
+                        request["default_rarity"] = json!(item.rarity_index());
+                    } else {
+                        request["template"] = json!(item.pickup_guid);
+                    }
+                }
             }
             if self.target == Target::Forward {
                 request["forward"] = json!(true);
@@ -601,6 +704,16 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
+        self.items_pump();
+        if let Some(d) = &self.downloader {
+            for id in d.finished() {
+                self.icons.remove(&id);
+            }
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        if !self.items.outbox.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
         if let Status::Waiting(since) = self.status {
             if !self.dir.join(REQUEST_FILE).exists() {
                 self.status = Status::Delivered;
@@ -635,6 +748,7 @@ impl App {
         ui.add_space(6.0);
         for (tab, label, soon) in [
             (Tab::Creatures, "Criaturas", false),
+            (Tab::Items, "Ítems", false),
             (Tab::Objects, "Objetos", false),
             (Tab::Map, "Mapa", false),
             (Tab::Places, "Lugares", false),
@@ -676,14 +790,22 @@ impl App {
     }
 
     fn catalog_view(&mut self, ui: &mut egui::Ui, mode: Mode) {
-        egui::SidePanel::right(if mode == Mode::Creatures { "creature_controls" } else { "object_controls" })
+        egui::SidePanel::right(match mode {
+            Mode::Creatures => "creature_controls",
+            Mode::Objects => "object_controls",
+            Mode::Items => "item_controls",
+        })
             .exact_width(320.0)
             .frame(egui::Frame::none().fill(LEATHER).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0_f32, BRONZE)))
             .show_inside(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, mode)));
 
         egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 8.0 })).show_inside(ui, |ui| {
-            let App { creatures, objects, icons, dir, .. } = self;
-            let cat = if mode == Mode::Creatures { creatures } else { objects };
+            let App { creatures, objects, item_cat, icons, dir, downloader, .. } = self;
+            let cat = match mode {
+                Mode::Creatures => creatures,
+                Mode::Objects => objects,
+                Mode::Items => item_cat,
+            };
             if let Some(error) = &cat.error {
                 ui.label(RichText::new(error).color(BAD));
                 return;
@@ -694,8 +816,13 @@ impl App {
                 groups.sort_unstable();
                 groups.dedup();
                 let all = if mode == Mode::Creatures { "Todas las facciones" } else { "Todas las categorías" };
+                let salt = match mode {
+                    Mode::Creatures => 0,
+                    Mode::Objects => 1,
+                    Mode::Items => 2,
+                };
                 let current = if cat.group.is_empty() { all.to_string() } else { group_label(mode, &cat.group) };
-                egui::ComboBox::from_id_salt(("group", mode == Mode::Creatures)).selected_text(current).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("group", salt)).selected_text(current).show_ui(ui, |ui| {
                     ui.selectable_value(&mut cat.group, String::new(), all);
                     for g in groups {
                         let text = group_label(mode, &g);
@@ -708,12 +835,18 @@ impl App {
                 ui.checkbox(&mut cat.show_internal, "Mostrar entradas internas");
             });
             let visible = cat.visible();
-            ui.label(RichText::new(format!("{} {}", visible.len(), if mode == Mode::Creatures { "criaturas" } else { "objetos" })).color(MUTED));
-            Self::grid(ui, cat, icons, dir, &visible, mode);
+            let noun = match mode {
+                Mode::Creatures => "criaturas",
+                Mode::Objects => "objetos",
+                Mode::Items => "ítems entregables",
+            };
+            let status = downloader.as_ref().map(|d| d.status()).unwrap_or_default();
+            ui.label(RichText::new(format!("{} {}    {}", visible.len(), noun, status)).color(MUTED));
+            Self::grid(ui, cat, icons, dir, downloader, &visible, mode);
         });
     }
 
-    fn grid(ui: &mut egui::Ui, cat: &mut Catalog, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, visible: &[usize], mode: Mode) {
+    fn grid(ui: &mut egui::Ui, cat: &mut Catalog, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, downloader: &mut Option<icons::Downloader>, visible: &[usize], mode: Mode) {
         let spacing = 10.0;
         let min_card = 200.0;
         let card_h = 70.0;
@@ -727,7 +860,7 @@ impl App {
                 ui.horizontal(|ui| {
                     for &i in visible.iter().skip(row * cols).take(cols) {
                         let selected = cat.selected == Some(i);
-                        if Self::card(ui, icons, dir, &cat.entries[i], selected, card_w, mode) {
+                        if Self::card(ui, icons, dir, downloader, &cat.entries[i], selected, card_w, mode) {
                             cat.selected = Some(i);
                         }
                     }
@@ -736,13 +869,19 @@ impl App {
         });
     }
 
-    fn card(ui: &mut egui::Ui, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, e: &Entry, selected: bool, width: f32, mode: Mode) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn card(ui: &mut egui::Ui, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, downloader: &mut Option<icons::Downloader>, e: &Entry, selected: bool, width: f32, mode: Mode) -> bool {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 70.0), Sense::click());
         if !ui.is_rect_visible(rect) {
             return response.clicked();
         }
         if !icons.contains_key(&e.guid) {
             let loaded = load_icon(ui.ctx(), dir, e);
+            if loaded.is_none() {
+                if let Some(d) = downloader {
+                    d.request(&e.guid, e.icon_keys.clone());
+                }
+            }
             icons.insert(e.guid.clone(), loaded);
         }
         let texture = icons.get(&e.guid).and_then(|t| t.clone());
@@ -789,55 +928,17 @@ impl App {
         response.clicked()
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui, mode: Mode) {
-        heading(ui, if mode == Mode::Creatures { "Invocación" } else { "Crear objeto" }, 19.0);
-        divider(ui);
-        let selected = self.catalog(mode).selected;
-        match selected {
-            Some(i) => {
-                let e = &self.catalog(mode).entries[i];
-                let icon = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover()).0;
-                let painter = ui.painter();
-                painter.rect_filled(icon, Rounding::same(4.0), Color32::from_rgb(20, 15, 11));
-                ornate_frame(painter, icon);
-                match self.icons.get(&e.guid).and_then(|t| t.clone()) {
-                    Some(texture) => {
-                        let side = icon.height() - 12.0;
-                        let target = egui::Rect::from_center_size(icon.center(), Vec2::splat(side));
-                        painter.image(texture.id(), target, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                    }
-                    None => {
-                        let target = egui::Rect::from_center_size(icon.center(), Vec2::splat(icon.height() - 22.0));
-                        emblems::draw(painter, target, e.kind, group_color(&e.group), e.boss);
-                    }
-                }
-                ui.label(RichText::new(e.alias.as_deref().unwrap_or(&e.label)).font(title_font(17.0)).color(PARCHMENT));
-                if e.alias.is_some() {
-                    ui.label(RichText::new(&e.label).color(MUTED).size(13.0));
-                }
-                ui.label(RichText::new(group_label(mode, &e.group)).color(group_color(&e.group)));
-            }
-            None => {
-                ui.label(RichText::new(if mode == Mode::Creatures { "Elige una criatura de la lista" } else { "Elige un objeto de la lista" }).color(MUTED));
-            }
+    fn status_text(&self) -> (String, Color32) {
+        match &self.status {
+            Status::Idle => (String::new(), MUTED),
+            Status::Waiting(_) => ("Enviando al juego…".to_string(), MUTED),
+            Status::Delivered => ("El juego recibió el pedido. Si no aparece, revisa que el mundo esté cargado.".to_string(), GOOD),
+            Status::NoAnswer => ("El juego no respondió. Revisa que esté abierto con el DLL de M182 y con el mundo cargado.".to_string(), BAD),
+            Status::Error(e) => (format!("Error: {e}"), BAD),
         }
-        divider(ui);
+    }
 
-        if mode == Mode::Creatures {
-            label_title(ui, "NIVEL");
-            ui.add(egui::Slider::new(&mut self.level, 1..=100));
-        }
-        label_title(ui, "CANTIDAD");
-        ui.add(egui::Slider::new(&mut self.count, 1..=20));
-        if mode == Mode::Creatures {
-            label_title(ui, "VIDA");
-            ui.checkbox(&mut self.custom_health, "Vida personalizada");
-            ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
-            label_title(ui, "DAÑO  (1.00 = normal)");
-            ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
-        }
-        divider(ui);
-
+    fn target_controls(&mut self, ui: &mut egui::Ui) {
         label_title(ui, "DÓNDE APARECE");
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.target, Target::Forward, "Delante de mí");
@@ -889,19 +990,84 @@ impl App {
                 }
             }
         }
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui, mode: Mode) {
+        heading(
+            ui,
+            match mode {
+                Mode::Creatures => "Invocación",
+                Mode::Objects => "Crear objeto",
+                Mode::Items => "Entregar ítem",
+            },
+            19.0,
+        );
+        divider(ui);
+        let selected = self.catalog(mode).selected;
+        match selected {
+            Some(i) => {
+                let e = &self.catalog(mode).entries[i];
+                let icon = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover()).0;
+                let painter = ui.painter();
+                painter.rect_filled(icon, Rounding::same(4.0), Color32::from_rgb(20, 15, 11));
+                ornate_frame(painter, icon);
+                match self.icons.get(&e.guid).and_then(|t| t.clone()) {
+                    Some(texture) => {
+                        let side = icon.height() - 12.0;
+                        let target = egui::Rect::from_center_size(icon.center(), Vec2::splat(side));
+                        painter.image(texture.id(), target, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        let target = egui::Rect::from_center_size(icon.center(), Vec2::splat(icon.height() - 22.0));
+                        emblems::draw(painter, target, e.kind, group_color(&e.group), e.boss);
+                    }
+                }
+                ui.label(RichText::new(e.alias.as_deref().unwrap_or(&e.label)).font(title_font(17.0)).color(PARCHMENT));
+                if e.alias.is_some() {
+                    ui.label(RichText::new(&e.label).color(MUTED).size(13.0));
+                }
+                ui.label(RichText::new(group_label(mode, &e.group)).color(group_color(&e.group)));
+            }
+            None => {
+                ui.label(
+                    RichText::new(match mode {
+                        Mode::Creatures => "Elige una criatura de la lista",
+                        Mode::Objects => "Elige un objeto de la lista",
+                        Mode::Items => "Elige un ítem de la lista",
+                    })
+                    .color(MUTED),
+                );
+            }
+        }
+        divider(ui);
+
+        if mode == Mode::Items {
+            self.item_controls(ui, selected);
+            return;
+        }
+        if mode == Mode::Creatures {
+            label_title(ui, "NIVEL");
+            ui.add(egui::Slider::new(&mut self.level, 1..=100));
+        }
+        label_title(ui, "CANTIDAD");
+        ui.add(egui::Slider::new(&mut self.count, 1..=20));
+        if mode == Mode::Creatures {
+            label_title(ui, "VIDA");
+            ui.checkbox(&mut self.custom_health, "Vida personalizada");
+            ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
+            label_title(ui, "DAÑO  (1.00 = normal)");
+            ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
+        }
+        divider(ui);
+
+        self.target_controls(ui);
         divider(ui);
 
         let enabled = selected.is_some();
         if button(ui, if mode == Mode::Creatures { "INVOCAR" } else { "CREAR" }, Vec2::new(ui.available_width(), 52.0), enabled, true) {
             self.spawn(mode);
         }
-        let (text, color) = match &self.status {
-            Status::Idle => (String::new(), MUTED),
-            Status::Waiting(_) => ("Enviando al juego…".to_string(), MUTED),
-            Status::Delivered => ("El juego recibió el pedido. Si no aparece, revisa que el mundo esté cargado.".to_string(), GOOD),
-            Status::NoAnswer => ("El juego no respondió. Revisa que esté abierto con el DLL de M182 y con el mundo cargado.".to_string(), BAD),
-            Status::Error(e) => (format!("Error: {e}"), BAD),
-        };
+        let (text, color) = self.status_text();
         if !text.is_empty() {
             ui.label(RichText::new(text).color(color));
         }
@@ -1003,6 +1169,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| match self.tab {
             Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
             Tab::Objects => self.catalog_view(ui, Mode::Objects),
+            Tab::Items => self.catalog_view(ui, Mode::Items),
             Tab::Map => self.map_tab(ui),
             tab => {
                 egui::Frame::none().inner_margin(egui::Margin::same(20.0)).show(ui, |ui| match tab {
@@ -1044,6 +1211,7 @@ mod tests {
             search: label.to_lowercase(),
             kind: emblems::Kind::Fang,
             internal,
+            icon_keys: Vec::new(),
         }
     }
 
@@ -1053,6 +1221,9 @@ mod tests {
             tab: Tab::Creatures,
             creatures: Catalog { entries, selected: Some(0), ..Default::default() },
             objects: Catalog::default(),
+            item_cat: Catalog::default(),
+            items: Default::default(),
+            downloader: None,
             powers: Default::default(),
             map: Default::default(),
             level: 30,
@@ -1255,6 +1426,44 @@ mod tests {
         app.target = Target::Place;
         app.spawn(Mode::Creatures);
         assert!(matches!(app.status, Status::Error(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn item_delivery_request() {
+        let dir = temp_dir("it");
+        let csv = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison,wood,stone,metal,explosion,dmg_set,ar_physical,ar_blunt,ar_pierce,ar_cut,ar_magical,ar_fire,ar_ice,ar_fog,ar_lightning,ar_set\n\
+            1234,res-guid,Sword_Iron,Iron Sword,Weapons,Rare,1,MainHand,3,20,give-guid,,,3,1,1.25,12.5,3,0,7,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0\n\
+            55,res-2,Old_Thing,Old Thing,Materials,Common,50,,1,1,,pick-guid,LootPickup_Old,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n";
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        std::fs::write(dir.join("export").join("m182_items.csv"), csv).unwrap();
+        let (cat, rows) = load_item_catalog(&dir);
+        assert_eq!(cat.entries.len(), 2);
+        let mut app = app_in(&dir, Vec::new());
+        app.item_cat = cat;
+        app.items.rows = rows;
+        let sword = app.item_cat.entries.iter().position(|e| e.label == "Iron Sword").unwrap();
+        app.item_cat.selected = Some(sword);
+        app.items.level = 40;
+        app.items.rarity = 4;
+        app.items.amount = 1;
+        app.target = Target::Forward;
+        app.spawn(Mode::Items);
+        let req = read_request(&dir);
+        assert_eq!(req["template"], "give-guid");
+        assert_eq!(req["item"], 1234);
+        assert_eq!(req["item_level"], 40);
+        assert_eq!(req["item_rarity"], 4);
+        assert_eq!(req["default_level"], 3);
+        assert_eq!(req["default_rarity"], 2);
+        assert_eq!(req["object"], true);
+        assert_eq!(req["count"], 1);
+        let mat = app.item_cat.entries.iter().position(|e| e.label == "Old Thing").unwrap();
+        app.item_cat.selected = Some(mat);
+        app.spawn(Mode::Items);
+        let req = read_request(&dir);
+        assert_eq!(req["template"], "pick-guid");
+        assert!(req.get("item").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

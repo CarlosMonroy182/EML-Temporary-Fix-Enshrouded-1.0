@@ -18,11 +18,32 @@ unsafe extern "system" {
     fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
 }
 
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
     fn GetCurrentProcess() -> *mut c_void;
     fn WriteProcessMemory(process: *mut c_void, addr: *mut c_void, buf: *const c_void, size: usize, written: *mut usize) -> i32;
+    fn VirtualQuery(addr: *const c_void, info: *mut MemInfo, size: usize) -> usize;
+    fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct MemInfo {
+    base: usize,
+    alloc_base: usize,
+    alloc_protect: u32,
+    pad1: u32,
+    size: usize,
+    state: u32,
+    protect: u32,
+    kind: u32,
+    pad2: u32,
 }
 
 const GUID_PLAYER: [u8; 16] = [0xd6, 0x66, 0xdb, 0xc3, 0xa5, 0x89, 0x6c, 0x4a, 0xa8, 0xe3, 0xd9, 0xa1, 0xf6, 0x00, 0x98, 0x12];
@@ -419,8 +440,25 @@ struct Request {
     at: Option<[f64; 3]>,
     object: Option<bool>,
     forward: Option<bool>,
+    item: Option<u32>,
+    item_level: Option<u32>,
+    item_rarity: Option<u32>,
+    item_amount: Option<u32>,
+    default_level: Option<u32>,
+    default_rarity: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GiveSpec {
+    pub item: u32,
+    pub level: u32,
+    pub rarity: u32,
+    pub amount: u32,
+    pub default_level: u32,
+    pub default_rarity: u32,
+}
+
+static REQUEST_GIVE: Mutex<Option<GiveSpec>> = Mutex::new(None);
 static REQUEST_AT: Mutex<Option<[f64; 3]>> = Mutex::new(None);
 static REQUEST_OBJECT: AtomicBool = AtomicBool::new(false);
 static REQUEST_FORWARD: AtomicBool = AtomicBool::new(false);
@@ -463,6 +501,16 @@ pub fn poll_request() {
     }
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some(s);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = req.item.filter(|i| *i != 0).map(|item| GiveSpec {
+            item,
+            level: req.item_level.unwrap_or(1).clamp(1, 255),
+            rarity: req.item_rarity.unwrap_or(0).min(4),
+            amount: req.item_amount.unwrap_or(1).clamp(1, 65535),
+            default_level: req.default_level.unwrap_or(1).clamp(0, 255),
+            default_rarity: req.default_rarity.unwrap_or(0).min(4),
+        });
     }
     REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
     REQUEST_FORWARD.store(req.forward.unwrap_or(false), Ordering::SeqCst);
@@ -880,6 +928,7 @@ fn spawn_now(manager: usize) {
     if let Some(p) = at {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
     }
+    let give = REQUEST_GIVE.lock().ok().and_then(|mut g| g.take());
     let object = REQUEST_OBJECT.swap(false, Ordering::SeqCst);
     let forward = REQUEST_FORWARD.swap(false, Ordering::SeqCst) && at.is_none();
     let mut radius = if at.is_some() && settings.count == 1 { 0.0 } else { settings.distance as f64 };
@@ -934,6 +983,11 @@ fn spawn_now(manager: usize) {
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
         LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
+        if let Some(g) = give {
+            if id != 0 {
+                patch_give(manager, id, &g);
+            }
+        }
         if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
         }
@@ -952,9 +1006,14 @@ struct Powers {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Command {
+pub struct Command {
     cmd: String,
     at: Option<[Option<f64>; 3]>,
+    label: Option<String>,
+    guid: Option<String>,
+    item_id: Option<u32>,
+    old: Vec<String>,
+    new: Option<String>,
 }
 
 struct PowerState {
@@ -967,14 +1026,31 @@ struct PowerState {
     fog: Option<(usize, u32)>,
     fog_logged: bool,
     heal_once: bool,
+    stamina_peak_c: u32,
+    mana_peak_c: u32,
+    last_fly: Option<Instant>,
+    last_written: Option<(i64, i64, i64)>,
+    gravity: [Option<usize>; 2],
+    gravity_saved: [u8; 2],
+    gravity_off: bool,
+    client_logged: bool,
 }
 
-static RES_INDEX: [AtomicI32; 3] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+static RES_INDEX: [[AtomicI32; 3]; 2] = [
+    [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)],
+    [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)],
+];
+
+fn kind_of(manager: usize) -> usize {
+    let c = CLIENT_MGR.load(Ordering::Relaxed);
+    if c != 0 && manager == c { 1 } else { 0 }
+}
 
 fn resource(manager: usize, id: u32, which: usize, signature: u32) -> Option<(usize, Vec<u8>)> {
     let record = find_record(manager, id)?;
     let p = placement(record)?;
-    let cached = RES_INDEX[which].load(Ordering::Relaxed);
+    let kind = kind_of(manager);
+    let cached = RES_INDEX[kind][which].load(Ordering::Relaxed);
     if cached >= 0 {
         if let Some((addr, stride)) = component_address(&p, cached as usize) {
             if stride == 40 {
@@ -993,8 +1069,8 @@ fn resource(manager: usize, id: u32, which: usize, signature: u32) -> Option<(us
         }
         if let Some(b) = read_bytes(addr, 40) {
             if b.len() >= 40 && u32_at(&b, 0) == signature {
-                RES_INDEX[which].store(index as i32, Ordering::Relaxed);
-                log(&format!("powers: resource {which} found at component {index}"));
+                RES_INDEX[kind][which].store(index as i32, Ordering::Relaxed);
+                log(&format!("powers: resource {which} found at component {index} ({})", if kind == 1 { "client" } else { "server" }));
                 return Some((addr, b));
             }
         }
@@ -1131,7 +1207,8 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
         log("command ignored: invalid file");
         return;
     };
-    match cmd.cmd.as_str() {
+    let name = cmd.cmd.clone();
+    match name.as_str() {
         "heal" => {
             st.heal_once = true;
             log("command: heal");
@@ -1178,6 +1255,11 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
                 }
             });
             let _ = verify;
+        }
+        "item_stats" => {
+            if let Err(e) = std::thread::Builder::new().name("m182-item-stats".into()).spawn(move || run_item_stats(cmd)) {
+                log(&format!("item stats: could not start worker: {e}"));
+            }
         }
         other => log(&format!("command ignored: unknown command \"{other}\"")),
     }
@@ -1258,6 +1340,91 @@ fn key_down(vk: i32) -> bool {
     state as u16 & 0x8000 != 0
 }
 
+fn client_pair() -> Option<(usize, u32)> {
+    let m = CLIENT_MGR.load(Ordering::SeqCst);
+    let id = CLIENT_PLAYER_ID.load(Ordering::SeqCst);
+    if m == 0 || id == 0 || m == SERVER_MGR.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some((m, id))
+    }
+}
+
+fn find_gravity(manager: usize, id: u32) -> Option<usize> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    for slot in &slots {
+        if slot.stride != 20 {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, 20) else { continue };
+        if b.len() < 20 {
+            continue;
+        }
+        let (dx, dy, dz, value) = (f32_at(&b, 0), f32_at(&b, 4), f32_at(&b, 8), f32_at(&b, 12));
+        if dy < -0.5 && dx.abs() < 0.3 && dz.abs() < 0.3 && value > 0.5 && value < 400.0 && b[16] <= 1 {
+            return Some(slot.addr);
+        }
+    }
+    None
+}
+
+fn set_gravity(st: &mut PowerState, active: bool) {
+    let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
+    if let Some((m, id)) = client_pair() {
+        pairs.push((1, m, id));
+    }
+    for (kind, manager, id) in pairs {
+        if manager == 0 || id == 0 {
+            continue;
+        }
+        if st.gravity[kind].is_none() {
+            st.gravity[kind] = find_gravity(manager, id);
+            if st.gravity[kind].is_none() {
+                continue;
+            }
+        }
+        let Some(addr) = st.gravity[kind] else { continue };
+        if active {
+            write_bytes(addr + 16, &[st.gravity_saved[kind]]);
+        } else {
+            if let Some(b) = read_bytes(addr + 16, 1) {
+                if b.first() == Some(&1) {
+                    st.gravity_saved[kind] = 1;
+                }
+            }
+            write_bytes(addr + 16, &[0]);
+        }
+    }
+    if !active {
+        log("fly: gravity switched off");
+    }
+}
+
+fn near(a: &[u8], b: &[u8], tolerance: i64) -> bool {
+    (0..3).all(|i| (le_i64(a, i * 8) - le_i64(b, i * 8)).abs() < tolerance)
+}
+
+fn set_client_position(old: &[u8], pos: [Option<i64>; 3]) -> usize {
+    let Some((manager, id)) = client_pair() else { return 0 };
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return 0 };
+    let mut count = 0;
+    for slot in &slots {
+        if slot.stride < TRANSFORM_SIZE || slot.stride > 128 {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, 24) else { continue };
+        if b.len() >= 24 && near(&b, old, metres(3.0)) {
+            for (axis, value) in pos.iter().enumerate() {
+                if let Some(v) = value {
+                    write_bytes(slot.addr + axis * 8, &v.to_le_bytes());
+                }
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if tick % 10 == 0 {
         refresh_powers(st, dir);
@@ -1268,6 +1435,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if manager == 0 || id == 0 {
         return;
     }
+    let client = client_pair();
     let forced = POWER_FLY_FORCE.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or(false);
     if forced {
         st.powers.fly = true;
@@ -1275,43 +1443,89 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     if st.powers.god || protected || st.heal_once {
         refill_health(manager, id);
+        if let Some((m, c)) = client {
+            refill_health(m, c);
+        }
     }
     if st.heal_once {
         st.heal_once = false;
         refill_stamina(manager, id, &mut st.stamina_peak);
         refill_mana(manager, id, &mut st.mana_peak);
+        if let Some((m, c)) = client {
+            refill_stamina(m, c, &mut st.stamina_peak_c);
+            refill_mana(m, c, &mut st.mana_peak_c);
+        }
     }
     if st.powers.stamina {
         refill_stamina(manager, id, &mut st.stamina_peak);
         refill_mana(manager, id, &mut st.mana_peak);
+        if let Some((m, c)) = client {
+            refill_stamina(m, c, &mut st.stamina_peak_c);
+            refill_mana(m, c, &mut st.mana_peak_c);
+        }
     }
     if tick % 25 == 0 {
         apply_fog(st, manager, id);
     }
     if st.powers.fly {
+        if !st.gravity_off {
+            st.gravity_off = true;
+            set_gravity(st, false);
+            st.last_fly = None;
+            st.last_written = None;
+        }
         fly_step(st, manager, id);
+    } else if st.gravity_off {
+        st.gravity_off = false;
+        set_gravity(st, true);
+        st.last_written = None;
+        log("fly: gravity restored");
     }
 }
 
 pub fn fly_step(st: &mut PowerState, manager: usize, id: u32) {
     let Some(t) = player_transform() else { return };
-    let y = le_i64(&t, 8);
+    let now = Instant::now();
+    let dt = st.last_fly.map(|p| now.duration_since(p).as_secs_f64()).unwrap_or(0.001).clamp(0.0005, 0.05);
+    st.last_fly = Some(now);
+    let (x, y, z) = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
     let speed = st.powers.fly_speed.unwrap_or(12.0).clamp(1.0, 80.0) as f64;
-    let step = metres(speed * 0.02);
     let focus = game_has_focus();
     let mut target = st.hover.unwrap_or(y);
-    if y > target + metres(0.3) {
+    if y > target + metres(0.5) {
         target = y;
     }
+    let vertical = metres(speed.min(40.0) * dt);
     if focus && key_down(VK_SPACE) {
-        target = target.saturating_add(step);
+        target = target.saturating_add(vertical);
     }
     if focus && key_down(VK_LCONTROL) {
-        target = target.saturating_sub(step);
+        target = target.saturating_sub(vertical);
     }
     st.hover = Some(target);
-    if target != y {
-        set_player_position(manager, id, [None, Some(target), None]);
+
+    let (mut nx, mut nz) = (x, z);
+    if let Some((lx, _, lz)) = st.last_written {
+        let dx = (x - lx) as f64 / METERS;
+        let dz = (z - lz) as f64 / METERS;
+        let d = (dx * dx + dz * dz).sqrt();
+        let k = (speed / 7.0 - 1.0).clamp(0.0, 12.0);
+        if focus && k > 0.0 && d > 0.0 && d < 2.0 {
+            nx = x.saturating_add((dx * k * METERS) as i64);
+            nz = z.saturating_add((dz * k * METERS) as i64);
+        }
+    }
+    if nx != x || nz != z || target != y {
+        let pos = [Some(nx), Some(target), Some(nz)];
+        set_player_position(manager, id, pos);
+        let copies = set_client_position(&t, pos);
+        if !st.client_logged {
+            st.client_logged = true;
+            log(&format!("fly: client position copies updated = {copies}"));
+        }
+        st.last_written = Some((nx, target, nz));
+    } else {
+        st.last_written = Some((x, y, z));
     }
 }
 
@@ -1326,15 +1540,271 @@ pub fn new_power_state() -> PowerState {
         fog: None,
         fog_logged: false,
         heal_once: false,
+        stamina_peak_c: 0,
+        mana_peak_c: 0,
+        last_fly: None,
+        last_written: None,
+        gravity: [None, None],
+        gravity_saved: [1, 1],
+        gravity_off: false,
+        client_logged: false,
     }
+}
+
+
+pub fn patch_give(manager: usize, id: u32, g: &GiveSpec) -> bool {
+    let Some((_, _, slots)) = entity_layout(manager, id) else {
+        log(&format!("give: entity {id} not readable"));
+        return false;
+    };
+    for slot in &slots {
+        if slot.stride < 12 || slot.stride > 512 {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, slot.stride) else { continue };
+        let mut o = 0usize;
+        while o + 8 <= b.len() {
+            if u32_at(&b, o) == g.item {
+                let tiny = b[o + 4] as u32 == g.default_level && b[o + 5] as u32 == g.default_rarity && u16::from_le_bytes([b[o + 6], b[o + 7]]) == 1;
+                if tiny {
+                    let ok = write_bytes(slot.addr + o + 4, &[g.level as u8, g.rarity as u8])
+                        && write_bytes(slot.addr + o + 6, &(g.amount as u16).to_le_bytes());
+                    log(&format!(
+                        "give: item {} patched at component {} offset {} (level {} rarity {} amount {}) written={ok}",
+                        g.item, slot.index, o, g.level, g.rarity, g.amount
+                    ));
+                    return ok;
+                }
+                if o + 14 <= b.len()
+                    && b[o + 4] as u32 == g.default_level
+                    && u32_at(&b, o + 8) == g.default_rarity
+                    && u16::from_le_bytes([b[o + 12], b[o + 13]]) == 1
+                {
+                    let ok = write_bytes(slot.addr + o + 4, &[g.level as u8])
+                        && write_bytes(slot.addr + o + 8, &g.rarity.to_le_bytes())
+                        && write_bytes(slot.addr + o + 12, &(g.amount as u16).to_le_bytes());
+                    log(&format!(
+                        "give: item {} patched (wide rarity) at component {} offset {} written={ok}",
+                        g.item, slot.index, o
+                    ));
+                    return ok;
+                }
+                log(&format!(
+                    "give: item {} found in component {} offset {} but the following bytes are unexpected: {}",
+                    g.item,
+                    slot.index,
+                    o,
+                    hex(&b[o..(o + 24).min(b.len())])
+                ));
+            }
+            o += 4;
+        }
+    }
+    log(&format!("give: item {} not found in entity {id}; it keeps the default level, rarity and amount", g.item));
+    false
+}
+
+pub fn readable_regions() -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut addr = 0x10000usize;
+    for _ in 0..400_000 {
+        let mut info = MemInfo::default();
+        let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
+        if n == 0 {
+            break;
+        }
+        let end = info.base.saturating_add(info.size);
+        let low = info.protect & 0xff;
+        let readable = matches!(low, 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80);
+        if info.state == 0x1000 && readable && info.protect & 0x700 == 0 && info.size > 0 {
+            out.push((info.base, end));
+        }
+        if end <= addr || end >= 0x7fff_ffff_0000 {
+            break;
+        }
+        addr = end;
+    }
+    out
+}
+
+pub fn scan_regions(regions: &[(usize, usize)], pattern: &[u8], max_hits: usize) -> Vec<usize> {
+    let mut hits = Vec::new();
+    if pattern.len() < 4 {
+        return hits;
+    }
+    let first = [pattern[0], pattern[1], pattern[2], pattern[3]];
+    const CHUNK: usize = 4 << 20;
+    for &(start, end) in regions {
+        let mut at = start;
+        while at < end {
+            let len = (end - at).min(CHUNK + pattern.len());
+            let Some(b) = read_bytes(at, len) else {
+                at += CHUNK;
+                continue;
+            };
+            let mut i = 0usize;
+            while i + pattern.len() <= b.len() {
+                if b[i..i + 4] == first && &b[i..i + pattern.len()] == pattern {
+                    hits.push(at + i);
+                    if hits.len() >= max_hits {
+                        return hits;
+                    }
+                }
+                i += 4;
+            }
+            at += CHUNK;
+        }
+    }
+    hits
+}
+
+fn write_anywhere(addr: usize, data: &[u8]) -> bool {
+    if write_bytes(addr, data) {
+        return true;
+    }
+    let mut old = 0u32;
+    unsafe {
+        if VirtualProtect(addr as *mut c_void, data.len(), 0x04, &mut old) == 0 {
+            return false;
+        }
+    }
+    let ok = write_bytes(addr, data);
+    let mut tmp = 0u32;
+    unsafe {
+        VirtualProtect(addr as *mut c_void, data.len(), old, &mut tmp);
+    }
+    ok
+}
+
+pub fn read_window(base: usize, len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let step = 0x1000usize;
+    let mut at = 0usize;
+    while at < len {
+        match read_bytes(base + at, step) {
+            Some(b) if !b.is_empty() => {
+                let n = b.len();
+                out.extend_from_slice(&b);
+                if n < step {
+                    break;
+                }
+            }
+            _ => break,
+        }
+        at += step;
+    }
+    out
+}
+
+pub fn patch_item_stats(guid: &[u8; 16], item_id: u32, olds: &[Vec<u8>], new: &[u8], regions: &[(usize, usize)]) -> (usize, String) {
+    let hits = scan_regions(regions, guid, 64);
+    let mut patched = 0usize;
+    let mut notes = format!("{} guid hits", hits.len());
+    let mut seen: HashSet<usize> = HashSet::new();
+    for h in hits {
+        for back in [4usize, 8, 0] {
+            if h < back + 0x10000 {
+                continue;
+            }
+            let base = h - back;
+            if back != 0 {
+                let Some(w) = read_bytes(base, 4) else { continue };
+                if u32_at(&w, 0) != item_id {
+                    continue;
+                }
+            }
+            let window = read_window(base, 0x40000);
+            if window.len() < 64 {
+                continue;
+            }
+            'olds: for old in olds {
+                if old.is_empty() || old.len() != new.len() {
+                    continue;
+                }
+                let mut found: Vec<usize> = Vec::new();
+                let mut i = 0usize;
+                while i + old.len() <= window.len() {
+                    if window[i..i + old.len()] == old[..] {
+                        found.push(i);
+                    }
+                    i += 4;
+                }
+                if found.len() == 1 {
+                    let addr = base + found[0];
+                    if seen.insert(addr) {
+                        if write_anywhere(addr, new) {
+                            if let Some(check) = read_bytes(addr, new.len()) {
+                                if check == new {
+                                    patched += 1;
+                                }
+                            }
+                        }
+                    }
+                    break 'olds;
+                } else if found.len() > 1 {
+                    notes.push_str(&format!("; {} matches inside one struct, skipped", found.len()));
+                }
+            }
+            if patched > 0 {
+                break;
+            }
+        }
+    }
+    (patched, notes)
+}
+
+fn hex_to_bytes(text: &str) -> Vec<u8> {
+    let t = text.trim();
+    let mut out = Vec::with_capacity(t.len() / 2);
+    let b = t.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        match (char::from(b[i]).to_digit(16), char::from(b[i + 1]).to_digit(16)) {
+            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+            _ => return Vec::new(),
+        }
+        i += 2;
+    }
+    out
+}
+
+fn run_item_stats(cmd: Command) {
+    let label = cmd.label.clone().unwrap_or_default();
+    let Some(guid) = cmd.guid.as_deref().and_then(super::config::parse_guid) else {
+        log(&format!("item stats {label}: invalid guid"));
+        return;
+    };
+    let item_id = cmd.item_id.unwrap_or(0);
+    let new = hex_to_bytes(cmd.new.as_deref().unwrap_or(""));
+    let olds: Vec<Vec<u8>> = cmd.old.iter().map(|s| hex_to_bytes(s)).filter(|v| !v.is_empty()).collect();
+    if new.is_empty() || olds.is_empty() || item_id == 0 {
+        log(&format!("item stats {label}: missing data"));
+        return;
+    }
+    let started = Instant::now();
+    let regions = readable_regions();
+    let (count, notes) = patch_item_stats(&guid, item_id, &olds, &new, &regions);
+    log(&format!(
+        "item stats {label}: patched {count} copies ({notes}) in {} ms over {} regions",
+        started.elapsed().as_millis(),
+        regions.len()
+    ));
 }
 
 fn powers_loop() {
     let Ok(dir) = std::env::current_dir() else { return };
+    unsafe {
+        timeBeginPeriod(1);
+    }
     let mut st = new_power_state();
     let mut tick = 0u32;
     loop {
-        std::thread::sleep(Duration::from_millis(20));
+        let busy = st.powers.god
+            || st.powers.stamina
+            || st.powers.fly
+            || st.heal_once
+            || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
+        std::thread::sleep(Duration::from_millis(if busy { 1 } else { 25 }));
         tick = tick.wrapping_add(1);
         power_tick(&mut st, &dir, tick);
     }
