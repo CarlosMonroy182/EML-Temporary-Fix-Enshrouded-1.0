@@ -2,10 +2,13 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+
+use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use super::config::{LIVE, SPAWN};
+use super::config::{SpawnSettings, LIVE, SPAWN};
 use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
 
 #[link(name = "user32")]
@@ -89,22 +92,27 @@ fn game_has_focus() -> bool {
 }
 
 fn key_loop() {
-    let mut was_down = [false; 4];
+    let mut was_down = [false; 5];
+    let mut ticks = 0u32;
     let mut last_report = Instant::now();
     let mut last_pos: Option<(i64, i64, i64)> = None;
     loop {
         std::thread::sleep(Duration::from_millis(25));
         if !LIVE.spawner() {
-            was_down = [false; 4];
+            was_down = [false; 5];
             continue;
         }
+        ticks = ticks.wrapping_add(1);
+        if ticks % 8 == 0 {
+            poll_request();
+        }
         let keys = match SPAWN.lock() {
-            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key, s.watch_key],
+            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key, s.watch_key, 0x73],
             Err(_) => continue,
         };
         let focus = game_has_focus();
-        let mut down = [false; 4];
-        for i in 0..4 {
+        let mut down = [false; 5];
+        for i in 0..5 {
             down[i] = unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0 && focus;
         }
         if down[0] && !was_down[0] {
@@ -119,6 +127,9 @@ fn key_loop() {
             dump_entity("last spawned", SERVER_MGR.load(Ordering::SeqCst), LAST_SPAWNED.load(Ordering::SeqCst));
         }
         if down[3] && !was_down[3] {
+            census();
+        }
+        if down[4] && !was_down[4] {
             toggle_watch();
         }
         was_down = down;
@@ -367,6 +378,109 @@ fn start_stats(manager: usize, id: u32, health: u32, damage: f32) {
         .spawn(move || stats_worker(manager, id, health, damage))
     {
         log(&format!("stats: worker could not start: {e}"));
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Request {
+    template: String,
+    level: Option<u32>,
+    count: Option<u32>,
+    distance: Option<f32>,
+    health: Option<u32>,
+    damage: Option<f32>,
+}
+
+static REQUEST: Mutex<Option<SpawnSettings>> = Mutex::new(None);
+const REQUEST_FILE: &str = "m182_spawn.request";
+
+pub fn poll_request() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(REQUEST_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let Ok(req) = serde_json::from_str::<Request>(&text) else {
+        log("panel request ignored: invalid file");
+        return;
+    };
+    let mut s = match SPAWN.lock() {
+        Ok(s) => s.clone(),
+        Err(_) => return,
+    };
+    if !req.template.trim().is_empty() {
+        s.template = req.template.trim().to_string();
+    }
+    if let Some(v) = req.level {
+        s.level = v.min(1000);
+    }
+    if let Some(v) = req.count {
+        s.count = v.clamp(1, 20);
+    }
+    if let Some(v) = req.distance {
+        s.distance = v.clamp(1.0, 60.0);
+    }
+    if let Some(v) = req.health {
+        s.health = v.min(2_000_000_000);
+    }
+    if let Some(v) = req.damage {
+        s.damage = v.clamp(0.0, 1000.0);
+    }
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(s);
+    }
+    PENDING.store(1, Ordering::SeqCst);
+    log("spawn requested from the panel");
+}
+
+fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
+    if manager == 0 {
+        return None;
+    }
+    let head = read_bytes(manager + 0x148, 0x58)?;
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return None;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let bitmap = read_bytes(u64_at(&head, 8) as usize, words * 8)?;
+    let keys = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4)?;
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 {
+        return None;
+    }
+    let mut out = HashSet::new();
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 1 {
+            out.insert(u32_at(&keys, slot * 4));
+        }
+    }
+    Some(out)
+}
+
+static CENSUS: Mutex<Option<(HashSet<u32>, HashSet<u32>)>> = Mutex::new(None);
+
+pub fn census() {
+    let server = SERVER_MGR.load(Ordering::SeqCst);
+    let client = CLIENT_MGR.load(Ordering::SeqCst);
+    let now = (entity_ids(server).unwrap_or_default(), entity_ids(client).unwrap_or_default());
+    let Ok(mut saved) = CENSUS.lock() else { return };
+    let Some(before) = saved.take() else {
+        log(&format!("census saved: {} server and {} client entities. Do your action, then press the key again.", now.0.len(), now.1.len()));
+        *saved = Some(now);
+        return;
+    };
+    drop(saved);
+    for (label, manager, old, new) in [("server", server, &before.0, &now.0), ("client", client, &before.1, &now.1)] {
+        let mut added: Vec<u32> = new.difference(old).copied().collect();
+        let mut removed: Vec<u32> = old.difference(new).copied().collect();
+        added.sort_unstable();
+        removed.sort_unstable();
+        log(&format!("census {label}: {} new, {} removed", added.len(), removed.len()));
+        log(&format!("census {label} removed ids: {:?}", &removed[..removed.len().min(40)]));
+        log(&format!("census {label} new ids: {:?}", &added[..added.len().min(40)]));
+        for id in added.iter().take(12) {
+            dump_entity(&format!("census new {label}"), manager, *id);
+        }
     }
 }
 
@@ -625,9 +739,13 @@ fn write_u64(b: &mut [u8], off: usize, v: u64) {
 }
 
 fn spawn_now(manager: usize) {
-    let settings = match SPAWN.lock() {
-        Ok(s) => s.clone(),
-        Err(_) => return,
+    let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
+    let settings = match requested {
+        Some(s) => s,
+        None => match SPAWN.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => return,
+        },
     };
     let Some(template) = resolve_template(&settings.template) else {
         log(&format!("spawn skipped: \"{}\" is not a known enemy name or id", settings.template));

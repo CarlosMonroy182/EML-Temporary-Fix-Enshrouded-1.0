@@ -1,0 +1,18 @@
+[package]
+name = "m182_spawner_panel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "M182_Spawner"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = true
