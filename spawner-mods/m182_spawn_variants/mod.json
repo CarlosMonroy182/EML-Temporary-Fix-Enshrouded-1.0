@@ -1,0 +1,11 @@
+{
+    "id": "m182_spawn_variants",
+    "name": "M182 Spawn Variants",
+    "description": "Adds stronger copies of selected enemies for the M182 Creature Spawner and exports the enemy list.",
+    "version": "1.0.0",
+    "capabilities": ["patch", "export"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}
