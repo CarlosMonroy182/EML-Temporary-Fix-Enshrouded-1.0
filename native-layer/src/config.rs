@@ -25,6 +25,8 @@ pub struct NativeConfig {
     pub spawn_level: u32,
     pub spawn_count: u32,
     pub spawn_distance: f32,
+    pub dump_player_key: String,
+    pub dump_spawned_key: String,
 }
 
 impl Default for NativeConfig {
@@ -40,6 +42,8 @@ impl Default for NativeConfig {
             spawn_level: 20,
             spawn_count: 1,
             spawn_distance: 5.0,
+            dump_player_key: "F7".to_string(),
+            dump_spawned_key: "F6".to_string(),
         }
     }
 }
@@ -71,6 +75,8 @@ pub struct SpawnSettings {
     pub count: u32,
     pub distance: f32,
     pub key: i32,
+    pub dump_player_key: i32,
+    pub dump_spawned_key: i32,
 }
 
 pub static SPAWN: std::sync::Mutex<SpawnSettings> = std::sync::Mutex::new(SpawnSettings {
@@ -79,6 +85,8 @@ pub static SPAWN: std::sync::Mutex<SpawnSettings> = std::sync::Mutex::new(SpawnS
     count: 1,
     distance: 5.0,
     key: 0x77,
+    dump_player_key: 0x76,
+    dump_spawned_key: 0x75,
 });
 
 pub fn parse_guid(text: &str) -> Option<[u8; 16]> {
@@ -143,6 +151,12 @@ impl LiveState {
             s.template = cfg.spawn_template.trim().to_string();
             if let Some(k) = key {
                 s.key = k;
+            }
+            if let Some(k) = parse_key(&cfg.dump_player_key) {
+                s.dump_player_key = k;
+            }
+            if let Some(k) = parse_key(&cfg.dump_spawned_key) {
+                s.dump_spawned_key = k;
             }
             s.level = cfg.spawn_level;
             s.count = cfg.spawn_count.clamp(1, 20);
