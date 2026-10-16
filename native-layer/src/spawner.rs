@@ -141,6 +141,9 @@ fn key_loop() {
             if let Some(t) = player_transform() {
                 let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
                 if file_pos != Some(pos) {
+                    if let Some(prev) = file_pos {
+                        facing_update(prev, pos, &t);
+                    }
                     file_pos = Some(pos);
                     write_position(pos);
                 }
@@ -403,9 +406,16 @@ struct Request {
     health: Option<u32>,
     damage: Option<f32>,
     at: Option<[f64; 3]>,
+    object: Option<bool>,
+    forward: Option<bool>,
 }
 
 static REQUEST_AT: Mutex<Option<[f64; 3]>> = Mutex::new(None);
+static REQUEST_OBJECT: AtomicBool = AtomicBool::new(false);
+static REQUEST_FORWARD: AtomicBool = AtomicBool::new(false);
+static FACE_SCORES: Mutex<[f64; 4]> = Mutex::new([0.0; 4]);
+static FACE_SAMPLES: AtomicU32 = AtomicU32::new(0);
+static FACE_CHOSEN: AtomicU32 = AtomicU32::new(0);
 static REQUEST: Mutex<Option<SpawnSettings>> = Mutex::new(None);
 const REQUEST_FILE: &str = "m182_spawn.request";
 
@@ -443,11 +453,74 @@ pub fn poll_request() {
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some(s);
     }
+    REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
+    REQUEST_FORWARD.store(req.forward.unwrap_or(false), Ordering::SeqCst);
     if let Ok(mut r) = REQUEST_AT.lock() {
         *r = req.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
     }
     PENDING.store(1, Ordering::SeqCst);
     log("spawn requested from the panel");
+}
+
+const FACE_AXES: [[f64; 3]; 4] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]];
+const FACE_NAMES: [&str; 4] = ["+Z", "-Z", "+X", "-X"];
+
+fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+    let u = [q[0], q[1], q[2]];
+    let t = [
+        2.0 * (u[1] * v[2] - u[2] * v[1]),
+        2.0 * (u[2] * v[0] - u[0] * v[2]),
+        2.0 * (u[0] * v[1] - u[1] * v[0]),
+    ];
+    let c = [u[1] * t[2] - u[2] * t[1], u[2] * t[0] - u[0] * t[2], u[0] * t[1] - u[1] * t[0]];
+    [v[0] + q[3] * t[0] + c[0], v[1] + q[3] * t[1] + c[1], v[2] + q[3] * t[2] + c[2]]
+}
+
+fn quat_of(t: &[u8]) -> [f64; 4] {
+    let f = |o: usize| f32::from_le_bytes([t[o], t[o + 1], t[o + 2], t[o + 3]]) as f64;
+    [f(24), f(28), f(32), f(36)]
+}
+
+fn horizontal(v: [f64; 3]) -> Option<(f64, f64)> {
+    let len = (v[0] * v[0] + v[2] * v[2]).sqrt();
+    if len < 1.0e-3 || !len.is_finite() {
+        None
+    } else {
+        Some((v[0] / len, v[2] / len))
+    }
+}
+
+pub fn facing_update(prev: (i64, i64, i64), cur: (i64, i64, i64), transform: &[u8]) {
+    if transform.len() < TRANSFORM_SIZE {
+        return;
+    }
+    let dx = (cur.0 - prev.0) as f64 / METERS;
+    let dz = (cur.2 - prev.2) as f64 / METERS;
+    let dist = (dx * dx + dz * dz).sqrt();
+    if !(2.0..=40.0).contains(&dist) {
+        return;
+    }
+    let movement = (dx / dist, dz / dist);
+    let q = quat_of(transform);
+    let Ok(mut scores) = FACE_SCORES.lock() else { return };
+    for (i, axis) in FACE_AXES.iter().enumerate() {
+        if let Some(d) = horizontal(rotate(q, *axis)) {
+            scores[i] += d.0 * movement.0 + d.1 * movement.1;
+        }
+    }
+    let samples = FACE_SAMPLES.fetch_add(1, Ordering::SeqCst) + 1;
+    let best = (0..4).max_by(|a, b| scores[*a].partial_cmp(&scores[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
+    if samples >= 3 && FACE_CHOSEN.swap(best as u32, Ordering::SeqCst) != best as u32 {
+        log(&format!("facing axis {} (samples={samples})", FACE_NAMES[best]));
+    }
+}
+
+pub fn facing_direction(transform: &[u8]) -> (f64, f64) {
+    if transform.len() < TRANSFORM_SIZE {
+        return (0.0, 1.0);
+    }
+    let axis = FACE_AXES[(FACE_CHOSEN.load(Ordering::SeqCst) as usize).min(3)];
+    horizontal(rotate(quat_of(transform), axis)).unwrap_or((0.0, 1.0))
 }
 
 pub fn write_position(pos: (i64, i64, i64)) {
@@ -779,7 +852,7 @@ fn spawn_now(manager: usize) {
         },
     };
     let Some(template) = resolve_template(&settings.template) else {
-        log(&format!("spawn skipped: \"{}\" is not a known enemy name or id", settings.template));
+        log(&format!("spawn skipped: \"{}\" is not a known template name or id", settings.template));
         return;
     };
     let Some(t) = player_transform() else {
@@ -796,7 +869,15 @@ fn spawn_now(manager: usize) {
     if let Some(p) = at {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
     }
-    let radius = if at.is_some() && settings.count == 1 { 0.0 } else { settings.distance as f64 };
+    let object = REQUEST_OBJECT.swap(false, Ordering::SeqCst);
+    let forward = REQUEST_FORWARD.swap(false, Ordering::SeqCst) && at.is_none();
+    let mut radius = if at.is_some() && settings.count == 1 { 0.0 } else { settings.distance as f64 };
+    if forward {
+        let (fx, fz) = facing_direction(&t);
+        base.0 = base.0.wrapping_add((fx * settings.distance as f64 * METERS) as i64);
+        base.2 = base.2.wrapping_add((fz * settings.distance as f64 * METERS) as i64);
+        radius = if settings.count == 1 { 0.0 } else { (settings.distance as f64).min(4.0) };
+    }
     log(&format!(
         "spawning {} ({}) x{} level {} near x={:.2} y={:.2} z={:.2}",
         settings.template,
@@ -828,19 +909,21 @@ fn spawn_now(manager: usize) {
         write_u32(&mut entries.0, 0, HASH_CURRENT_TRANSFORM);
         write_u64(&mut entries.0, 8, transform.as_ptr() as u64);
         write_u64(&mut entries.0, 16, TRANSFORM_SIZE as u64);
-        write_u32(&mut entries.0, 24, HASH_OVERRIDE_LEVEL);
-        write_u64(&mut entries.0, 32, level.as_ptr() as u64);
-        write_u64(&mut entries.0, 40, 4);
+        if !object {
+            write_u32(&mut entries.0, 24, HASH_OVERRIDE_LEVEL);
+            write_u64(&mut entries.0, 32, level.as_ptr() as u64);
+            write_u64(&mut entries.0, 40, 4);
+        }
 
         let mut desc = Block([0u8; 0x100]);
         desc.0[4..20].copy_from_slice(&template);
         write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
-        write_u64(&mut desc.0, 0x20, 2);
+        write_u64(&mut desc.0, 0x20, if object { 1 } else { 2 });
 
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
         LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
-        if id != 0 {
+        if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
         }
     }
