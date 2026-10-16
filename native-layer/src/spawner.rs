@@ -18,6 +18,8 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
+    fn GetCurrentProcess() -> *mut c_void;
+    fn WriteProcessMemory(process: *mut c_void, addr: *mut c_void, buf: *const c_void, size: usize, written: *mut usize) -> i32;
 }
 
 const GUID_PLAYER: [u8; 16] = [0xd6, 0x66, 0xdb, 0xc3, 0xa5, 0x89, 0x6c, 0x4a, 0xa8, 0xe3, 0xd9, 0xa1, 0xf6, 0x00, 0x98, 0x12];
@@ -29,10 +31,15 @@ const TRANSFORM_SIZE: usize = 56;
 const COMPONENT_SLOTS: usize = 640;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
+const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
+const DAMAGE_SIGNATURE: u32 = 0xb866_36b9;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static SERVER_MGR: AtomicUsize = AtomicUsize::new(0);
 static PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+static CLIENT_MGR: AtomicUsize = AtomicUsize::new(0);
+static CLIENT_PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+static WATCHING: AtomicBool = AtomicBool::new(false);
 static TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
 static CALIBRATION_TRIES: AtomicU32 = AtomicU32::new(0);
 static CALIBRATION_DUMPS: AtomicU32 = AtomicU32::new(0);
@@ -82,22 +89,22 @@ fn game_has_focus() -> bool {
 }
 
 fn key_loop() {
-    let mut was_down = [false; 3];
+    let mut was_down = [false; 4];
     let mut last_report = Instant::now();
     let mut last_pos: Option<(i64, i64, i64)> = None;
     loop {
         std::thread::sleep(Duration::from_millis(25));
         if !LIVE.spawner() {
-            was_down = [false; 3];
+            was_down = [false; 4];
             continue;
         }
         let keys = match SPAWN.lock() {
-            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key],
+            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key, s.watch_key],
             Err(_) => continue,
         };
         let focus = game_has_focus();
-        let mut down = [false; 3];
-        for i in 0..3 {
+        let mut down = [false; 4];
+        for i in 0..4 {
             down[i] = unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0 && focus;
         }
         if down[0] && !was_down[0] {
@@ -105,10 +112,14 @@ fn key_loop() {
             log("spawn requested");
         }
         if down[1] && !was_down[1] {
-            dump_entity("player", PLAYER_ID.load(Ordering::SeqCst));
+            dump_entity("player (server)", SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst));
+            dump_entity("player (client)", CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst));
         }
         if down[2] && !was_down[2] {
-            dump_entity("last spawned", LAST_SPAWNED.load(Ordering::SeqCst));
+            dump_entity("last spawned", SERVER_MGR.load(Ordering::SeqCst), LAST_SPAWNED.load(Ordering::SeqCst));
+        }
+        if down[3] && !was_down[3] {
+            toggle_watch();
         }
         was_down = down;
 
@@ -133,31 +144,185 @@ fn key_loop() {
 static DUMP_COUNTER: AtomicU32 = AtomicU32::new(0);
 static LAST_SPAWNED: AtomicU32 = AtomicU32::new(0);
 
-pub fn dump_entity(label: &str, id: u32) {
-    let manager = SERVER_MGR.load(Ordering::SeqCst);
-    let n = DUMP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
-    if manager == 0 || id == 0 {
-        log(&format!("dump #{n} {label}: no entity available"));
-        return;
+struct Slot {
+    index: usize,
+    addr: usize,
+    stride: usize,
+}
+
+fn layout(p: &Placement) -> Option<Vec<Slot>> {
+    let tables = read_bytes(p.def, 0xf90)?;
+    if tables.len() < 0xf90 {
+        return None;
     }
-    let Some(record) = find_record(manager, id) else {
-        log(&format!("dump #{n} {label}: entity {id} not found"));
-        return;
-    };
-    let Some(p) = placement(record) else {
-        log(&format!("dump #{n} {label}: entity {id} layout unreadable"));
-        return;
-    };
-    log(&format!("dump #{n} {label} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+    let mut out = Vec::new();
     for index in 0..COMPONENT_SLOTS {
-        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        let word = u64_at(&tables, (index >> 6) * 8);
+        if (word >> (index & 63)) & 1 == 0 {
+            continue;
+        }
+        let offset = u16::from_le_bytes([tables[0x84 + index * 2], tables[0x85 + index * 2]]) as usize;
+        let stride = u16::from_le_bytes([tables[0xa84 + index * 2], tables[0xa85 + index * 2]]) as usize;
         if stride == 0 {
             continue;
         }
-        let bytes = read_bytes(addr, stride.min(192)).unwrap_or_default();
-        log(&format!("dump #{n} idx={index} size={stride} data={}", hex(&bytes)));
+        out.push(Slot { index, addr: p.chunk + offset + stride * p.slot, stride });
+    }
+    Some(out)
+}
+
+fn entity_layout(manager: usize, id: u32) -> Option<(usize, Placement, Vec<Slot>)> {
+    if manager == 0 || id == 0 {
+        return None;
+    }
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let slots = layout(&p)?;
+    Some((record, p, slots))
+}
+
+pub fn dump_entity(label: &str, manager: usize, id: u32) {
+    let n = DUMP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    let Some((record, p, slots)) = entity_layout(manager, id) else {
+        log(&format!("dump #{n} {label}: entity {id} not available"));
+        return;
+    };
+    log(&format!("dump #{n} {label} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+    for slot in &slots {
+        let bytes = read_bytes(slot.addr, slot.stride.min(1024)).unwrap_or_default();
+        log(&format!("dump #{n} idx={} size={} data={}", slot.index, slot.stride, hex(&bytes)));
     }
     log(&format!("dump #{n} end"));
+}
+
+fn snapshot(manager: usize, id: u32) -> Option<Vec<Option<Vec<u8>>>> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    let mut out: Vec<Option<Vec<u8>>> = vec![None; COMPONENT_SLOTS];
+    for slot in &slots {
+        out[slot.index] = read_bytes(slot.addr, slot.stride.min(1024));
+    }
+    Some(out)
+}
+
+fn toggle_watch() {
+    if WATCHING.swap(false, Ordering::SeqCst) {
+        log("watch stopped");
+        return;
+    }
+    WATCHING.store(true, Ordering::SeqCst);
+    if let Err(e) = std::thread::Builder::new().name("m182-spawner-watch".into()).spawn(watch_loop) {
+        WATCHING.store(false, Ordering::SeqCst);
+        log(&format!("watch could not start: {e}"));
+    }
+}
+
+fn watch_loop() {
+    let targets = || {
+        [
+            ("server", SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst)),
+            ("client", CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst)),
+        ]
+    };
+    log("watch started: measuring which components change on their own (3 seconds), then reporting the rest");
+
+    let mut noisy: Vec<Vec<u32>> = vec![vec![0; COMPONENT_SLOTS]; 2];
+    let mut previous: Vec<Option<Vec<Option<Vec<u8>>>>> = vec![None, None];
+    for _ in 0..150 {
+        if !WATCHING.load(Ordering::SeqCst) {
+            return;
+        }
+        for (t, (_, mgr, id)) in targets().iter().enumerate() {
+            let now = snapshot(*mgr, *id);
+            if let (Some(prev), Some(cur)) = (previous[t].as_ref(), now.as_ref()) {
+                for i in 0..COMPONENT_SLOTS {
+                    if prev[i] != cur[i] {
+                        noisy[t][i] += 1;
+                    }
+                }
+            }
+            previous[t] = now;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let skipped: usize = noisy.iter().map(|v| v.iter().filter(|c| **c >= 3).count()).sum();
+    log(&format!("watch ready: {skipped} constantly changing components ignored. Do your action now."));
+
+    let mut reported = 0u32;
+    while WATCHING.load(Ordering::SeqCst) && reported < 4000 {
+        for (t, (label, mgr, id)) in targets().iter().enumerate() {
+            let Some(cur) = snapshot(*mgr, *id) else { continue };
+            if let Some(prev) = previous[t].as_ref() {
+                for i in 0..COMPONENT_SLOTS {
+                    if noisy[t][i] >= 3 || prev[i] == cur[i] {
+                        continue;
+                    }
+                    let old = prev[i].as_ref().map(|b| hex(b)).unwrap_or_default();
+                    let new = cur[i].as_ref().map(|b| hex(b)).unwrap_or_default();
+                    log(&format!("watch {label} idx={i} old={old} new={new}"));
+                    reported += 1;
+                }
+            }
+            previous[t] = Some(cur);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    WATCHING.store(false, Ordering::SeqCst);
+    log("watch ended");
+}
+
+pub fn write_bytes(addr: usize, data: &[u8]) -> bool {
+    let mut written = 0usize;
+    let ok = unsafe { WriteProcessMemory(GetCurrentProcess(), addr as *mut c_void, data.as_ptr().cast(), data.len(), &mut written) };
+    ok != 0 && written == data.len()
+}
+
+pub fn apply_stats(manager: usize, id: u32, health: u32, damage: f32) {
+    if health == 0 && (damage - 1.0).abs() < 1e-6 {
+        return;
+    }
+    let Some((_, _, slots)) = entity_layout(manager, id) else {
+        log(&format!("stats: entity {id} not available"));
+        return;
+    };
+    for slot in &slots {
+        let Some(mut b) = read_bytes(slot.addr, slot.stride) else { continue };
+        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+            let before = u32_at(&b, 8);
+            for off in [8usize, 16, 36] {
+                b[off..off + 4].copy_from_slice(&health.to_le_bytes());
+            }
+            let ok = write_bytes(slot.addr, &b);
+            log(&format!("stats: health {before} -> {health} (idx {}, written={ok})", slot.index));
+        } else if slot.stride == 24 && (damage - 1.0).abs() >= 1e-6 && u32_at(&b, 0) == DAMAGE_SIGNATURE {
+            for off in [8usize, 12] {
+                let v = f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) * damage;
+                b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            let ok = write_bytes(slot.addr, &b);
+            log(&format!("stats: damage x{damage} (idx {}, written={ok})", slot.index));
+        }
+    }
+}
+
+fn verify_later(manager: usize, id: u32) {
+    let _ = std::thread::Builder::new().name("m182-spawner-verify".into()).spawn(move || {
+        for wait in [3u64, 8] {
+            std::thread::sleep(Duration::from_secs(wait));
+            let Some((_, _, slots)) = entity_layout(manager, id) else {
+                log(&format!("verify: entity {id} is gone"));
+                return;
+            };
+            for slot in &slots {
+                if slot.stride == 40 {
+                    if let Some(b) = read_bytes(slot.addr, 40) {
+                        if u32_at(&b, 0) == HEALTH_SIGNATURE {
+                            log(&format!("verify: entity {id} health now {} / {} / {}", u32_at(&b, 8), u32_at(&b, 16), u32_at(&b, 36)));
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn le_i64(b: &[u8], off: usize) -> i64 {
@@ -345,12 +510,18 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if settled && edx != 1 {
         return;
     }
-    if !is_server(manager) {
-        return;
-    }
+    let server = is_server(manager);
 
     let Some(head) = read_bytes(desc, 0x30) else { return };
     if head.len() < 0x30 {
+        return;
+    }
+    if !server {
+        if edx == 1 && head[4..20] == GUID_PLAYER {
+            CLIENT_MGR.store(manager, Ordering::SeqCst);
+            CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
+            log(&format!("client player entity id={ret} mgr={manager:#x}"));
+        }
         return;
     }
     if head[4..20] == GUID_PLAYER && edx == 1 {
@@ -470,5 +641,9 @@ fn spawn_now(manager: usize) {
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
         LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
+        if id != 0 {
+            apply_stats(manager, id, settings.health, settings.damage);
+            verify_later(manager, id);
+        }
     }
 }
