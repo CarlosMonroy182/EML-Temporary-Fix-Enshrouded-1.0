@@ -1,7 +1,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod emblems;
+mod map;
+mod powers;
 mod theme;
+mod wiki;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +25,10 @@ const DONATE_URL: &str = "https://www.paypal.me/MoradoGames";
 
 struct Entry {
     guid: String,
+    raw: String,
     label: String,
+    alias: Option<String>,
+    icon_file: Option<String>,
     group: String,
     boss: bool,
     search: String,
@@ -59,17 +65,19 @@ impl Catalog {
 }
 
 #[derive(Clone)]
-struct Place {
-    name: String,
-    x: f64,
-    y: f64,
-    z: f64,
+pub struct Place {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
 }
 
 #[derive(PartialEq, Clone, Copy)]
-enum Tab {
+pub enum Tab {
     Creatures,
     Objects,
+    Map,
+    Powers,
     Pvp,
     SafeZones,
     Teams,
@@ -83,7 +91,7 @@ enum Mode {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-enum Target {
+pub enum Target {
     Forward,
     Around,
     Place,
@@ -98,11 +106,13 @@ enum Status {
     Error(String),
 }
 
-struct App {
+pub struct App {
     dir: PathBuf,
     tab: Tab,
     creatures: Catalog,
     objects: Catalog,
+    powers: powers::PowersState,
+    map: map::MapState,
     level: u32,
     count: u32,
     distance: f32,
@@ -152,16 +162,22 @@ fn group_color(raw: &str) -> Color32 {
         "Skeleton" => Color32::from_rgb(206, 202, 188),
         "Vukah" => Color32::from_rgb(104, 188, 184),
         "WildBeast" => Color32::from_rgb(192, 154, 106),
-        "Contenedores" => Color32::from_rgb(214, 170, 78),
-        "Recogibles" => Color32::from_rgb(132, 200, 150),
-        "Recursos" => Color32::from_rgb(150, 190, 110),
-        "Construcción" => Color32::from_rgb(196, 160, 120),
-        "Luces" => Color32::from_rgb(240, 190, 90),
-        "Efectos" => Color32::from_rgb(170, 140, 214),
-        "Personajes" => Color32::from_rgb(132, 186, 204),
-        "Lugares" => Color32::from_rgb(214, 144, 98),
-        "Otros" => Color32::from_rgb(170, 160, 140),
-        _ => Color32::from_rgb(158, 190, 116),
+        other => {
+            const PALETTE: [[u8; 3]; 9] = [
+                [214, 170, 78],
+                [132, 200, 150],
+                [150, 190, 110],
+                [196, 160, 120],
+                [240, 190, 90],
+                [170, 140, 214],
+                [132, 186, 204],
+                [214, 144, 98],
+                [190, 170, 150],
+            ];
+            let hash = other.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+            let c = PALETTE[hash as usize % PALETTE.len()];
+            Color32::from_rgb(c[0], c[1], c[2])
+        }
     }
 }
 
@@ -200,29 +216,77 @@ fn is_internal(raw: &str) -> bool {
             .any(|w| n.contains(w))
 }
 
-fn object_group(name: &str, components: &str) -> &'static str {
+pub fn object_group(name: &str) -> &'static str {
     let n = name.to_lowercase();
-    let c = components.to_lowercase();
-    let any = |text: &str, words: &[&str]| words.iter().any(|w| text.contains(w));
-    if any(&n, &["chest", "container", "storage", "barrel", "loot"]) || any(&c, &["container", "inventory", "lootcontainer"]) {
-        "Contenedores"
-    } else if any(&n, &["pickup", "item_", "drop"]) || any(&c, &["pickup", "itemdrop", "droppeditem"]) {
-        "Recogibles"
-    } else if any(&n, &["tree", "ore", "rock", "stone", "plant", "herb", "mushroom", "bush", "flower", "resource", "harvest", "node"]) || any(&c, &["harvest", "resourcenode", "gather"]) {
-        "Recursos"
-    } else if any(&n, &["torch", "lamp", "light", "lantern", "campfire", "brazier", "fire"]) {
-        "Luces"
-    } else if any(&n, &["wall", "floor", "roof", "stair", "door", "window", "bed", "table", "chair", "furniture", "build", "fence", "bridge"]) {
-        "Construcción"
-    } else if any(&n, &["vfx", "particle", "effect", "fx_", "decal", "sound"]) || any(&c, &["particle", "vfx"]) {
-        "Efectos"
-    } else if any(&n, &["npc", "vendor", "trader", "villager", "merchant", "player"]) {
-        "Personajes"
-    } else if any(&n, &["altar", "shrine", "portal", "teleport", "waypoint", "flame", "ruin"]) {
-        "Lugares"
-    } else {
-        "Otros"
+    let mut parts = n.split('_');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next().unwrap_or("");
+    match first {
+        "lootpickup" => match second {
+            "material" => "Materiales",
+            "consumable" | "food" => "Consumibles",
+            "ammo" => "Munición",
+            "collections" => "Coleccionables",
+            "colorpalette" => "Tintes",
+            "equipment" => "Herramientas",
+            "gravity" | "farmyield" | "tall" | "productionyield" => "Plantas y cultivos",
+            "npc" => "Personajes",
+            _ => "Recogibles",
+        },
+        "lootchest" | "lootcontainer" => "Cofres y botín",
+        "loot" | "scatter" | "fognest" | "deco" | "flower" => "Recursos y naturaleza",
+        "t1" | "t2" | "t3" | "t4" | "t5" | "t6" | "t7" => "Plantas y cultivos",
+        "prop" | "props" => match second {
+            "furniture" | "deco" | "decoration" | "flowerpot" | "collection" | "castle" => "Muebles y decoración",
+            "destructible" => "Destructibles",
+            "npc" => "Personajes",
+            "logic" | "enemy" => "Interno",
+            _ => "Estructuras y props",
+        },
+        "buildings" | "door" | "animated" | "dungeons" | "climbingwall" | "hookshot" => "Estructuras y props",
+        "npc" => "Personajes",
+        "animal" | "fish" | "foodbait" => "Animales",
+        "trap" => "Trampas",
+        "vfx" | "explosion" | "projectile" | "attack" => "Efectos",
+        "visuals" => "Modelos de armas",
+        "waterdispenser" | "waterdrain" | "fishinglocation" | "shroud" => "Otros",
+        "enemy" | "hitable" => "Criaturas (usa la pestaña Criaturas)",
+        _ => "Interno",
     }
+}
+
+fn is_internal_object(name: &str, group: &str) -> bool {
+    let n = name.to_lowercase();
+    group == "Interno"
+        || group.starts_with("Criaturas")
+        || ["deprecated", "_old", "debug", "dummy", "do_not", "donot", "unused", "delete", "cheat", "_wip", "notfinished"].iter().any(|w| n.contains(w))
+}
+
+fn normalize_category(raw: &str) -> String {
+    match raw {
+        "Municion" => "Munición".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn apply_wiki(entries: &mut [Entry], wiki: &std::collections::HashMap<String, wiki::WikiEntry>, objects: bool) {
+    for e in entries.iter_mut() {
+        let Some(w) = wiki.get(&e.raw.to_lowercase()) else { continue };
+        e.alias = Some(w.name.clone());
+        if !w.file.is_empty() {
+            e.icon_file = Some(format!("wiki/{}", w.file));
+        }
+        if objects {
+            e.group = normalize_category(&w.category);
+            e.internal = false;
+        }
+        e.search = format!("{} {}", e.search, w.name.to_lowercase());
+    }
+    entries.sort_by(|a, b| {
+        let ka = a.alias.as_deref().unwrap_or(&a.label).to_lowercase();
+        let kb = b.alias.as_deref().unwrap_or(&b.label).to_lowercase();
+        ka.cmp(&kb)
+    });
 }
 
 fn find_game_dir() -> PathBuf {
@@ -257,9 +321,12 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
         let group = parts[2].trim().to_string();
         out.push(Entry {
             guid: parts[1].trim().to_string(),
+            raw: parts[0].to_string(),
             search: format!("{} {}", label, faction_label(&group)).to_lowercase(),
             kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
+            alias: None,
+            icon_file: None,
             label,
             group,
             boss: parts[3].trim() == "true",
@@ -282,13 +349,16 @@ fn load_objects(dir: &Path) -> Result<Vec<Entry>, String> {
         let mut parts = line.splitn(3, ',');
         let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
         let components = parts.next().unwrap_or("");
-        let group = object_group(name, components).to_string();
+        let group = object_group(name).to_string();
         let label = pretty(name);
         out.push(Entry {
             guid: guid.trim().to_string(),
-            search: format!("{} {}", label, group).to_lowercase(),
+            raw: name.to_string(),
+            search: format!("{} {} {}", label, name, group).to_lowercase(),
             kind: emblems::kind_of_object(name, &group),
-            internal: is_internal(name) || !components.contains("Transform"),
+            internal: is_internal_object(name, &group) || !components.contains("Transform"),
+            alias: None,
+            icon_file: None,
             label,
             group,
             boss: false,
@@ -309,7 +379,7 @@ fn read_config(dir: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn write_atomic(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
+pub fn write_atomic(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
     let tmp_path = dir.join(tmp);
     std::fs::write(&tmp_path, text).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp_path, dir.join(name)).map_err(|e| e.to_string())
@@ -336,13 +406,22 @@ fn load_places(dir: &Path) -> Vec<Place> {
         .collect()
 }
 
-fn load_icon(ctx: &egui::Context, dir: &Path, guid: &str) -> Option<TextureHandle> {
-    let path = dir.join("export").join("m182_icons").join(format!("{guid}.png"));
-    let bytes = std::fs::read(path).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
-    let size = [image.width() as usize, image.height() as usize];
-    let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-    Some(ctx.load_texture(format!("icon-{guid}"), color, egui::TextureOptions::LINEAR))
+fn load_icon(ctx: &egui::Context, dir: &Path, entry: &Entry) -> Option<TextureHandle> {
+    let base = dir.join("export").join("m182_icons");
+    let mut paths = Vec::new();
+    if let Some(file) = &entry.icon_file {
+        paths.push(base.join(file));
+    }
+    paths.push(base.join(format!("{}.png", entry.guid)));
+    for path in paths {
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(decoded) = image::load_from_memory(&bytes) else { continue };
+        let image = decoded.to_rgba8();
+        let size = [image.width() as usize, image.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        return Some(ctx.load_texture(format!("icon-{}", entry.guid), color, egui::TextureOptions::LINEAR));
+    }
+    None
 }
 
 fn group_label(mode: Mode, group: &str) -> String {
@@ -357,12 +436,19 @@ impl App {
         theme::install(&cc.egui_ctx);
         let dir = find_game_dir();
         let cfg = read_config(&dir);
+        let wiki_index = wiki::load(&dir);
         let creatures = match load_enemies(&dir) {
-            Ok(entries) => Catalog { entries, ..Default::default() },
+            Ok(mut entries) => {
+                apply_wiki(&mut entries, &wiki_index, false);
+                Catalog { entries, ..Default::default() }
+            }
             Err(e) => Catalog { error: Some(e), ..Default::default() },
         };
         let objects = match load_objects(&dir) {
-            Ok(entries) => Catalog { entries, ..Default::default() },
+            Ok(mut entries) => {
+                apply_wiki(&mut entries, &wiki_index, true);
+                Catalog { entries, ..Default::default() }
+            }
             Err(e) => Catalog { error: Some(e), ..Default::default() },
         };
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
@@ -376,6 +462,8 @@ impl App {
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
             Ok("objects") => Tab::Objects,
+            Ok("map") => Tab::Map,
+            Ok("powers") => Tab::Powers,
             _ => Tab::Creatures,
         };
         #[cfg(not(feature = "linux-preview"))]
@@ -385,6 +473,8 @@ impl App {
             tab: preview_tab,
             creatures,
             objects,
+            powers: powers::PowersState::load(&dir),
+            map: map::MapState::default(),
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
             distance: get_f("spawn_distance", 5.0).clamp(1.0, 60.0),
@@ -405,6 +495,11 @@ impl App {
             notice: String::new(),
             dir,
         };
+        #[cfg(feature = "linux-preview")]
+        if let Ok(q) = std::env::var("M182_PREVIEW_SEARCH") {
+            app.creatures.search = q.clone();
+            app.objects.search = q;
+        }
         #[cfg(feature = "linux-preview")]
         if std::env::var("M182_PREVIEW_SELECT").is_ok() {
             app.creatures.selected = Some(120.min(app.creatures.entries.len().saturating_sub(1)));
@@ -541,7 +636,9 @@ impl App {
         for (tab, label, soon) in [
             (Tab::Creatures, "Criaturas", false),
             (Tab::Objects, "Objetos", false),
+            (Tab::Map, "Mapa", false),
             (Tab::Places, "Lugares", false),
+            (Tab::Powers, "Poderes", false),
             (Tab::Pvp, "PvP", false),
             (Tab::SafeZones, "Zonas seguras", true),
             (Tab::Teams, "Equipos", true),
@@ -645,7 +742,7 @@ impl App {
             return response.clicked();
         }
         if !icons.contains_key(&e.guid) {
-            let loaded = load_icon(ui.ctx(), dir, &e.guid);
+            let loaded = load_icon(ui.ctx(), dir, e);
             icons.insert(e.guid.clone(), loaded);
         }
         let texture = icons.get(&e.guid).and_then(|t| t.clone());
@@ -669,11 +766,19 @@ impl App {
             None => emblems::draw(painter, icon.shrink(4.0), e.kind, group_color(&e.group), e.boss),
         }
         let text_left = icon.right() + 10.0;
-        let mut job = egui::text::LayoutJob::simple(e.label.clone(), egui::FontId::proportional(15.0), PARCHMENT, rect.right() - text_left - 8.0);
-        job.wrap.max_rows = 2;
+        let title = e.alias.clone().unwrap_or_else(|| e.label.clone());
+        let mut job = egui::text::LayoutJob::simple(title, egui::FontId::proportional(15.0), PARCHMENT, rect.right() - text_left - 8.0);
+        job.wrap.max_rows = if e.alias.is_some() { 1 } else { 2 };
         job.wrap.overflow_character = Some('…');
         let galley = painter.layout_job(job);
         painter.galley(egui::pos2(text_left, rect.top() + 7.0), galley, PARCHMENT);
+        if e.alias.is_some() {
+            let mut sub = egui::text::LayoutJob::simple(e.label.clone(), egui::FontId::proportional(11.5), MUTED, rect.right() - text_left - 8.0);
+            sub.wrap.max_rows = 1;
+            sub.wrap.overflow_character = Some('…');
+            let galley = painter.layout_job(sub);
+            painter.galley(egui::pos2(text_left, rect.top() + 27.0), galley, MUTED);
+        }
         painter.text(
             egui::pos2(text_left, rect.bottom() - 8.0),
             Align2::LEFT_BOTTOM,
@@ -706,7 +811,10 @@ impl App {
                         emblems::draw(painter, target, e.kind, group_color(&e.group), e.boss);
                     }
                 }
-                ui.label(RichText::new(&e.label).font(title_font(17.0)).color(PARCHMENT));
+                ui.label(RichText::new(e.alias.as_deref().unwrap_or(&e.label)).font(title_font(17.0)).color(PARCHMENT));
+                if e.alias.is_some() {
+                    ui.label(RichText::new(&e.label).color(MUTED).size(13.0));
+                }
                 ui.label(RichText::new(group_label(mode, &e.group)).color(group_color(&e.group)));
             }
             None => {
@@ -895,9 +1003,11 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| match self.tab {
             Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
             Tab::Objects => self.catalog_view(ui, Mode::Objects),
+            Tab::Map => self.map_tab(ui),
             tab => {
                 egui::Frame::none().inner_margin(egui::Margin::same(20.0)).show(ui, |ui| match tab {
                     Tab::Places => self.places_tab(ui),
+                    Tab::Powers => self.powers_tab(ui),
                     Tab::Pvp => self.pvp_tab(ui),
                     Tab::SafeZones => self.soon_tab(ui, "Zonas seguras", "Crea áreas donde nadie puede ser atacado ni saqueado."),
                     _ => self.soon_tab(ui, "Equipos", "Arma equipos de jugadores y define quién es aliado."),
@@ -925,6 +1035,9 @@ mod tests {
     fn entry(guid: &str, label: &str, group: &str, internal: bool) -> Entry {
         Entry {
             guid: guid.into(),
+            raw: label.into(),
+            alias: None,
+            icon_file: None,
             label: label.into(),
             group: group.into(),
             boss: false,
@@ -940,6 +1053,8 @@ mod tests {
             tab: Tab::Creatures,
             creatures: Catalog { entries, selected: Some(0), ..Default::default() },
             objects: Catalog::default(),
+            powers: Default::default(),
+            map: Default::default(),
             level: 30,
             count: 2,
             distance: 7.0,
@@ -997,19 +1112,86 @@ mod tests {
         let dir = temp_dir("obj");
         std::fs::write(
             dir.join("export").join("m182_objects.csv"),
-            "name,guid,components\nChest_Wood,22222222-2222-2222-2222-222222222222,CurrentTransform|Container\nRock_Big,33333333-3333-3333-3333-333333333333,CurrentTransform\nSomething,44444444-4444-4444-4444-444444444444,Health\nTorch_Wall,55555555-5555-5555-5555-555555555555,CurrentTransform|Light\n",
+            "name,guid,components\nLootChest_Random_Wood,22222222-2222-2222-2222-222222222222,CurrentTransform|Container\nLootPickup_Material_Amber,33333333-3333-3333-3333-333333333333,CurrentTransform\nSomething_Hidden,44444444-4444-4444-4444-444444444444,Health\nProp_Furniture_Table,55555555-5555-5555-5555-555555555555,CurrentTransform|Light\nBase_Logic_Trigger,66666666-6666-6666-6666-666666666666,CurrentTransform\n",
         )
         .unwrap();
-        let list = load_objects(&dir).unwrap();
-        assert_eq!(list.len(), 4);
+        std::fs::write(
+            dir.join("export").join("m182_wiki_index.csv"),
+            "template,wiki_name,category,file\nLootPickup_Material_Amber,Amber,Materiales,amber.png\n",
+        )
+        .unwrap();
+        let mut list = load_objects(&dir).unwrap();
+        assert_eq!(list.len(), 5);
+        apply_wiki(&mut list, &wiki::load(&dir), true);
         let mut cat = Catalog { entries: list, ..Default::default() };
         assert_eq!(cat.visible().len(), 3);
         cat.show_internal = true;
-        assert_eq!(cat.visible().len(), 4);
+        assert_eq!(cat.visible().len(), 5);
         cat.show_internal = false;
-        cat.group = "Contenedores".into();
+        cat.group = "Cofres y botín".into();
         assert_eq!(cat.visible().len(), 1);
-        assert_eq!(object_group("Torch_Wall", "CurrentTransform|Light"), "Luces");
+        cat.group = "Materiales".into();
+        let found = cat.visible();
+        assert_eq!(found.len(), 1);
+        assert_eq!(cat.entries[found[0]].alias.as_deref(), Some("Amber"));
+        assert_eq!(cat.entries[found[0]].icon_file.as_deref(), Some("wiki/amber.png"));
+        assert_eq!(object_group("Prop_Door_Small_Vukah"), "Estructuras y props");
+        assert_eq!(object_group("LootPickup_Consumable_Bandage01"), "Consumibles");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn real_object_catalog_groups() {
+        let path = std::path::Path::new("/mnt/user-data/uploads/Enshrouded");
+        if path.join("export/m182_objects.csv").exists() {
+            let list = load_objects(path).unwrap();
+            let visible = list.iter().filter(|e| !e.internal).count();
+            assert!(visible > 3000, "visible {visible}");
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for e in list.iter().filter(|e| !e.internal) {
+                *counts.entry(e.group.clone()).or_default() += 1;
+            }
+            let mut sorted: Vec<_> = counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("{sorted:?}");
+        }
+    }
+
+    #[test]
+    fn map_helpers() {
+        let cells = map::parse_trail("x,y,z\n100,50,200\n104,70,201\n900,10,900\nbad,line\n");
+        assert_eq!(cells.len(), 2);
+        let c = cells[&map::cell_of(100.0, 200.0)];
+        assert_eq!(c.1, 2);
+        assert!((c.0 - 60.0).abs() < 0.01);
+        assert_eq!(map::parse_coordinates("3722, 842, 1367"), Some([3722.0, 842.0, 1367.0]));
+        let two = map::parse_coordinates("X: -12.5  Z: 40").unwrap();
+        assert_eq!((two[0], two[2]), (-12.5, 40.0));
+        assert!(two[1].is_nan());
+        assert!(map::parse_coordinates("hola").is_none());
+        let mut state = map::MapState::default();
+        state.cells = cells;
+        assert!(state.height_near(110.0, 205.0).is_some());
+        assert!(state.height_near(5000.0, 5000.0).is_none());
+    }
+
+    #[test]
+    fn powers_files() {
+        let dir = temp_dir("pw");
+        let mut st = powers::PowersState::default();
+        st.god = true;
+        st.fly = true;
+        st.fly_speed = 20.0;
+        powers::save(&dir, &st).unwrap();
+        let back = powers::PowersState::load(&dir);
+        assert!(back.god && back.fly && !back.stamina && !back.reveal);
+        assert_eq!(back.fly_speed, 20.0);
+        powers::command(&dir, &powers::teleport_body([1.0, 2.0, 3.0], true)).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(powers::COMMAND_FILE)).unwrap()).unwrap();
+        assert_eq!(v["cmd"], "teleport");
+        assert_eq!(v["at"], json!([1.0, 2.0, 3.0]));
+        let unknown = powers::teleport_body([1.0, 2.0, 3.0], false);
+        assert!(unknown["at"][1].is_null());
         let _ = std::fs::remove_dir_all(dir);
     }
 
