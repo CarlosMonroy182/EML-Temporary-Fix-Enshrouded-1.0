@@ -36,6 +36,13 @@ const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
 const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
 const DAMAGE_SIGNATURE: u32 = 0xb866_36b9;
+const STAMINA_SIGNATURE: u32 = 0x04b6_aa8b;
+const MANA_SIGNATURE: u32 = 0x6aa2_574e;
+const POWERS_FILE: &str = "m182_powers.json";
+const COMMAND_FILE: &str = "m182_command.request";
+const TRAIL_FILE: &str = "m182_trail.csv";
+const VK_SPACE: i32 = 0x20;
+const VK_LCONTROL: i32 = 0xA2;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static SERVER_MGR: AtomicUsize = AtomicUsize::new(0);
@@ -76,6 +83,9 @@ pub fn start() {
     log("spawner enabled");
     if let Err(e) = std::thread::Builder::new().name("m182-spawner-keys".into()).spawn(key_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start hotkey thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-powers".into()).spawn(powers_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start powers thread");
     }
 }
 
@@ -146,6 +156,7 @@ fn key_loop() {
                     }
                     file_pos = Some(pos);
                     write_position(pos);
+                    record_trail(pos);
                 }
             }
         }
@@ -926,5 +937,405 @@ fn spawn_now(manager: usize) {
         if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct Powers {
+    god: bool,
+    stamina: bool,
+    fly: bool,
+    fly_speed: Option<f32>,
+    reveal_map: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Command {
+    cmd: String,
+    at: Option<[Option<f64>; 3]>,
+}
+
+struct PowerState {
+    powers: Powers,
+    mtime: Option<std::time::SystemTime>,
+    hover: Option<i64>,
+    protect_until: Option<Instant>,
+    stamina_peak: u32,
+    mana_peak: u32,
+    fog: Option<(usize, u32)>,
+    fog_logged: bool,
+    heal_once: bool,
+}
+
+static RES_INDEX: [AtomicI32; 3] = [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)];
+
+fn resource(manager: usize, id: u32, which: usize, signature: u32) -> Option<(usize, Vec<u8>)> {
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let cached = RES_INDEX[which].load(Ordering::Relaxed);
+    if cached >= 0 {
+        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+            if stride == 40 {
+                if let Some(b) = read_bytes(addr, 40) {
+                    if b.len() >= 40 && u32_at(&b, 0) == signature {
+                        return Some((addr, b));
+                    }
+                }
+            }
+        }
+    }
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != 40 {
+            continue;
+        }
+        if let Some(b) = read_bytes(addr, 40) {
+            if b.len() >= 40 && u32_at(&b, 0) == signature {
+                RES_INDEX[which].store(index as i32, Ordering::Relaxed);
+                log(&format!("powers: resource {which} found at component {index}"));
+                return Some((addr, b));
+            }
+        }
+    }
+    None
+}
+
+fn put_u32(addr: usize, value: u32) -> bool {
+    write_bytes(addr, &value.to_le_bytes())
+}
+
+pub fn refill_health(manager: usize, id: u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 0, HEALTH_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    let maximum = u32_at(&b, 36);
+    if maximum > 0 && current < maximum {
+        return put_u32(addr + 8, maximum);
+    }
+    true
+}
+
+pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 1, STAMINA_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    let limit = u32_at(&b, 32);
+    if current > *peak && current < 1_000_000 {
+        *peak = current;
+    }
+    let target = (*peak).max(limit);
+    if target > 0 && current < target {
+        put_u32(addr + 8, target);
+        put_u32(addr + 16, target);
+    }
+    true
+}
+
+pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 2, MANA_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    let limit = u32_at(&b, 32);
+    if current > *peak && current < 1_000_000 {
+        *peak = current;
+    }
+    let target = (*peak).max(limit);
+    if target > 0 && current < target {
+        put_u32(addr + 8, target);
+        put_u32(addr + 12, target);
+    }
+    true
+}
+
+fn transform_slots(manager: usize, id: u32, old: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some((_, p, slots)) = entity_layout(manager, id) else { return out };
+    let _ = p;
+    for slot in &slots {
+        if slot.stride >= TRANSFORM_SIZE && slot.stride <= 128 {
+            if let Some(b) = read_bytes(slot.addr, 24) {
+                if b.len() >= 24 && b[..24] == old[..24] {
+                    out.push(slot.addr);
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn set_player_position(manager: usize, id: u32, pos: [Option<i64>; 3]) -> bool {
+    if manager == 0 || id == 0 {
+        return false;
+    }
+    let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    if index < 0 {
+        return false;
+    }
+    let Some(record) = find_record(manager, id) else { return false };
+    let Some(p) = placement(record) else { return false };
+    let Some((main, stride)) = component_address(&p, index as usize) else { return false };
+    if stride != TRANSFORM_SIZE {
+        return false;
+    }
+    let Some(old) = read_bytes(main, TRANSFORM_SIZE) else { return false };
+    if old.len() < TRANSFORM_SIZE {
+        return false;
+    }
+    let addrs = transform_slots(manager, id, &old);
+    let mut ok = false;
+    for addr in addrs {
+        for (axis, value) in pos.iter().enumerate() {
+            if let Some(v) = value {
+                ok |= write_bytes(addr + axis * 8, &v.to_le_bytes());
+            }
+        }
+    }
+    ok
+}
+
+fn metres(v: f64) -> i64 {
+    (v * METERS) as i64
+}
+
+fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
+    let path = dir.join(POWERS_FILE);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if mtime == st.mtime {
+        return;
+    }
+    st.mtime = mtime;
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    match serde_json::from_str::<Powers>(&text) {
+        Ok(p) => {
+            if st.powers.fly && !p.fly {
+                st.protect_until = Some(Instant::now() + Duration::from_secs(8));
+                st.hover = None;
+            }
+            if st.powers.reveal_map != p.reveal_map {
+                st.fog_logged = false;
+            }
+            log(&format!(
+                "powers: god={} stamina={} fly={} reveal_map={}",
+                p.god, p.stamina, p.fly, p.reveal_map
+            ));
+            st.powers = p;
+        }
+        Err(e) => log(&format!("powers: invalid file ({e})")),
+    }
+}
+
+fn run_command(st: &mut PowerState, dir: &std::path::Path) {
+    let path = dir.join(COMMAND_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let Ok(cmd) = serde_json::from_str::<Command>(&text) else {
+        log("command ignored: invalid file");
+        return;
+    };
+    match cmd.cmd.as_str() {
+        "heal" => {
+            st.heal_once = true;
+            log("command: heal");
+        }
+        "teleport" => {
+            let manager = SERVER_MGR.load(Ordering::SeqCst);
+            let id = PLAYER_ID.load(Ordering::SeqCst);
+            let Some(at) = cmd.at else {
+                log("command teleport: missing destination");
+                return;
+            };
+            let finite = |v: Option<f64>| v.filter(|x| x.is_finite() && x.abs() < 1.0e6);
+            let (Some(x), Some(z)) = (finite(at[0]), finite(at[2])) else {
+                log("command teleport: invalid destination");
+                return;
+            };
+            let current_y = player_transform().map(|t| le_i64(&t, 8));
+            let y = match finite(at[1]) {
+                Some(y) => metres(y),
+                None => current_y.unwrap_or(0).saturating_add(metres(150.0)),
+            };
+            let height_known = finite(at[1]).is_some();
+            let ok = set_player_position(manager, id, [Some(metres(x)), Some(y), Some(metres(z))]);
+            log(&format!(
+                "command: teleport to x={x:.1} y={:.1} z={z:.1} (written={ok}, height_known={height_known})",
+                y as f64 / METERS
+            ));
+            if !height_known {
+                st.hover = Some(y);
+                if let Ok(mut p) = POWER_FLY_FORCE.lock() {
+                    *p = true;
+                }
+            }
+            st.protect_until = Some(Instant::now() + Duration::from_secs(10));
+            let verify = std::thread::Builder::new().name("m182-teleport-check".into()).spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                if let Some(t) = player_transform() {
+                    log(&format!(
+                        "teleport check: player now at x={:.1} y={:.1} z={:.1}",
+                        le_i64(&t, 0) as f64 / METERS,
+                        le_i64(&t, 8) as f64 / METERS,
+                        le_i64(&t, 16) as f64 / METERS
+                    ));
+                }
+            });
+            let _ = verify;
+        }
+        other => log(&format!("command ignored: unknown command \"{other}\"")),
+    }
+}
+
+static POWER_FLY_FORCE: Mutex<bool> = Mutex::new(false);
+
+fn apply_fog(st: &mut PowerState, manager: usize, id: u32) {
+    let want = st.powers.reveal_map;
+    if want == st.fog.is_some() {
+        return;
+    }
+    let Some(record) = find_record(manager, id) else { return };
+    let Some(p) = placement(record) else { return };
+    if want {
+        let mut found: Vec<(usize, u32)> = Vec::new();
+        for index in 0..COMPONENT_SLOTS {
+            let Some((addr, stride)) = component_address(&p, index) else { continue };
+            if stride != 4 {
+                continue;
+            }
+            if let Some(b) = read_bytes(addr, 4) {
+                if b.len() >= 4 {
+                    let v = u32_at(&b, 0);
+                    if (250..=1000).contains(&v) {
+                        found.push((addr, v));
+                        if !st.fog_logged {
+                            log(&format!("reveal map: candidate component {index} value {v}"));
+                        }
+                    }
+                }
+            }
+        }
+        st.fog_logged = true;
+        if found.len() == 1 {
+            let (addr, v) = found[0];
+            if put_u32(addr, 30000) {
+                st.fog = Some((addr, v));
+                log(&format!("reveal map: discovery range {v} -> 30000"));
+            }
+        } else if st.fog.is_none() {
+            log(&format!("reveal map: {} candidates, nothing changed", found.len()));
+            st.powers.reveal_map = false;
+        }
+    } else if let Some((addr, v)) = st.fog.take() {
+        put_u32(addr, v);
+        log(&format!("reveal map: discovery range restored to {v}"));
+    }
+}
+
+fn record_trail(pos: (i64, i64, i64)) {
+    static LAST: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+    let x = pos.0 as f64 / METERS;
+    let z = pos.2 as f64 / METERS;
+    let Ok(mut last) = LAST.lock() else { return };
+    if let Some((lx, lz)) = *last {
+        if ((x - lx).powi(2) + (z - lz).powi(2)).sqrt() < 6.0 {
+            return;
+        }
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(TRAIL_FILE);
+    if std::fs::metadata(&path).map(|m| m.len() > 8_000_000).unwrap_or(false) {
+        return;
+    }
+    let fresh = !path.exists();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if fresh {
+            let _ = writeln!(f, "x,y,z");
+        }
+        let _ = writeln!(f, "{:.0},{:.0},{:.0}", x, pos.1 as f64 / METERS, z);
+        *last = Some((x, z));
+    }
+}
+
+fn key_down(vk: i32) -> bool {
+    let state = unsafe { GetAsyncKeyState(vk) };
+    state as u16 & 0x8000 != 0
+}
+
+pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
+    if tick % 10 == 0 {
+        refresh_powers(st, dir);
+        run_command(st, dir);
+    }
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    let id = PLAYER_ID.load(Ordering::SeqCst);
+    if manager == 0 || id == 0 {
+        return;
+    }
+    let forced = POWER_FLY_FORCE.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or(false);
+    if forced {
+        st.powers.fly = true;
+    }
+    let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
+    if st.powers.god || protected || st.heal_once {
+        refill_health(manager, id);
+    }
+    if st.heal_once {
+        st.heal_once = false;
+        refill_stamina(manager, id, &mut st.stamina_peak);
+        refill_mana(manager, id, &mut st.mana_peak);
+    }
+    if st.powers.stamina {
+        refill_stamina(manager, id, &mut st.stamina_peak);
+        refill_mana(manager, id, &mut st.mana_peak);
+    }
+    if tick % 25 == 0 {
+        apply_fog(st, manager, id);
+    }
+    if st.powers.fly {
+        fly_step(st, manager, id);
+    }
+}
+
+pub fn fly_step(st: &mut PowerState, manager: usize, id: u32) {
+    let Some(t) = player_transform() else { return };
+    let y = le_i64(&t, 8);
+    let speed = st.powers.fly_speed.unwrap_or(12.0).clamp(1.0, 80.0) as f64;
+    let step = metres(speed * 0.02);
+    let focus = game_has_focus();
+    let mut target = st.hover.unwrap_or(y);
+    if y > target + metres(0.3) {
+        target = y;
+    }
+    if focus && key_down(VK_SPACE) {
+        target = target.saturating_add(step);
+    }
+    if focus && key_down(VK_LCONTROL) {
+        target = target.saturating_sub(step);
+    }
+    st.hover = Some(target);
+    if target != y {
+        set_player_position(manager, id, [None, Some(target), None]);
+    }
+}
+
+pub fn new_power_state() -> PowerState {
+    PowerState {
+        powers: Powers::default(),
+        mtime: None,
+        hover: None,
+        protect_until: None,
+        stamina_peak: 0,
+        mana_peak: 0,
+        fog: None,
+        fog_logged: false,
+        heal_once: false,
+    }
+}
+
+fn powers_loop() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    let mut st = new_power_state();
+    let mut tick = 0u32;
+    loop {
+        std::thread::sleep(Duration::from_millis(20));
+        tick = tick.wrapping_add(1);
+        power_tick(&mut st, &dir, tick);
     }
 }

@@ -22,13 +22,13 @@ pub enum Kind {
 pub fn kind_of_object(name: &str, group: &str) -> Kind {
     let n = name.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
-    if group == "Contenedores" || has(&["chest", "crate_loot", "barrel", "storage"]) {
+    if group == "Cofres y botín" || has(&["chest", "crate_loot", "barrel", "storage"]) {
         Kind::Chest
-    } else if has(&["tree", "bush", "plant", "herb", "flower", "mushroom", "grass", "wood", "log"]) {
+    } else if matches!(group, "Plantas y cultivos" | "Recursos y naturaleza") || has(&["tree", "bush", "plant", "herb", "flower", "mushroom", "grass", "wood", "log"]) {
         Kind::Tree
-    } else if has(&["ore", "crystal", "gem", "stone", "rock", "iron", "copper", "coal", "ruby", "amber", "salt"]) {
+    } else if matches!(group, "Materiales" | "Gemas") || has(&["ore", "crystal", "gem", "stone", "rock", "iron", "copper", "coal", "ruby", "amber", "salt"]) {
         Kind::Gem
-    } else if group == "Luces" || has(&["torch", "lamp", "light", "lantern", "campfire", "fire", "brazier"]) {
+    } else if has(&["torch", "lamp", "light", "lantern", "campfire", "fire", "brazier"]) {
         Kind::Torch
     } else {
         Kind::Crate
