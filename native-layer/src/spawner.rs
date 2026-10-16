@@ -96,6 +96,8 @@ fn key_loop() {
     let mut ticks = 0u32;
     let mut last_report = Instant::now();
     let mut last_pos: Option<(i64, i64, i64)> = None;
+    let mut file_pos: Option<(i64, i64, i64)> = None;
+    let mut last_file = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(25));
         if !LIVE.spawner() {
@@ -134,6 +136,16 @@ fn key_loop() {
         }
         was_down = down;
 
+        if last_file.elapsed() >= Duration::from_secs(1) {
+            last_file = Instant::now();
+            if let Some(t) = player_transform() {
+                let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+                if file_pos != Some(pos) {
+                    file_pos = Some(pos);
+                    write_position(pos);
+                }
+            }
+        }
         if last_report.elapsed() >= Duration::from_secs(4) {
             last_report = Instant::now();
             if let Some(t) = player_transform() {
@@ -390,8 +402,10 @@ struct Request {
     distance: Option<f32>,
     health: Option<u32>,
     damage: Option<f32>,
+    at: Option<[f64; 3]>,
 }
 
+static REQUEST_AT: Mutex<Option<[f64; 3]>> = Mutex::new(None);
 static REQUEST: Mutex<Option<SpawnSettings>> = Mutex::new(None);
 const REQUEST_FILE: &str = "m182_spawn.request";
 
@@ -429,8 +443,25 @@ pub fn poll_request() {
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some(s);
     }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = req.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
+    }
     PENDING.store(1, Ordering::SeqCst);
     log("spawn requested from the panel");
+}
+
+pub fn write_position(pos: (i64, i64, i64)) {
+    let Ok(dir) = std::env::current_dir() else { return };
+    let text = format!(
+        "{{\"x\":{:.2},\"y\":{:.2},\"z\":{:.2}}}",
+        pos.0 as f64 / METERS,
+        pos.1 as f64 / METERS,
+        pos.2 as f64 / METERS
+    );
+    let tmp = dir.join("m182_player.json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("m182_player.json"));
+    }
 }
 
 fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
@@ -760,7 +791,12 @@ fn spawn_now(manager: usize) {
         ));
         return;
     };
-    let base = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+    let at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
+    let mut base = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+    if let Some(p) = at {
+        base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
+    }
+    let radius = if at.is_some() && settings.count == 1 { 0.0 } else { settings.distance as f64 };
     log(&format!(
         "spawning {} ({}) x{} level {} near x={:.2} y={:.2} z={:.2}",
         settings.template,
@@ -774,8 +810,8 @@ fn spawn_now(manager: usize) {
 
     for k in 0..settings.count {
         let angle = std::f64::consts::TAU * k as f64 / settings.count as f64;
-        let dx = (settings.distance as f64 * angle.cos() * METERS) as i64;
-        let dz = (settings.distance as f64 * angle.sin() * METERS) as i64;
+        let dx = (radius * angle.cos() * METERS) as i64;
+        let dz = (radius * angle.sin() * METERS) as i64;
         let dy = (0.5 * METERS) as i64;
 
         let mut transform = [0u8; TRANSFORM_SIZE];
