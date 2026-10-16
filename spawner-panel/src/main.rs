@@ -18,7 +18,7 @@ const REQUEST_FILE: &str = "m182_spawn.request";
 const REQUEST_TMP: &str = "m182_spawn.request.tmp";
 const PLAYER_FILE: &str = "m182_player.json";
 const PLACES_FILE: &str = "m182_places.json";
-const DONATE_URL: &str = "";
+const DONATE_URL: &str = "https://www.paypal.me/MoradoGames";
 
 struct Entry {
     guid: String,
