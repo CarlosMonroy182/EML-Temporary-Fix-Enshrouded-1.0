@@ -276,53 +276,98 @@ pub fn write_bytes(addr: usize, data: &[u8]) -> bool {
     ok != 0 && written == data.len()
 }
 
-pub fn apply_stats(manager: usize, id: u32, health: u32, damage: f32) {
-    if health == 0 && (damage - 1.0).abs() < 1e-6 {
-        return;
-    }
-    let Some((_, _, slots)) = entity_layout(manager, id) else {
-        log(&format!("stats: entity {id} not available"));
-        return;
-    };
-    for slot in &slots {
-        let Some(mut b) = read_bytes(slot.addr, slot.stride) else { continue };
-        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE {
-            let before = u32_at(&b, 8);
-            for off in [8usize, 16, 36] {
-                b[off..off + 4].copy_from_slice(&health.to_le_bytes());
-            }
-            let ok = write_bytes(slot.addr, &b);
-            log(&format!("stats: health {before} -> {health} (idx {}, written={ok})", slot.index));
-        } else if slot.stride == 24 && (damage - 1.0).abs() >= 1e-6 && u32_at(&b, 0) == DAMAGE_SIGNATURE {
-            for off in [8usize, 12] {
-                let v = f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) * damage;
-                b[off..off + 4].copy_from_slice(&v.to_le_bytes());
-            }
-            let ok = write_bytes(slot.addr, &b);
-            log(&format!("stats: damage x{damage} (idx {}, written={ok})", slot.index));
-        }
-    }
+fn f32_at(b: &[u8], off: usize) -> f32 {
+    f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
-fn verify_later(manager: usize, id: u32) {
-    let _ = std::thread::Builder::new().name("m182-spawner-verify".into()).spawn(move || {
-        for wait in [3u64, 8] {
-            std::thread::sleep(Duration::from_secs(wait));
-            let Some((_, _, slots)) = entity_layout(manager, id) else {
-                log(&format!("verify: entity {id} is gone"));
-                return;
-            };
-            for slot in &slots {
-                if slot.stride == 40 {
-                    if let Some(b) = read_bytes(slot.addr, 40) {
-                        if u32_at(&b, 0) == HEALTH_SIGNATURE {
-                            log(&format!("verify: entity {id} health now {} / {} / {}", u32_at(&b, 8), u32_at(&b, 16), u32_at(&b, 36)));
-                        }
+fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Option<[f32; 2]>) -> bool {
+    let want_damage = (damage - 1.0).abs() >= 1e-6;
+    if health == 0 && !want_damage {
+        return true;
+    }
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    let mut health_done = health == 0;
+    let mut damage_done = !want_damage;
+    for slot in &slots {
+        let Some(mut b) = read_bytes(slot.addr, slot.stride) else { continue };
+        if b.len() < slot.stride {
+            continue;
+        }
+        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE && u32_at(&b, 8) != 0 {
+            let current = u32_at(&b, 8);
+            if current != health || u32_at(&b, 16) != health || u32_at(&b, 36) != health {
+                for off in [8usize, 16, 36] {
+                    b[off..off + 4].copy_from_slice(&health.to_le_bytes());
+                }
+                let ok = write_bytes(slot.addr, &b);
+                log(&format!("stats: entity {id} health {current} -> {health} (written={ok})"));
+            }
+            health_done = true;
+        } else if slot.stride == 24 && want_damage && u32_at(&b, 0) == DAMAGE_SIGNATURE && f32_at(&b, 8) > 0.0 {
+            let base = *orig.get_or_insert([f32_at(&b, 8), f32_at(&b, 12)]);
+            let target = [base[0] * damage, base[1] * damage];
+            if f32_at(&b, 8) != target[0] || f32_at(&b, 12) != target[1] {
+                b[8..12].copy_from_slice(&target[0].to_le_bytes());
+                b[12..16].copy_from_slice(&target[1].to_le_bytes());
+                let ok = write_bytes(slot.addr, &b);
+                log(&format!("stats: entity {id} damage {} -> {} (x{damage}, written={ok})", base[0], target[0]));
+            }
+            damage_done = true;
+        }
+    }
+    health_done && damage_done
+}
+
+pub fn apply_stats(manager: usize, id: u32, health: u32, damage: f32) -> bool {
+    let mut orig = None;
+    try_apply(manager, id, health, damage, &mut orig)
+}
+
+fn stats_worker(manager: usize, id: u32, health: u32, damage: f32) {
+    let mut orig = None;
+    let mut applied = false;
+    for _ in 0..200 {
+        if try_apply(manager, id, health, damage, &mut orig) {
+            applied = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !applied {
+        log(&format!("stats: entity {id} health/damage components never became ready"));
+        return;
+    }
+    for wait in [1u64, 2, 4, 8] {
+        std::thread::sleep(Duration::from_secs(wait));
+        if entity_layout(manager, id).is_none() {
+            log(&format!("stats: entity {id} is gone"));
+            return;
+        }
+        try_apply(manager, id, health, damage, &mut orig);
+    }
+    if let Some((_, _, slots)) = entity_layout(manager, id) {
+        for slot in &slots {
+            if slot.stride == 40 {
+                if let Some(b) = read_bytes(slot.addr, 40) {
+                    if b.len() >= 40 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+                        log(&format!("stats: entity {id} final health {} / {} / {}", u32_at(&b, 8), u32_at(&b, 16), u32_at(&b, 36)));
                     }
                 }
             }
         }
-    });
+    }
+}
+
+fn start_stats(manager: usize, id: u32, health: u32, damage: f32) {
+    if health == 0 && (damage - 1.0).abs() < 1e-6 {
+        return;
+    }
+    if let Err(e) = std::thread::Builder::new()
+        .name("m182-spawner-stats".into())
+        .spawn(move || stats_worker(manager, id, health, damage))
+    {
+        log(&format!("stats: worker could not start: {e}"));
+    }
 }
 
 fn le_i64(b: &[u8], off: usize) -> i64 {
@@ -642,8 +687,7 @@ fn spawn_now(manager: usize) {
         LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
         if id != 0 {
-            apply_stats(manager, id, settings.health, settings.damage);
-            verify_later(manager, id);
+            start_stats(manager, id, settings.health, settings.damage);
         }
     }
 }
