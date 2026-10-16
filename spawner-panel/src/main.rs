@@ -20,14 +20,42 @@ const PLAYER_FILE: &str = "m182_player.json";
 const PLACES_FILE: &str = "m182_places.json";
 const DONATE_URL: &str = "";
 
-struct Enemy {
+struct Entry {
     guid: String,
     label: String,
-    faction: String,
+    group: String,
     boss: bool,
     search: String,
     kind: emblems::Kind,
     internal: bool,
+}
+
+#[derive(Default)]
+struct Catalog {
+    entries: Vec<Entry>,
+    error: Option<String>,
+    selected: Option<usize>,
+    search: String,
+    group: String,
+    only_bosses: bool,
+    show_internal: bool,
+}
+
+impl Catalog {
+    fn visible(&self) -> Vec<usize> {
+        let query = self.search.trim().to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                (self.group.is_empty() || e.group == self.group)
+                    && (!self.only_bosses || e.boss)
+                    && (self.show_internal || !e.internal)
+                    && (query.is_empty() || e.search.contains(&query))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -49,8 +77,15 @@ enum Tab {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+enum Mode {
+    Creatures,
+    Objects,
+}
+
+#[derive(PartialEq, Clone, Copy)]
 enum Target {
-    Front,
+    Forward,
+    Around,
     Place,
     Coords,
 }
@@ -66,13 +101,8 @@ enum Status {
 struct App {
     dir: PathBuf,
     tab: Tab,
-    enemies: Vec<Enemy>,
-    load_error: Option<String>,
-    selected: Option<usize>,
-    search: String,
-    faction: String,
-    only_bosses: bool,
-    show_internal: bool,
+    creatures: Catalog,
+    objects: Catalog,
     level: u32,
     count: u32,
     distance: f32,
@@ -110,7 +140,7 @@ fn faction_label(raw: &str) -> &str {
     }
 }
 
-fn faction_color(raw: &str) -> Color32 {
+fn group_color(raw: &str) -> Color32 {
     match raw {
         "Ancients" => Color32::from_rgb(132, 186, 204),
         "Cyclops" => Color32::from_rgb(214, 144, 98),
@@ -122,6 +152,15 @@ fn faction_color(raw: &str) -> Color32 {
         "Skeleton" => Color32::from_rgb(206, 202, 188),
         "Vukah" => Color32::from_rgb(104, 188, 184),
         "WildBeast" => Color32::from_rgb(192, 154, 106),
+        "Contenedores" => Color32::from_rgb(214, 170, 78),
+        "Recogibles" => Color32::from_rgb(132, 200, 150),
+        "Recursos" => Color32::from_rgb(150, 190, 110),
+        "Construcción" => Color32::from_rgb(196, 160, 120),
+        "Luces" => Color32::from_rgb(240, 190, 90),
+        "Efectos" => Color32::from_rgb(170, 140, 214),
+        "Personajes" => Color32::from_rgb(132, 186, 204),
+        "Lugares" => Color32::from_rgb(214, 144, 98),
+        "Otros" => Color32::from_rgb(170, 160, 140),
         _ => Color32::from_rgb(158, 190, 116),
     }
 }
@@ -157,8 +196,33 @@ fn is_internal(raw: &str) -> bool {
     n.starts_with("base_")
         || ["collider", "projectilespawner", "togglestate", "hookpt"].iter().any(|w| n.contains(w))
         || ["sleep", "spawntube", "spawn_tube", "parent", "group", "channel", "organ", "quickattack", "quick_attack", "_add", "dummy", "debug", "trigger", "placeholder", "test"]
-        .iter()
-        .any(|w| n.contains(w))
+            .iter()
+            .any(|w| n.contains(w))
+}
+
+fn object_group(name: &str, components: &str) -> &'static str {
+    let n = name.to_lowercase();
+    let c = components.to_lowercase();
+    let any = |text: &str, words: &[&str]| words.iter().any(|w| text.contains(w));
+    if any(&n, &["chest", "container", "storage", "barrel", "loot"]) || any(&c, &["container", "inventory", "lootcontainer"]) {
+        "Contenedores"
+    } else if any(&n, &["pickup", "item_", "drop"]) || any(&c, &["pickup", "itemdrop", "droppeditem"]) {
+        "Recogibles"
+    } else if any(&n, &["tree", "ore", "rock", "stone", "plant", "herb", "mushroom", "bush", "flower", "resource", "harvest", "node"]) || any(&c, &["harvest", "resourcenode", "gather"]) {
+        "Recursos"
+    } else if any(&n, &["torch", "lamp", "light", "lantern", "campfire", "brazier", "fire"]) {
+        "Luces"
+    } else if any(&n, &["wall", "floor", "roof", "stair", "door", "window", "bed", "table", "chair", "furniture", "build", "fence", "bridge"]) {
+        "Construcción"
+    } else if any(&n, &["vfx", "particle", "effect", "fx_", "decal", "sound"]) || any(&c, &["particle", "vfx"]) {
+        "Efectos"
+    } else if any(&n, &["npc", "vendor", "trader", "villager", "merchant", "player"]) {
+        "Personajes"
+    } else if any(&n, &["altar", "shrine", "portal", "teleport", "waypoint", "flame", "ruin"]) {
+        "Lugares"
+    } else {
+        "Otros"
+    }
 }
 
 fn find_game_dir() -> PathBuf {
@@ -175,7 +239,7 @@ fn find_game_dir() -> PathBuf {
     PathBuf::from(FALLBACK_GAME_DIR)
 }
 
-fn load_enemies(dir: &Path) -> Result<Vec<Enemy>, String> {
+fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
     let path = dir.join("export").join("m182_enemies.csv");
     let text = std::fs::read_to_string(&path).map_err(|_| {
         format!(
@@ -190,19 +254,49 @@ fn load_enemies(dir: &Path) -> Result<Vec<Enemy>, String> {
             continue;
         }
         let label = pretty(parts[0]);
-        out.push(Enemy {
+        let group = parts[2].trim().to_string();
+        out.push(Entry {
             guid: parts[1].trim().to_string(),
-            search: format!("{} {}", label, faction_label(parts[2])).to_lowercase(),
+            search: format!("{} {}", label, faction_label(&group)).to_lowercase(),
+            kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
-            kind: emblems::kind_of(parts[0], parts[2].trim()),
             label,
-            faction: parts[2].trim().to_string(),
+            group,
             boss: parts[3].trim() == "true",
         });
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     if out.is_empty() {
         return Err("La lista de enemigos está vacía.".to_string());
+    }
+    Ok(out)
+}
+
+fn load_objects(dir: &Path) -> Result<Vec<Entry>, String> {
+    let path = dir.join("export").join("m182_objects.csv");
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        "La lista de objetos aún no existe. Cierra el juego, ábrelo una vez con el mod m182_spawn_variants actualizado y vuelve a abrir este panel.".to_string()
+    })?;
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let mut parts = line.splitn(3, ',');
+        let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
+        let components = parts.next().unwrap_or("");
+        let group = object_group(name, components).to_string();
+        let label = pretty(name);
+        out.push(Entry {
+            guid: guid.trim().to_string(),
+            search: format!("{} {}", label, group).to_lowercase(),
+            kind: emblems::kind_of_object(name, &group),
+            internal: is_internal(name) || !components.contains("Transform"),
+            label,
+            group,
+            boss: false,
+        });
+    }
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    if out.is_empty() {
+        return Err("La lista de objetos está vacía.".to_string());
     }
     Ok(out)
 }
@@ -251,14 +345,25 @@ fn load_icon(ctx: &egui::Context, dir: &Path, guid: &str) -> Option<TextureHandl
     Some(ctx.load_texture(format!("icon-{guid}"), color, egui::TextureOptions::LINEAR))
 }
 
+fn group_label(mode: Mode, group: &str) -> String {
+    match mode {
+        Mode::Creatures => faction_label(group).to_string(),
+        Mode::Objects => group.to_string(),
+    }
+}
+
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         let dir = find_game_dir();
         let cfg = read_config(&dir);
-        let (enemies, load_error) = match load_enemies(&dir) {
-            Ok(list) => (list, None),
-            Err(e) => (Vec::new(), Some(e)),
+        let creatures = match load_enemies(&dir) {
+            Ok(entries) => Catalog { entries, ..Default::default() },
+            Err(e) => Catalog { error: Some(e), ..Default::default() },
+        };
+        let objects = match load_objects(&dir) {
+            Ok(entries) => Catalog { entries, ..Default::default() },
+            Err(e) => Catalog { error: Some(e), ..Default::default() },
         };
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
         let get_f = |key: &str, default: f32| cfg.get(key).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(default);
@@ -270,19 +375,16 @@ impl App {
             Ok("places") => Tab::Places,
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
+            Ok("objects") => Tab::Objects,
             _ => Tab::Creatures,
         };
         #[cfg(not(feature = "linux-preview"))]
         let preview_tab = Tab::Creatures;
-        Self {
+        #[allow(unused_mut)]
+        let mut app = Self {
             tab: preview_tab,
-            enemies,
-            load_error,
-            selected: if cfg!(feature = "linux-preview") && std::env::var("M182_PREVIEW_SELECT").is_ok() { Some(120) } else { None },
-            search: String::new(),
-            faction: String::new(),
-            only_bosses: false,
-            show_internal: false,
+            creatures,
+            objects,
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
             distance: get_f("spawn_distance", 5.0).clamp(1.0, 60.0),
@@ -291,7 +393,7 @@ impl App {
             damage: get_f("spawn_damage", 1.0).clamp(0.0, 20.0),
             pvp: get_b("pvp"),
             pvp_friends: get_b("pvp_friend_checks"),
-            target: Target::Front,
+            target: Target::Forward,
             place_index: 0,
             coords: [0.0; 3],
             player: read_player(&dir),
@@ -302,7 +404,18 @@ impl App {
             status: Status::Idle,
             notice: String::new(),
             dir,
+        };
+        #[cfg(feature = "linux-preview")]
+        if std::env::var("M182_PREVIEW_SELECT").is_ok() {
+            app.creatures.selected = Some(120.min(app.creatures.entries.len().saturating_sub(1)));
+            app.objects.selected = Some(30.min(app.objects.entries.len().saturating_sub(1)));
         }
+        app.cleanup_stale_request();
+        app
+    }
+
+    fn cleanup_stale_request(&self) {
+        let _ = std::fs::remove_file(self.dir.join(REQUEST_FILE));
     }
 
     fn effective_health(&self) -> u32 {
@@ -310,6 +423,13 @@ impl App {
             self.health
         } else {
             0
+        }
+    }
+
+    fn catalog(&self, mode: Mode) -> &Catalog {
+        match mode {
+            Mode::Creatures => &self.creatures,
+            Mode::Objects => &self.objects,
         }
     }
 
@@ -332,38 +452,48 @@ impl App {
 
     fn target_point(&self) -> Option<[f64; 3]> {
         match self.target {
-            Target::Front => None,
+            Target::Forward | Target::Around => None,
             Target::Place => self.places.get(self.place_index).map(|p| [p.x, p.y, p.z]),
             Target::Coords => Some(self.coords),
         }
     }
 
-    fn spawn(&mut self) {
-        let Some(index) = self.selected else { return };
-        let guid = self.enemies[index].guid.clone();
+    fn spawn(&mut self, mode: Mode) {
+        let Some(index) = self.catalog(mode).selected else { return };
+        let guid = self.catalog(mode).entries[index].guid.clone();
         let at = self.target_point();
-        if self.target != Target::Front && at.is_none() {
+        if matches!(self.target, Target::Place) && at.is_none() {
             self.status = Status::Error("Elige un lugar guardado.".to_string());
             return;
         }
-        let saved = self.set_config(&[
-            ("spawn_template", json!(guid)),
-            ("spawn_level", json!(self.level)),
-            ("spawn_count", json!(self.count)),
-            ("spawn_distance", json!(self.distance)),
-            ("spawn_health", json!(self.effective_health())),
-            ("spawn_damage", json!(self.damage)),
-            ("spawner", json!(true)),
-        ]);
+        let saved = match mode {
+            Mode::Creatures => self.set_config(&[
+                ("spawn_template", json!(guid)),
+                ("spawn_level", json!(self.level)),
+                ("spawn_count", json!(self.count)),
+                ("spawn_distance", json!(self.distance)),
+                ("spawn_health", json!(self.effective_health())),
+                ("spawn_damage", json!(self.damage)),
+                ("spawner", json!(true)),
+            ]),
+            Mode::Objects => Ok(()),
+        };
         let result = saved.and_then(|_| {
             let mut request = json!({
                 "template": guid,
-                "level": self.level,
                 "count": self.count,
                 "distance": self.distance,
-                "health": self.effective_health(),
-                "damage": self.damage,
             });
+            if mode == Mode::Creatures {
+                request["level"] = json!(self.level);
+                request["health"] = json!(self.effective_health());
+                request["damage"] = json!(self.damage);
+            } else {
+                request["object"] = json!(true);
+            }
+            if self.target == Target::Forward {
+                request["forward"] = json!(true);
+            }
             if let Some(p) = at {
                 request["at"] = json!(p);
             }
@@ -392,21 +522,6 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(700));
     }
 
-    fn visible(&self) -> Vec<usize> {
-        let query = self.search.trim().to_lowercase();
-        self.enemies
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                (self.faction.is_empty() || e.faction == self.faction)
-                    && (!self.only_bosses || e.boss)
-                    && (self.show_internal || !e.internal)
-                    && (query.is_empty() || e.search.contains(&query))
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -425,9 +540,9 @@ impl App {
         ui.add_space(6.0);
         for (tab, label, soon) in [
             (Tab::Creatures, "Criaturas", false),
+            (Tab::Objects, "Objetos", false),
             (Tab::Places, "Lugares", false),
             (Tab::Pvp, "PvP", false),
-            (Tab::Objects, "Objetos", true),
             (Tab::SafeZones, "Zonas seguras", true),
             (Tab::Teams, "Equipos", true),
         ] {
@@ -463,72 +578,77 @@ impl App {
         }
     }
 
-    fn creatures(&mut self, ui: &mut egui::Ui) {
-        egui::SidePanel::right("creature_controls")
+    fn catalog_view(&mut self, ui: &mut egui::Ui, mode: Mode) {
+        egui::SidePanel::right(if mode == Mode::Creatures { "creature_controls" } else { "object_controls" })
             .exact_width(320.0)
             .frame(egui::Frame::none().fill(LEATHER).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0_f32, BRONZE)))
-            .show_inside(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.creature_controls(ui)));
+            .show_inside(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, mode)));
 
         egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 8.0 })).show_inside(ui, |ui| {
-            if let Some(error) = &self.load_error {
+            let App { creatures, objects, icons, dir, .. } = self;
+            let cat = if mode == Mode::Creatures { creatures } else { objects };
+            if let Some(error) = &cat.error {
                 ui.label(RichText::new(error).color(BAD));
                 return;
             }
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Buscar criatura…").desired_width(240.0));
-                let mut factions: Vec<&str> = self.enemies.iter().map(|e| e.faction.as_str()).collect();
-                factions.sort_unstable();
-                factions.dedup();
-                let current = if self.faction.is_empty() { "Todas las facciones".to_string() } else { faction_label(&self.faction).to_string() };
-                egui::ComboBox::from_id_salt("faction").selected_text(current).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.faction, String::new(), "Todas las facciones");
-                    for f in factions {
-                        ui.selectable_value(&mut self.faction, f.to_string(), faction_label(f));
+                ui.add(egui::TextEdit::singleline(&mut cat.search).hint_text("Buscar…").desired_width(240.0));
+                let mut groups: Vec<String> = cat.entries.iter().map(|e| e.group.clone()).collect();
+                groups.sort_unstable();
+                groups.dedup();
+                let all = if mode == Mode::Creatures { "Todas las facciones" } else { "Todas las categorías" };
+                let current = if cat.group.is_empty() { all.to_string() } else { group_label(mode, &cat.group) };
+                egui::ComboBox::from_id_salt(("group", mode == Mode::Creatures)).selected_text(current).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut cat.group, String::new(), all);
+                    for g in groups {
+                        let text = group_label(mode, &g);
+                        ui.selectable_value(&mut cat.group, g, text);
                     }
                 });
-                ui.checkbox(&mut self.only_bosses, "Solo jefes");
-                ui.checkbox(&mut self.show_internal, "Mostrar entradas internas");
+                if mode == Mode::Creatures {
+                    ui.checkbox(&mut cat.only_bosses, "Solo jefes");
+                }
+                ui.checkbox(&mut cat.show_internal, "Mostrar entradas internas");
             });
-            let visible = self.visible();
-            ui.label(RichText::new(format!("{} criaturas", visible.len())).color(MUTED));
-            self.grid(ui, &visible);
+            let visible = cat.visible();
+            ui.label(RichText::new(format!("{} {}", visible.len(), if mode == Mode::Creatures { "criaturas" } else { "objetos" })).color(MUTED));
+            Self::grid(ui, cat, icons, dir, &visible, mode);
         });
     }
 
-    fn grid(&mut self, ui: &mut egui::Ui, visible: &[usize]) {
+    fn grid(ui: &mut egui::Ui, cat: &mut Catalog, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, visible: &[usize], mode: Mode) {
         let spacing = 10.0;
         let min_card = 200.0;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let width = ui.available_width();
-            let cols = (((width + spacing) / (min_card + spacing)).floor() as usize).max(1);
-            let card_w = (width - spacing * (cols as f32 - 1.0)) / cols as f32 - 2.0;
+        let card_h = 70.0;
+        let width = ui.available_width() - 14.0;
+        let cols = (((width + spacing) / (min_card + spacing)).floor() as usize).max(1);
+        let card_w = (width - spacing * (cols as f32 - 1.0)) / cols as f32 - 2.0;
+        let rows = visible.len().div_ceil(cols);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, card_h, rows, |ui, range| {
             ui.spacing_mut().item_spacing = Vec2::new(spacing, spacing);
-            for row in visible.chunks(cols) {
+            for row in range {
                 ui.horizontal(|ui| {
-                    for &i in row {
-                        self.card(ui, i, card_w);
+                    for &i in visible.iter().skip(row * cols).take(cols) {
+                        let selected = cat.selected == Some(i);
+                        if Self::card(ui, icons, dir, &cat.entries[i], selected, card_w, mode) {
+                            cat.selected = Some(i);
+                        }
                     }
                 });
             }
         });
     }
 
-    fn card(&mut self, ui: &mut egui::Ui, index: usize, width: f32) {
+    fn card(ui: &mut egui::Ui, icons: &mut HashMap<String, Option<TextureHandle>>, dir: &Path, e: &Entry, selected: bool, width: f32, mode: Mode) -> bool {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 70.0), Sense::click());
         if !ui.is_rect_visible(rect) {
-            if response.clicked() {
-                self.selected = Some(index);
-            }
-            return;
+            return response.clicked();
         }
-        let guid = self.enemies[index].guid.clone();
-        if !self.icons.contains_key(&guid) {
-            let loaded = load_icon(ui.ctx(), &self.dir, &guid);
-            self.icons.insert(guid.clone(), loaded);
+        if !icons.contains_key(&e.guid) {
+            let loaded = load_icon(ui.ctx(), dir, &e.guid);
+            icons.insert(e.guid.clone(), loaded);
         }
-        let texture = self.icons.get(&guid).and_then(|t| t.clone());
-        let selected = self.selected == Some(index);
-        let e = &self.enemies[index];
+        let texture = icons.get(&e.guid).and_then(|t| t.clone());
         let fill = if selected {
             CARD_SELECTED
         } else if response.hovered() {
@@ -544,14 +664,9 @@ impl App {
         painter.rect_stroke(icon, Rounding::same(4.0), Stroke::new(1.0_f32, GOLD_DIM));
         match texture {
             Some(texture) => {
-                painter.image(
-                    texture.id(),
-                    icon.shrink(2.0),
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                painter.image(texture.id(), icon.shrink(2.0), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
-            None => emblems::draw(painter, icon.shrink(4.0), e.kind, faction_color(&e.faction), e.boss),
+            None => emblems::draw(painter, icon.shrink(4.0), e.kind, group_color(&e.group), e.boss),
         }
         let text_left = icon.right() + 10.0;
         let mut job = egui::text::LayoutJob::simple(e.label.clone(), egui::FontId::proportional(15.0), PARCHMENT, rect.right() - text_left - 8.0);
@@ -562,22 +677,20 @@ impl App {
         painter.text(
             egui::pos2(text_left, rect.bottom() - 8.0),
             Align2::LEFT_BOTTOM,
-            faction_label(&e.faction),
+            group_label(mode, &e.group),
             title_font(10.5),
-            faction_color(&e.faction),
+            group_color(&e.group),
         );
-        if response.clicked() {
-            self.selected = Some(index);
-            self.status = Status::Idle;
-        }
+        response.clicked()
     }
 
-    fn creature_controls(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "Invocación", 19.0);
+    fn controls(&mut self, ui: &mut egui::Ui, mode: Mode) {
+        heading(ui, if mode == Mode::Creatures { "Invocación" } else { "Crear objeto" }, 19.0);
         divider(ui);
-        match self.selected {
+        let selected = self.catalog(mode).selected;
+        match selected {
             Some(i) => {
-                let e = &self.enemies[i];
+                let e = &self.catalog(mode).entries[i];
                 let icon = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover()).0;
                 let painter = ui.painter();
                 painter.rect_filled(icon, Rounding::same(4.0), Color32::from_rgb(20, 15, 11));
@@ -590,37 +703,46 @@ impl App {
                     }
                     None => {
                         let target = egui::Rect::from_center_size(icon.center(), Vec2::splat(icon.height() - 22.0));
-                        emblems::draw(painter, target, e.kind, faction_color(&e.faction), e.boss);
+                        emblems::draw(painter, target, e.kind, group_color(&e.group), e.boss);
                     }
                 }
                 ui.label(RichText::new(&e.label).font(title_font(17.0)).color(PARCHMENT));
-                ui.label(RichText::new(faction_label(&e.faction)).color(faction_color(&e.faction)));
+                ui.label(RichText::new(group_label(mode, &e.group)).color(group_color(&e.group)));
             }
             None => {
-                ui.label(RichText::new("Elige una criatura de la lista").color(MUTED));
+                ui.label(RichText::new(if mode == Mode::Creatures { "Elige una criatura de la lista" } else { "Elige un objeto de la lista" }).color(MUTED));
             }
         }
         divider(ui);
 
-        label_title(ui, "NIVEL");
-        ui.add(egui::Slider::new(&mut self.level, 1..=100));
+        if mode == Mode::Creatures {
+            label_title(ui, "NIVEL");
+            ui.add(egui::Slider::new(&mut self.level, 1..=100));
+        }
         label_title(ui, "CANTIDAD");
         ui.add(egui::Slider::new(&mut self.count, 1..=20));
-        label_title(ui, "VIDA");
-        ui.checkbox(&mut self.custom_health, "Vida personalizada");
-        ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
-        label_title(ui, "DAÑO  (1.00 = normal)");
-        ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
+        if mode == Mode::Creatures {
+            label_title(ui, "VIDA");
+            ui.checkbox(&mut self.custom_health, "Vida personalizada");
+            ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
+            label_title(ui, "DAÑO  (1.00 = normal)");
+            ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
+        }
         divider(ui);
 
         label_title(ui, "DÓNDE APARECE");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.target, Target::Front, "Cerca de mí");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.target, Target::Forward, "Delante de mí");
+            ui.selectable_value(&mut self.target, Target::Around, "Alrededor");
             ui.selectable_value(&mut self.target, Target::Place, "Lugar");
             ui.selectable_value(&mut self.target, Target::Coords, "Punto");
         });
         match self.target {
-            Target::Front => {
+            Target::Forward => {
+                ui.label("Distancia hacia donde mira tu personaje (m)");
+                ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
+            }
+            Target::Around => {
                 ui.label("Distancia de ti (metros)");
                 ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
             }
@@ -661,9 +783,9 @@ impl App {
         }
         divider(ui);
 
-        let enabled = self.selected.is_some();
-        if button(ui, "INVOCAR", Vec2::new(ui.available_width(), 52.0), enabled, true) {
-            self.spawn();
+        let enabled = selected.is_some();
+        if button(ui, if mode == Mode::Creatures { "INVOCAR" } else { "CREAR" }, Vec2::new(ui.available_width(), 52.0), enabled, true) {
+            self.spawn(mode);
         }
         let (text, color) = match &self.status {
             Status::Idle => (String::new(), MUTED),
@@ -675,12 +797,14 @@ impl App {
         if !text.is_empty() {
             ui.label(RichText::new(text).color(color));
         }
-        ui.label(RichText::new("En el juego, F8 invoca con estos mismos valores.").color(MUTED).size(13.0));
+        if mode == Mode::Creatures {
+            ui.label(RichText::new("En el juego, F8 invoca con estos mismos valores.").color(MUTED).size(13.0));
+        }
     }
 
     fn places_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Lugares guardados", 22.0);
-        ui.label(RichText::new("Guarda puntos del mundo para invocar criaturas ahí desde la pestaña Criaturas.").color(MUTED));
+        ui.label(RichText::new("Guarda puntos del mundo para invocar criaturas u objetos ahí.").color(MUTED));
         divider(ui);
         match self.player {
             Some(p) => {
@@ -769,12 +893,12 @@ impl eframe::App for App {
             .show(ctx, |ui| self.tabs(ui));
 
         egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| match self.tab {
-            Tab::Creatures => self.creatures(ui),
+            Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
+            Tab::Objects => self.catalog_view(ui, Mode::Objects),
             tab => {
                 egui::Frame::none().inner_margin(egui::Margin::same(20.0)).show(ui, |ui| match tab {
                     Tab::Places => self.places_tab(ui),
                     Tab::Pvp => self.pvp_tab(ui),
-                    Tab::Objects => self.soon_tab(ui, "Objetos", "Invoca objetos y recursos directamente en tu mundo."),
                     Tab::SafeZones => self.soon_tab(ui, "Zonas seguras", "Crea áreas donde nadie puede ser atacado ni saqueado."),
                     _ => self.soon_tab(ui, "Equipos", "Arma equipos de jugadores y define quién es aliado."),
                 });
@@ -798,17 +922,24 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
 
-    fn app_in(dir: &Path, enemies: Vec<Enemy>) -> App {
+    fn entry(guid: &str, label: &str, group: &str, internal: bool) -> Entry {
+        Entry {
+            guid: guid.into(),
+            label: label.into(),
+            group: group.into(),
+            boss: false,
+            search: label.to_lowercase(),
+            kind: emblems::Kind::Fang,
+            internal,
+        }
+    }
+
+    fn app_in(dir: &Path, entries: Vec<Entry>) -> App {
         App {
             dir: dir.to_path_buf(),
             tab: Tab::Creatures,
-            enemies,
-            load_error: None,
-            selected: Some(0),
-            search: String::new(),
-            faction: String::new(),
-            only_bosses: false,
-            show_internal: false,
+            creatures: Catalog { entries, selected: Some(0), ..Default::default() },
+            objects: Catalog::default(),
             level: 30,
             count: 2,
             distance: 7.0,
@@ -817,7 +948,7 @@ mod tests {
             damage: 1.5,
             pvp: true,
             pvp_friends: false,
-            target: Target::Front,
+            target: Target::Around,
             place_index: 0,
             coords: [0.0; 3],
             places: Vec::new(),
@@ -836,6 +967,10 @@ mod tests {
         dir
     }
 
+    fn read_request(dir: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(REQUEST_FILE)).unwrap()).unwrap()
+    }
+
     #[test]
     fn names_are_readable() {
         assert_eq!(pretty("Base_Enemy_AncientConstruct_Heavy"), "Ancient Construct Heavy");
@@ -845,40 +980,59 @@ mod tests {
     #[test]
     fn internal_entries_are_hidden() {
         assert!(is_internal("Base_Enemy_AncientConstruct_Modular01_sleep"));
-        assert!(is_internal("Enemy_Fog_Vorgoth_Organ_Channel_Tentacle_QuickAttack01"));
-        assert!(is_internal("Base_Enemy_Boss_Lizard"));
         assert!(is_internal("ProjectileSpawner_AncientConstruct_Modular_Head02_Turret"));
         assert!(!is_internal("Enemy_Skeleton_Melee01"));
-        assert!(!is_internal("Enemy_Wildbeast_Wolf_Heavy"));
     }
 
     #[test]
     fn emblem_kinds() {
         assert_eq!(emblems::kind_of("Enemy_Skeleton_Melee01", "Skeleton"), emblems::Kind::Skull);
         assert_eq!(emblems::kind_of("Enemy_Wildbeast_Wolf_Heavy", "WildBeast"), emblems::Kind::Paw);
-        assert_eq!(emblems::kind_of("Enemy_Wildbeast_SpiderAnt_Melee", "WildBeast"), emblems::Kind::Spider);
-        assert_eq!(emblems::kind_of("Enemy_Fogger_Soldier01", "Fogger"), emblems::Kind::Mist);
+        assert_eq!(emblems::kind_of_object("Chest_Wood", "Contenedores"), emblems::Kind::Chest);
+        assert_eq!(emblems::kind_of_object("Iron_Ore_Node", "Recursos"), emblems::Kind::Gem);
     }
 
     #[test]
-    fn request_and_config_roundtrip() {
+    fn object_catalog_is_grouped_and_filtered() {
+        let dir = temp_dir("obj");
+        std::fs::write(
+            dir.join("export").join("m182_objects.csv"),
+            "name,guid,components\nChest_Wood,22222222-2222-2222-2222-222222222222,CurrentTransform|Container\nRock_Big,33333333-3333-3333-3333-333333333333,CurrentTransform\nSomething,44444444-4444-4444-4444-444444444444,Health\nTorch_Wall,55555555-5555-5555-5555-555555555555,CurrentTransform|Light\n",
+        )
+        .unwrap();
+        let list = load_objects(&dir).unwrap();
+        assert_eq!(list.len(), 4);
+        let mut cat = Catalog { entries: list, ..Default::default() };
+        assert_eq!(cat.visible().len(), 3);
+        cat.show_internal = true;
+        assert_eq!(cat.visible().len(), 4);
+        cat.show_internal = false;
+        cat.group = "Contenedores".into();
+        assert_eq!(cat.visible().len(), 1);
+        assert_eq!(object_group("Torch_Wall", "CurrentTransform|Light"), "Luces");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn creature_request_roundtrip() {
         let dir = temp_dir("rt");
         std::fs::write(dir.join("export").join("m182_enemies.csv"), "name,guid,faction,boss,preset\nEnemy_A,642098d4-fc09-48e2-811e-782d438bf551,Drak,false,\nEnemy_A@x10,642098d4-fc09-4182-0002-782d438bf551,Drak,false,x10\n").unwrap();
         std::fs::write(dir.join(CONFIG_FILE), r#"{"pvp":true,"spawn_key":"F8","custom":1}"#).unwrap();
         let list = load_enemies(&dir).unwrap();
         assert_eq!(list.len(), 1);
         let mut app = app_in(&dir, list);
-        app.spawn();
+        app.spawn(Mode::Creatures);
         assert!(matches!(app.status, Status::Waiting(_)));
-        let req: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(REQUEST_FILE)).unwrap()).unwrap();
+        let req = read_request(&dir);
         assert_eq!(req["health"], 500);
         assert_eq!(req["level"], 30);
         assert!(req.get("at").is_none());
+        assert!(req.get("forward").is_none());
+        assert!(req.get("object").is_none());
         let cfg = read_config(&dir);
         assert_eq!(cfg["custom"], 1);
         assert_eq!(cfg["spawn_health"], 500);
         assert_eq!(cfg["spawn_key"], "F8");
-        assert_eq!(app.visible().len(), 1);
         std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
         let ctx = egui::Context::default();
         app.tick(&ctx);
@@ -887,35 +1041,37 @@ mod tests {
     }
 
     #[test]
-    fn places_and_targets() {
+    fn targets_and_object_requests() {
         let dir = temp_dir("pl");
         std::fs::write(dir.join(PLAYER_FILE), r#"{"x":10.5,"y":20.0,"z":-3.25}"#).unwrap();
         assert_eq!(read_player(&dir), Some([10.5, 20.0, -3.25]));
-        let enemy = Enemy {
-            guid: "642098d4-fc09-48e2-811e-782d438bf551".into(),
-            label: "A".into(),
-            faction: "Drak".into(),
-            boss: false,
-            search: "a".into(),
-            kind: emblems::Kind::Fang,
-            internal: false,
-        };
-        let mut app = app_in(&dir, vec![enemy]);
+        let mut app = app_in(&dir, vec![entry("642098d4-fc09-48e2-811e-782d438bf551", "A", "Drak", false)]);
+        app.objects = Catalog { entries: vec![entry("22222222-2222-2222-2222-222222222222", "Chest", "Contenedores", false)], selected: Some(0), ..Default::default() };
         app.places.push(Place { name: "Torre".into(), x: 1.0, y: 2.0, z: 3.0 });
         app.save_places();
         assert_eq!(load_places(&dir).len(), 1);
+
         app.target = Target::Place;
-        app.spawn();
-        let req: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(REQUEST_FILE)).unwrap()).unwrap();
-        assert_eq!(req["at"], json!([1.0, 2.0, 3.0]));
+        app.spawn(Mode::Creatures);
+        assert_eq!(read_request(&dir)["at"], json!([1.0, 2.0, 3.0]));
         app.target = Target::Coords;
         app.coords = [7.0, 8.0, 9.0];
-        app.spawn();
-        let req: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(REQUEST_FILE)).unwrap()).unwrap();
-        assert_eq!(req["at"], json!([7.0, 8.0, 9.0]));
+        app.spawn(Mode::Creatures);
+        assert_eq!(read_request(&dir)["at"], json!([7.0, 8.0, 9.0]));
+
+        app.target = Target::Forward;
+        app.spawn(Mode::Objects);
+        let req = read_request(&dir);
+        assert_eq!(req["forward"], true);
+        assert_eq!(req["object"], true);
+        assert!(req.get("health").is_none());
+        assert!(req.get("level").is_none());
+        let cfg = read_config(&dir);
+        assert_eq!(cfg.get("spawn_template").and_then(|v| v.as_str()), Some("642098d4-fc09-48e2-811e-782d438bf551"));
+
         app.places.clear();
         app.target = Target::Place;
-        app.spawn();
+        app.spawn(Mode::Creatures);
         assert!(matches!(app.status, Status::Error(_)));
         let _ = std::fs::remove_dir_all(dir);
     }

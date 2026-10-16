@@ -12,6 +12,27 @@ pub enum Kind {
     Fang,
     Wing,
     Shield,
+    Chest,
+    Tree,
+    Gem,
+    Torch,
+    Crate,
+}
+
+pub fn kind_of_object(name: &str, group: &str) -> Kind {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if group == "Contenedores" || has(&["chest", "crate_loot", "barrel", "storage"]) {
+        Kind::Chest
+    } else if has(&["tree", "bush", "plant", "herb", "flower", "mushroom", "grass", "wood", "log"]) {
+        Kind::Tree
+    } else if has(&["ore", "crystal", "gem", "stone", "rock", "iron", "copper", "coal", "ruby", "amber", "salt"]) {
+        Kind::Gem
+    } else if group == "Luces" || has(&["torch", "lamp", "light", "lantern", "campfire", "fire", "brazier"]) {
+        Kind::Torch
+    } else {
+        Kind::Crate
+    }
 }
 
 pub fn kind_of(name: &str, faction: &str) -> Kind {
@@ -143,6 +164,34 @@ pub fn draw(painter: &Painter, rect: Rect, kind: Kind, tint: Color32, boss: bool
             poly(painter, rect, &[(0.5, 0.55), (0.1, 0.22), (0.14, 0.62), (0.5, 0.72)], tint, Stroke::NONE);
             poly(painter, rect, &[(0.5, 0.55), (0.9, 0.22), (0.86, 0.62), (0.5, 0.72)], tint, Stroke::NONE);
             painter.circle_filled(pt(rect, 0.5, 0.58), rect.width() * 0.07, dark);
+        }
+        Kind::Chest => {
+            poly(painter, rect, &[(0.16, 0.45), (0.84, 0.45), (0.84, 0.82), (0.16, 0.82)], tint, Stroke::NONE);
+            poly(painter, rect, &[(0.16, 0.45), (0.22, 0.24), (0.78, 0.24), (0.84, 0.45)], tint.gamma_multiply(0.8), Stroke::NONE);
+            line(painter, rect, &[(0.16, 0.45), (0.84, 0.45)], Stroke::new(2.0 * s, dark));
+            poly(painter, rect, &[(0.45, 0.4), (0.55, 0.4), (0.55, 0.58), (0.45, 0.58)], dark, Stroke::NONE);
+        }
+        Kind::Tree => {
+            poly(painter, rect, &[(0.5, 0.1), (0.78, 0.5), (0.22, 0.5)], tint, Stroke::NONE);
+            poly(painter, rect, &[(0.5, 0.32), (0.84, 0.72), (0.16, 0.72)], tint, Stroke::NONE);
+            poly(painter, rect, &[(0.44, 0.72), (0.56, 0.72), (0.56, 0.9), (0.44, 0.9)], tint.gamma_multiply(0.7), Stroke::NONE);
+        }
+        Kind::Gem => {
+            poly(painter, rect, &[(0.3, 0.2), (0.7, 0.2), (0.88, 0.42), (0.5, 0.88), (0.12, 0.42)], tint, Stroke::NONE);
+            line(painter, rect, &[(0.12, 0.42), (0.88, 0.42)], Stroke::new(1.5 * s, dark));
+            line(painter, rect, &[(0.3, 0.2), (0.38, 0.42), (0.5, 0.88)], Stroke::new(1.5 * s, dark));
+            line(painter, rect, &[(0.7, 0.2), (0.62, 0.42), (0.5, 0.88)], Stroke::new(1.5 * s, dark));
+        }
+        Kind::Torch => {
+            line(painter, rect, &[(0.5, 0.5), (0.5, 0.9)], Stroke::new(4.0 * s, tint.gamma_multiply(0.7)));
+            poly(painter, rect, &[(0.5, 0.1), (0.7, 0.36), (0.66, 0.52), (0.34, 0.52), (0.3, 0.36)], tint, Stroke::NONE);
+            poly(painter, rect, &[(0.5, 0.28), (0.6, 0.42), (0.58, 0.5), (0.42, 0.5), (0.4, 0.42)], dark, Stroke::NONE);
+        }
+        Kind::Crate => {
+            poly(painter, rect, &[(0.18, 0.18), (0.82, 0.18), (0.82, 0.82), (0.18, 0.82)], tint, Stroke::NONE);
+            line(painter, rect, &[(0.18, 0.18), (0.82, 0.82)], Stroke::new(2.0 * s, dark));
+            line(painter, rect, &[(0.82, 0.18), (0.18, 0.82)], Stroke::new(2.0 * s, dark));
+            painter.rect_stroke(Rect::from_min_max(pt(rect, 0.18, 0.18), pt(rect, 0.82, 0.82)), 0.0, Stroke::new(2.0 * s, dark));
         }
         Kind::Shield => {
             poly(painter, rect, &[(0.2, 0.18), (0.8, 0.18), (0.8, 0.54), (0.5, 0.88), (0.2, 0.54)], tint, Stroke::NONE);

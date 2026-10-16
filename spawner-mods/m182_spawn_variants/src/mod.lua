@@ -87,6 +87,30 @@ if templates ~= nil then
     end)
 end
 
+local objectLines = {}
+pcall(function()
+    local enemyGuid = {}
+    for _, r in ipairs(rows) do enemyGuid[r.guid] = true end
+    for _, res in ipairs(templates) do
+        local data = res.data
+        local name = str(try(function() return data.name end))
+        local guid = str(res.guid)
+        if name ~= "" and guid ~= "" and not enemyGuid[guid] and not string.find(name, "@", 1, true) and not string.find(name, ",", 1, true) then
+            local comps, count = {}, 0
+            pcall(function()
+                for _, c in ipairs(data.components) do
+                    count = count + 1
+                    if count <= 14 then
+                        comps[#comps + 1] = (string.gsub(str(c.type), "^keen::ecs::", ""))
+                    end
+                end
+            end)
+            objectLines[#objectLines + 1] = name .. "," .. guid .. "," .. table.concat(comps, "|")
+        end
+    end
+    table.sort(objectLines)
+end)
+
 local function variantGuid(base, index)
     local a, b, _, _, e = string.match(base, "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
     if a == nil then return nil end
@@ -145,7 +169,8 @@ end
 
 if loader and loader.features and loader.features.export then
     local ok = pcall(function() io.export("m182_enemies.csv", table.concat(out, "\n")) end)
-    print(string.format("[m182-spawn-variants] enemies=%d variants created=%d failed=%d export=%s", #rows, created, failed, tostring(ok)))
+    local objectsOk = pcall(function() io.export("m182_objects.csv", "name,guid,components\n" .. table.concat(objectLines, "\n")) end)
+    print(string.format("[m182-spawn-variants] enemies=%d variants created=%d failed=%d export=%s objects=%d objectsExport=%s", #rows, created, failed, tostring(ok), #objectLines, tostring(objectsOk)))
     for _, e in ipairs(errors) do print("[m182-spawn-variants] error: " .. e) end
 else
     print("[m182-spawn-variants] export disabled")
