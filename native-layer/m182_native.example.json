@@ -5,8 +5,10 @@
   "spawn_probe": true,
   "spawner": true,
   "spawn_key": "F8",
-  "spawn_template": "Enemy_LizardpeopleDrak01_Melee_Spear@x10",
+  "spawn_template": "Enemy_LizardpeopleDrak01_Melee_Spear",
   "spawn_level": 20,
   "spawn_count": 1,
-  "spawn_distance": 5.0
+  "spawn_distance": 5.0,
+  "dump_player_key": "F7",
+  "dump_spawned_key": "F6"
 }

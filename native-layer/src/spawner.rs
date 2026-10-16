@@ -82,23 +82,33 @@ fn game_has_focus() -> bool {
 }
 
 fn key_loop() {
-    let mut was_down = false;
+    let mut was_down = [false; 3];
     let mut last_report = Instant::now();
     let mut last_pos: Option<(i64, i64, i64)> = None;
     loop {
         std::thread::sleep(Duration::from_millis(25));
         if !LIVE.spawner() {
-            was_down = false;
+            was_down = [false; 3];
             continue;
         }
-        let key = match SPAWN.lock() {
-            Ok(s) => s.key,
+        let keys = match SPAWN.lock() {
+            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key],
             Err(_) => continue,
         };
-        let down = unsafe { GetAsyncKeyState(key) } as u16 & 0x8000 != 0 && game_has_focus();
-        if down && !was_down {
+        let focus = game_has_focus();
+        let mut down = [false; 3];
+        for i in 0..3 {
+            down[i] = unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0 && focus;
+        }
+        if down[0] && !was_down[0] {
             PENDING.store(1, Ordering::SeqCst);
             log("spawn requested");
+        }
+        if down[1] && !was_down[1] {
+            dump_entity("player", PLAYER_ID.load(Ordering::SeqCst));
+        }
+        if down[2] && !was_down[2] {
+            dump_entity("last spawned", LAST_SPAWNED.load(Ordering::SeqCst));
         }
         was_down = down;
 
@@ -118,6 +128,36 @@ fn key_loop() {
             }
         }
     }
+}
+
+static DUMP_COUNTER: AtomicU32 = AtomicU32::new(0);
+static LAST_SPAWNED: AtomicU32 = AtomicU32::new(0);
+
+pub fn dump_entity(label: &str, id: u32) {
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    let n = DUMP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    if manager == 0 || id == 0 {
+        log(&format!("dump #{n} {label}: no entity available"));
+        return;
+    }
+    let Some(record) = find_record(manager, id) else {
+        log(&format!("dump #{n} {label}: entity {id} not found"));
+        return;
+    };
+    let Some(p) = placement(record) else {
+        log(&format!("dump #{n} {label}: entity {id} layout unreadable"));
+        return;
+    };
+    log(&format!("dump #{n} {label} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride == 0 {
+            continue;
+        }
+        let bytes = read_bytes(addr, stride.min(192)).unwrap_or_default();
+        log(&format!("dump #{n} idx={index} size={stride} data={}", hex(&bytes)));
+    }
+    log(&format!("dump #{n} end"));
 }
 
 fn le_i64(b: &[u8], off: usize) -> i64 {
@@ -428,6 +468,7 @@ fn spawn_now(manager: usize) {
         write_u64(&mut desc.0, 0x20, 2);
 
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
+        LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
     }
 }
