@@ -1004,20 +1004,40 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
         return;
     }
-    if PENDING.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return;
-    }
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
-    spawn_now(manager);
+    if PENDING.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        spawn_now(manager);
+    }
+    run_aura_queue(manager);
     BUSY.store(false, Ordering::SeqCst);
+}
+
+static AURA_PENDING: AtomicU32 = AtomicU32::new(0);
+static AURA_QUEUE: Mutex<Vec<(i64, i64, i64)>> = Mutex::new(Vec::new());
+static AURA_FAILED: AtomicU32 = AtomicU32::new(0);
+
+fn run_aura_queue(manager: usize) {
+    if AURA_PENDING.swap(0, Ordering::SeqCst) == 0 {
+        return;
+    }
+    let points: Vec<(i64, i64, i64)> = match AURA_QUEUE.lock() {
+        Ok(mut q) => std::mem::take(&mut *q),
+        Err(_) => return,
+    };
+    let Some(template) = aura_guid() else { return };
+    for (x, y, z) in points.into_iter().take(8) {
+        if spawn_effect(manager, template, x, y, z) == 0 && AURA_FAILED.fetch_add(1, Ordering::Relaxed) == 0 {
+            log("zones: the aura effect could not be created");
+        }
+    }
 }
 
 fn calibration_done() -> bool {
@@ -1226,6 +1246,58 @@ fn spawn_now(manager: usize) {
     }
 }
 
+const AURA_TEMPLATE: &str = "VFX_Resource_Increase_Health_NoSound";
+const AURA_PERIOD: Duration = Duration::from_secs(3);
+
+static AURA_GUID: Mutex<Option<[u8; 16]>> = Mutex::new(None);
+static AURA_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn aura_guid() -> Option<[u8; 16]> {
+    if let Ok(known) = AURA_GUID.lock() {
+        if known.is_some() {
+            return *known;
+        }
+    }
+    let path = std::env::current_dir().ok()?.join("export").join("m182_objects.csv");
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines().skip(1) {
+        let mut parts = line.split(',');
+        let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
+        if name == AURA_TEMPLATE {
+            let parsed = super::config::parse_guid(guid)?;
+            if let Ok(mut known) = AURA_GUID.lock() {
+                *known = Some(parsed);
+            }
+            log(&format!("zones: aura effect {AURA_TEMPLATE} found"));
+            return Some(parsed);
+        }
+    }
+    if !AURA_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+        log(&format!("zones: aura effect {AURA_TEMPLATE} is not in the object list"));
+    }
+    None
+}
+
+fn spawn_effect(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u32 {
+    let mut transform = [0u8; TRANSFORM_SIZE];
+    write_u64(&mut transform, 0, x as u64);
+    write_u64(&mut transform, 8, y as u64);
+    write_u64(&mut transform, 16, z as u64);
+    transform[36..40].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[40..44].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[44..48].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[48..52].copy_from_slice(&1.0f32.to_le_bytes());
+    let mut entries = Block([0u8; 0x100]);
+    write_u32(&mut entries.0, 0, HASH_CURRENT_TRANSFORM);
+    write_u64(&mut entries.0, 8, transform.as_ptr() as u64);
+    write_u64(&mut entries.0, 16, TRANSFORM_SIZE as u64);
+    let mut desc = Block([0u8; 0x100]);
+    desc.0[4..20].copy_from_slice(&template);
+    write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
+    write_u64(&mut desc.0, 0x20, 1);
+    original_create(manager, 0, desc.0.as_ptr() as usize, 0)
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct Powers {
@@ -1296,6 +1368,7 @@ struct PowerState {
     diag_left: u32,
     diag_last: Option<Instant>,
     spawners: SpawnerSet,
+    buffs_seen: Vec<u32>,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -1366,12 +1439,73 @@ pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
     if current > *peak && current < 1_000_000 {
         *peak = current;
     }
-    let target = *peak;
+    let target = (*peak).max(u32_at(&b, 32));
     if target > 0 && (current < target || u32_at(&b, 16) < target) {
         put_u32(addr + 8, target);
         put_u32(addr + 16, target);
     }
     true
+}
+
+static BUFF_FOUND: AtomicBool = AtomicBool::new(false);
+const BUFF_CONTAINER_SIZE: usize = 472;
+const BUFF_STRIDE: usize = 12;
+const DEBUFF_SLOTS: [(usize, usize); 2] = [(240, 16), (444, 1)];
+const BUFF_SLOTS: [(usize, usize); 5] = [(0, 4), (48, 16), (240, 16), (432, 1), (444, 1)];
+
+fn buff_container_plausible(b: &[u8]) -> bool {
+    if b.len() != BUFF_CONTAINER_SIZE {
+        return false;
+    }
+    for (start, count) in BUFF_SLOTS {
+        for i in 0..count {
+            let at = start + i * BUFF_STRIDE;
+            let entity = u32_at(b, at);
+            let kind = u32_at(b, at + 4);
+            if b[at + 8] > 1 || b[at + 9..at + 12].iter().any(|v| *v != 0) {
+                return false;
+            }
+            if (entity == 0) != (kind == 0) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub fn cleanse_debuffs(manager: usize, id: u32, seen: &mut Vec<u32>) -> usize {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return 0 };
+    let mut cleansed = 0;
+    for slot in &slots {
+        if slot.stride != BUFF_CONTAINER_SIZE {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, BUFF_CONTAINER_SIZE) else { continue };
+        if !buff_container_plausible(&b) {
+            continue;
+        }
+        if !BUFF_FOUND.swap(true, Ordering::Relaxed) {
+            log(&format!("states: buff container found (entity {id})"));
+        }
+        for (start, count) in DEBUFF_SLOTS {
+            for i in 0..count {
+                let at = start + i * BUFF_STRIDE;
+                let kind = u32_at(&b, at + 4);
+                if kind == 0 || b[at + 8] != 0 {
+                    continue;
+                }
+                if write_bytes(slot.addr + at + 8, &[1]) {
+                    cleansed += 1;
+                    if seen.len() < 40 && !seen.contains(&kind) {
+                        seen.push(kind);
+                        log(&format!("states: debuff type {kind} (entity {}) cleansed at slot offset {at}", u32_at(&b, at)));
+                    }
+                }
+            }
+        }
+        return cleansed;
+    }
+    cleansed
 }
 
 pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
@@ -1723,11 +1857,12 @@ struct GroupState {
     teams_mtime: Option<std::time::SystemTime>,
     last_fast: Option<Instant>,
     last_slow: Option<Instant>,
+    aura_last: Option<Instant>,
 }
 
 impl GroupState {
     fn new() -> Self {
-        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, last_fast: None, last_slow: None }
+        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, last_fast: None, last_slow: None, aura_last: None }
     }
 }
 
@@ -1785,6 +1920,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     let mut shielded: Vec<usize> = Vec::new();
     let mut dead: Vec<u32> = Vec::new();
     let mut inside_ids: Vec<u32> = Vec::new();
+    let mut inside_at: Vec<(i64, i64, i64)> = Vec::new();
     for (id, number) in &players {
         match transform_of(manager, *id) {
             Some(t) => {
@@ -1793,6 +1929,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                 let in_zone = !st.groups.zones.is_empty() && groups::inside(&st.groups.zones, x, z);
                 if in_zone {
                     inside_ids.push(*id);
+                    inside_at.push((le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
                 }
                 if in_zone {
                     shielded.extend(faction_addresses(manager, *id));
@@ -1817,6 +1954,17 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     }
     groups::set_team_map(map);
     groups::set_protected(shielded);
+    if !inside_at.is_empty()
+        && AURA_FAILED.load(Ordering::Relaxed) < 3
+        && st.groups.aura_last.map(|t| now.duration_since(t) >= AURA_PERIOD).unwrap_or(true)
+    {
+        st.groups.aura_last = Some(now);
+        if let Ok(mut q) = AURA_QUEUE.lock() {
+            q.clear();
+            q.extend(inside_at.into_iter().take(8).map(|(x, y, z)| (x, y.saturating_add(metres(0.3)), z)));
+            AURA_PENDING.store(1, Ordering::SeqCst);
+        }
+    }
 
     if st.groups.last_slow.map(|t| now.duration_since(t) < Duration::from_millis(1000)).unwrap_or(false) {
         return;
@@ -2078,6 +2226,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
     }
     if st.powers.stamina {
+        if tick % 4 == 0 {
+            cleanse_debuffs(manager, id, &mut st.buffs_seen);
+        }
         refill_stamina(manager, id, &mut st.stamina_peak);
         refill_mana(manager, id, &mut st.mana_peak);
         if let Some((m, c)) = client {
@@ -2176,6 +2327,7 @@ pub fn new_power_state() -> PowerState {
         diag_left: 12,
         diag_last: None,
         spawners: SpawnerSet::default(),
+        buffs_seen: Vec::new(),
     }
 }
 

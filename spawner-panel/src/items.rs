@@ -922,6 +922,9 @@ impl App {
                 return;
             }
             let mut changed = false;
+            if self.items.balance.iter().any(|(k, v)| (k == "itemLevelCap" || k == "playerLevelCap") && self.items.balance_base.get(k).map(|b| *v > *b + 0.5).unwrap_or(false)) {
+                ui.label(RichText::new("Aviso: subir los niveles máximos podría dejar el loot de las criaturas sin poder recogerse tras reiniciar (sospecha sin confirmar). Si te pasa, restaura estos valores.").color(GOLD_DIM).size(12.5));
+            }
             for (key, label) in BALANCE_LABELS {
                 if let Some(value) = self.items.balance.get_mut(*key) {
                     ui.horizontal(|ui| {
