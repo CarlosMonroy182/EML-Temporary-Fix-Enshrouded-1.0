@@ -1,4 +1,4 @@
-name: Build M182 Admin Pannel
+name: Build M182 release
 
 on:
   workflow_dispatch:
@@ -7,50 +7,75 @@ on:
       - m182-native-layer
     paths:
       - "spawner-panel/**"
+      - "eml-fork/**"
+      - "nexus-package/**"
+      - "spawner-mods/**"
       - ".github/workflows/build-admin-panel.yml"
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  panel:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: spawner-panel
-
       - name: Build
         working-directory: spawner-panel
         run: cargo build --release --locked
-
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item spawner-panel/target/release/M182_AdminPannel.exe dist/M182_AdminPannel.exe
-          Compress-Archive -Path dist/M182_AdminPannel.exe -DestinationPath dist/M182_AdminPannel.zip -Force
-          (Get-FileHash dist/M182_AdminPannel.exe -Algorithm SHA256).Hash | Out-File dist/SHA256.txt
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: M182_AdminPannel
-          path: dist/*
+          name: panel
+          path: spawner-panel/target/release/M182_AdminPannel.exe
           if-no-files-found: error
 
+  native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eml-fork
+      - name: Build
+        working-directory: eml-fork
+        run: cargo build --release --locked -p dbghelp-proxy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native
+          path: eml-fork/target/release/dbghelp.dll
+          if-no-files-found: error
+
+  publish:
+    needs: [panel, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package
+        run: |
+          mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src
+          cp artifacts/native/dbghelp.dll dist/M182_PvP/
+          cp nexus-package/m182_native.json nexus-package/eml.json nexus-package/README.txt dist/M182_PvP/
+          cp eml-fork/LICENSE dist/M182_PvP/
+          cp spawner-mods/m182_spawn_variants/mod.json dist/M182_PvP/mods/m182_spawn_variants/
+          cp spawner-mods/m182_spawn_variants/src/mod.lua dist/M182_PvP/mods/m182_spawn_variants/src/
+          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP)
+          cp artifacts/panel/M182_AdminPannel.exe dist/
+          (cd dist && zip M182_AdminPannel.zip M182_AdminPannel.exe)
+          (cd dist && sha256sum M182_AdminPannel.exe M182_PvP_Nexus.zip > SHA256.txt)
       - name: Publish release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "admin-pannel-latest"
-          gh release delete $tag --cleanup-tag --yes 2>$null
-          gh release create $tag dist/M182_AdminPannel.exe dist/M182_AdminPannel.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 Admin Pannel (latest build)" --notes "Windows build of the M182 Admin Pannel (work in progress). Built automatically from this repository by GitHub Actions."
+          tag=admin-pannel-latest
+          gh release delete "$tag" --cleanup-tag --yes || true
+          gh release create "$tag" dist/M182_AdminPannel.exe dist/M182_AdminPannel.zip dist/M182_PvP_Nexus.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Admin Pannel (exe) and the M182 PvP package for Nexus. Work in progress."
