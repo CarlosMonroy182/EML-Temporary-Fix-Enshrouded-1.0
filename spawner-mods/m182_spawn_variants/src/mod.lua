@@ -136,7 +136,7 @@ end
 
 local objectLines = {}
 local pickupByItem = {}
-local giveCandidates = {}
+local genericPickup = ""
 pcall(function()
     local enemyGuid = {}
     for _, r in ipairs(rows) do enemyGuid[r.guid] = true end
@@ -144,6 +144,7 @@ pcall(function()
         local data = res.data
         local name = str(try(function() return data.name end))
         local guid = str(res.guid)
+        if name == "Base_LootPickup_RandomLoot_Generic" then genericPickup = guid end
         if name ~= "" and guid ~= "" and not enemyGuid[guid] and not string.find(name, "@", 1, true) and not string.find(name, ",", 1, true) then
             local comps, count = {}, 0
             pcall(function()
@@ -161,8 +162,6 @@ pcall(function()
                                 pickupByItem[id] = { guid = guid, name = name }
                             end
                         end
-                    elseif ct == "PickupLootSlot" then
-                        giveCandidates[#giveCandidates + 1] = { name = name, guid = guid, res = res }
                     end
                 end
             end)
@@ -230,33 +229,87 @@ end
 
 -- English names of items come from the localisation table
 local translations = {}
+
+local function content_buffer(ref)
+    local hash = try(function() return ref.hash end)
+    if hash == nil then return nil, "no hash" end
+    local attempts = {
+        function() return game.assets.get_content(hash) end,
+        function() return game.assets.get_content(tostring(hash)) end,
+        function() return game.assets.get_content(ref) end,
+        function() return game.assets.get_content(game.guid.from_content_hash(hash)) end,
+    }
+    local lastErr = "content not found"
+    for index, attempt in ipairs(attempts) do
+        local ok, content = pcall(attempt)
+        if ok and content ~= nil then
+            local ok2, buffer = pcall(function() return content:read_data() end)
+            if ok2 and buffer ~= nil then return buffer, "variant " .. index end
+            lastErr = "read_data: " .. tostring(buffer)
+        elseif not ok then
+            lastErr = tostring(content)
+        end
+    end
+    return nil, lastErr
+end
+
+local function read_loca(ref, label)
+    local buffer, how = content_buffer(ref)
+    if buffer == nil then
+        dlog("loca " .. label .. ": no content (" .. str(how) .. ")")
+        return 0
+    end
+    local readers = {
+        function() return buffer:read_resource("keen::LocaTagCollectionResourceData") end,
+        function() return buffer:read_resource("keen::LocaTagCollectionResourceData", 0) end,
+    }
+    for _, reader in ipairs(readers) do
+        local ok, collection = pcall(reader)
+        if ok and collection ~= nil then
+            local added = 0
+            local tags = try(function() return collection.tags end)
+            if type(tags) == "table" then
+                for _, tag in ipairs(tags) do
+                    local h = hash_of(try(function() return tag.id end))
+                    local text = try(function() return tag.text end)
+                    if h ~= nil and text ~= nil and translations[h] == nil then
+                        translations[h] = tostring(text)
+                        added = added + 1
+                    end
+                end
+            end
+            dlog("loca " .. label .. ": " .. added .. " texts (" .. str(how) .. ")")
+            return added
+        elseif not ok then
+            dlog("loca " .. label .. ": read_resource failed: " .. tostring(collection))
+        end
+    end
+    return 0
+end
+
 pcall(function()
     local locaResources = game.assets.get_resources_by_type("keen::LocaTagCollectionResource")
     if type(locaResources) ~= "table" or #locaResources == 0 then
         dlog("loca: collection not found")
         return
     end
-    local locaData = locaResources[1].data
-    local contentHash = nil
-    if type(locaData.languages) == "table" then
-        for _, entry in ipairs(locaData.languages) do
-            if entry.language == "En_Us" then
-                contentHash = entry.dataHash
-                break
+    dlog("loca: " .. #locaResources .. " collections")
+    for ci, res in ipairs(locaResources) do
+        local d = try(function() return res.data end)
+        if d ~= nil then
+            local eng = try(function() return d.keenglishData end)
+            if eng ~= nil then read_loca(eng, ci .. "/keenglish") end
+            local langs = try(function() return d.languages end)
+            if type(langs) == "table" then
+                for li, entry in ipairs(langs) do
+                    local name = str(try(function() return entry.language end))
+                    if li <= 3 then dlog("loca: language entry " .. name) end
+                    if string.find(string.lower(name), "en", 1, true) == 1 then
+                        local ref = try(function() return entry.data end)
+                        if ref ~= nil then read_loca(ref, ci .. "/" .. name) end
+                    end
+                end
             end
-        end
-    end
-    if contentHash == nil then contentHash = locaData.keenglishDataHash end
-    if contentHash == nil then
-        dlog("loca: no English hash")
-        return
-    end
-    local buffer = game.assets.get_content(game.guid.from_content_hash(contentHash)):read_data()
-    local collection = buffer:read_resource("keen::LocaTagCollectionResourceData")
-    if collection ~= nil and type(collection.tags) == "table" then
-        for _, tag in ipairs(collection.tags) do
-            local h = hash_of(tag.id)
-            if h ~= nil and tag.text ~= nil then translations[h] = tag.text end
         end
     end
 end)
@@ -266,54 +319,9 @@ dlog("loca: " .. translationCount .. " English texts")
 
 -- Item catalogue and delivery templates
 local itemLines = {}
-local giveCreated, giveFailed, giveSet = 0, 0, 0
 local itemHeader = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison,wood,stone,metal,explosion,dmg_set,ar_physical,ar_blunt,ar_pierce,ar_cut,ar_magical,ar_fire,ar_ice,ar_fog,ar_lightning,ar_set"
 
-local giveBase = nil
-pcall(function()
-    for _, cand in ipairs(giveCandidates) do
-        if cand.name == "Base_LootPickup_RandomLoot_Spawner" then giveBase = cand end
-    end
-    if giveBase == nil then giveBase = giveCandidates[1] end
-    if giveBase == nil then
-        dlog("give: no template with PickupLootSlot")
-        return
-    end
-    dlog("give: base template " .. giveBase.name .. " " .. giveBase.guid)
-    local slot = find_comp(giveBase.res.data, "keen::ecs::PickupLootSlot")
-    if slot ~= nil then
-        dlog("give: generic pickup reference = " .. str(try(function() return slot.value.genericPickupItem end)))
-        dlog("give: base slot spawnItem=" .. str(try(function() return slot.value.spawnItem end)) ..
-            " level=" .. str(try(function() return slot.value.spawnItemLevel end)) ..
-            " rarity=" .. str(try(function() return slot.value.spawnItemRarity end)) ..
-            " amount=" .. str(try(function() return slot.value.spawnItemAmount end)) ..
-            " should=" .. str(try(function() return slot.value.shouldSpawnItem end)))
-    end
-    local rl = find_comp(giveBase.res.data, "keen::ecs::RandomLoot")
-    if rl ~= nil then
-        dlog("give: base RandomLoot.disableRandomLoot=" .. str(try(function() return rl.value.disableRandomLoot end)))
-    end
-end)
-
-local function set_hash(container, field, hash)
-    local current = try(function() return container[field] end)
-    if type(current) == "table" or type(current) == "userdata" then
-        local ok = pcall(function() current.value = hash end)
-        if ok and hash_of(try(function() return container[field] end)) == hash then return true end
-    end
-    local ok = pcall(function() container[field] = hash end)
-    if ok and hash_of(try(function() return container[field] end)) == hash then return true end
-    return false
-end
-
-local function set_plain(container, field, value)
-    local ok = pcall(function() container[field] = value end)
-    if not ok then return false end
-    return str(try(function() return container[field] end)) == str(value)
-end
-
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
-local itemIndex = 0
 local seenItemIds = {}
 if type(items) == "table" then
     for _, resource in ipairs(items) do
@@ -336,35 +344,6 @@ if type(items) == "table" then
             local startLevel = math.max(1, math.min(255, levelMin))
 
             local giveGuid = ""
-            if giveBase ~= nil and category ~= "Customization" and itemIndex < 60000 then
-                itemIndex = itemIndex + 1
-                local guid = variantGuid(giveBase.guid, itemIndex, "4183")
-                local ok, err = pcall(function()
-                    local copy = game.assets.create_resource(giveBase.res.data, "keen::ecs::TemplateResource", guid, 0)
-                    local d = copy.data
-                    d.name = "M182Give_" .. debugName
-                    local slot = find_comp(d, "keen::ecs::PickupLootSlot")
-                    if slot == nil then error("no PickupLootSlot in copy") end
-                    local a = set_plain(slot.value, "shouldSpawnItem", true)
-                    local b = set_hash(slot.value, "spawnItem", id)
-                    local c = set_plain(slot.value, "spawnItemLevel", startLevel)
-                    local e = set_plain(slot.value, "spawnItemRarity", rarity)
-                    local f = set_plain(slot.value, "spawnItemAmount", 1)
-                    local rl = find_comp(d, "keen::ecs::RandomLoot")
-                    if rl ~= nil then set_plain(rl.value, "disableRandomLoot", true) end
-                    if giveSet < 3 then
-                        dlog(string.format("give: %s should=%s item=%s level=%s rarity=%s amount=%s", debugName, tostring(a), tostring(b), tostring(c), tostring(e), tostring(f)))
-                    end
-                    if b then giveSet = giveSet + 1 end
-                end)
-                if ok then
-                    giveCreated = giveCreated + 1
-                    giveGuid = guid
-                else
-                    giveFailed = giveFailed + 1
-                    if giveFailed <= 3 then dlog("give: failed " .. debugName .. ": " .. tostring(err)) end
-                end
-            end
 
             local pk = pickupByItem[id]
             local dmg = try(function() return data.damageSetup end)
@@ -389,7 +368,8 @@ if type(items) == "table" then
     end
     table.sort(itemLines)
 end
-dlog(string.format("items: %d exported, give templates created=%d failed=%d with values set=%d", #itemLines, giveCreated, giveFailed, giveSet))
+if genericPickup ~= "" then dlog("generic_pickup=" .. genericPickup) end
+dlog(string.format("items: %d exported, %d English names", #itemLines, translationCount))
 
 -- Global balance values
 local balanceLines = { "key,value" }
@@ -419,7 +399,7 @@ if loader and loader.features and loader.features.export then
     local itemsOk = pcall(function() io.export("m182_items.csv", itemHeader .. "\n" .. table.concat(itemLines, "\n")) end)
     pcall(function() io.export("m182_balance.csv", table.concat(balanceLines, "\n")) end)
     pcall(function() io.export("m182_items_diag.txt", table.concat(diag, "\n")) end)
-    print(string.format("[m182-spawn-variants] enemies=%d variants created=%d failed=%d export=%s objects=%d objectsExport=%s items=%d itemsExport=%s give=%d", #rows, created, failed, tostring(ok), #objectLines, tostring(objectsOk), #itemLines, tostring(itemsOk), giveCreated))
+    print(string.format("[m182-spawn-variants] enemies=%d variants created=%d failed=%d export=%s objects=%d objectsExport=%s items=%d itemsExport=%s", #rows, created, failed, tostring(ok), #objectLines, tostring(objectsOk), #itemLines, tostring(itemsOk)))
     for _, e in ipairs(errors) do print("[m182-spawn-variants] error: " .. e) end
     for _, l in ipairs(diag) do print("[m182-spawn-variants] " .. l) end
 else

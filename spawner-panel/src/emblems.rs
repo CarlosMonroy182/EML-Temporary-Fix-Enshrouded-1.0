@@ -1,6 +1,7 @@
 use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 pub enum Kind {
     Skull,
     Paw,
@@ -19,6 +20,7 @@ pub enum Kind {
     Crate,
 }
 
+#[allow(dead_code)]
 pub fn kind_of_object(name: &str, group: &str) -> Kind {
     let n = name.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| n.contains(w));

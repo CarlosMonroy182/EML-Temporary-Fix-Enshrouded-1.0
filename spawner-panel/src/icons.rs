@@ -311,6 +311,17 @@ const ENEMY_RULES: &[(&[&str], &str)] = &[
     (&["wolf"], "Wolf"),
     (&["boar"], "Boar"),
     (&["scorpion"], "Scorpion"),
+    (&["ancientconstruct", "heavy"], "Bronze Ancient S.P.D.R. Construct Trophy"),
+    (&["ancientconstruct"], "Ancient S.P.D.R. Construct Trophy"),
+    (&["vorgothorgan"], "Vorgoth's Eye"),
+    (&["tentacle"], "Vorgoth's Eye"),
+    (&["vorgoth"], "Vorgoth's Eye"),
+    (&["wispwyvern"], "Fell Wispwyvern"),
+    (&["sicklescythe"], "Fell Sicklescythe"),
+    (&["striker"], "Fell Striker Head"),
+    (&["thunderbrute"], "Fell Thunderbrute"),
+    (&["titan"], "Bronze Hollow Titan Trophy"),
+    (&["hydrak"], "Bronze Hydrak'Dal Trophy"),
 ];
 
 const WILD: &[&str] = &[
@@ -325,6 +336,10 @@ pub fn enemy_keys(raw: &str) -> Vec<String> {
     for (needles, title) in ENEMY_RULES {
         if needles.iter().all(|n| lower.contains(n)) {
             out.push(norm(title));
+            if !title.ends_with("Trophy") && !title.ends_with("Head") {
+                out.push(norm(&format!("{title} Head")));
+                out.push(norm(&format!("{title} Trophy")));
+            }
             break;
         }
     }
@@ -335,6 +350,101 @@ pub fn enemy_keys(raw: &str) -> Vec<String> {
                 out.push(key);
                 break;
             }
+        }
+    }
+    out
+}
+
+const NOISE: &[&str] = &[
+    "material", "armor", "armour", "weapon", "food", "consumable", "tool", "prop", "decoration", "craft", "block", "blueprint", "vanity",
+    "ring", "ammo", "ability", "build", "key", "raw", "processed", "dish", "loot", "drop", "hint", "dps", "tank", "healer", "ministory",
+    "lore", "old", "norecipe", "crafting", "reward", "comfort", "z", "voxel", "terrain", "collection", "deprecated", "test", "debug",
+    "lvl", "eternal", "tx", "npc", "item",
+];
+
+const GENERIC: &[&str] = &[
+    "wand", "staff", "sword", "bow", "axe", "shield", "hammer", "dagger", "spear", "ranger", "hunter", "warrior", "mage", "rogue", "fire",
+    "ice", "lightning", "stone", "wood", "metal", "bench", "table", "chair", "spider", "light", "dark", "big", "small", "large", "medium",
+    "head", "body", "feet", "legs", "arms", "hand", "hands", "helmet", "chest", "boots", "gloves", "pants", "arrow", "spell", "fog",
+    "square", "round", "simple", "basic", "wall", "floor", "door", "window", "roof", "stairs",
+];
+
+fn split_words(raw: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for part in raw.split(|c: char| c == '_' || c == '-' || c.is_whitespace()) {
+        let chars: Vec<char> = part.chars().collect();
+        let mut current = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            let boundary = i > 0 && {
+                let p = chars[i - 1];
+                (c.is_uppercase() && (p.is_lowercase() || p.is_ascii_digit()))
+                    || (c.is_uppercase() && p.is_uppercase() && chars.get(i + 1).map(|n| n.is_lowercase()).unwrap_or(false))
+                    || (c.is_ascii_digit() != p.is_ascii_digit())
+            };
+            if boundary && !current.is_empty() {
+                words.push(std::mem::take(&mut current).to_lowercase());
+            }
+            current.push(*c);
+        }
+        if !current.is_empty() {
+            words.push(current.to_lowercase());
+        }
+    }
+    words
+}
+
+fn singular(word: &str) -> String {
+    if let Some(stem) = word.strip_suffix("ies") {
+        return format!("{stem}y");
+    }
+    if word.len() > 3 && word.ends_with('s') && !word.ends_with("ss") {
+        return word[..word.len() - 1].to_string();
+    }
+    word.to_string()
+}
+
+pub fn derived_keys(debug: &str, allow_single: bool) -> Vec<String> {
+    let words: Vec<String> = split_words(debug)
+        .into_iter()
+        .filter(|w| !NOISE.contains(&w.as_str()))
+        .filter(|w| w.chars().count() > 1)
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
+        .filter(|w| !(w.starts_with("lvl")))
+        .map(|w| singular(&w))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let n = words.len();
+    for len in (1..=n.min(5)).rev() {
+        for start in 0..=(n - len) {
+            let seg = &words[start..start + len];
+            let mut variants = vec![seg.join("")];
+            if len == 2 {
+                variants.push(format!("{}{}", seg[1], seg[0]));
+            }
+            for key in variants {
+                let ok = if len == 1 {
+                    allow_single && key.len() >= 4 && !GENERIC.contains(&key.as_str())
+                } else {
+                    key.len() >= 6
+                };
+                if ok && !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn item_keys(name: &str, debug: &str, category: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if name != debug && !name.is_empty() {
+        out.extend(name_keys(name));
+    }
+    let single = matches!(category, "Materials" | "Consumables" | "Collectibles" | "AnimalFood" | "Currency" | "WeaponGem" | "Tools" | "Instrument" | "FishingRod");
+    for k in derived_keys(debug, single) {
+        if !out.contains(&k) {
+            out.push(k);
         }
     }
     out
@@ -381,13 +491,26 @@ mod tests {
 
     #[test]
     fn enemy_rules_pick_wiki_names() {
-        assert_eq!(enemy_keys("Enemy_Skeleton_Mage01"), vec![norm("Hollow Mage")]);
-        assert_eq!(enemy_keys("Enemy_Skeleton_Melee01"), vec![norm("Hollow Skeleton")]);
-        assert_eq!(enemy_keys("Enemy_Vukah_Shaman_Lightning"), vec![norm("Vukah Shaman")]);
-        assert_eq!(enemy_keys("Enemy_Wildbeast_Wolf_Heavy"), vec![norm("Wolf")]);
+        assert_eq!(enemy_keys("Enemy_Skeleton_Mage01")[0], norm("Hollow Mage"));
+        assert_eq!(enemy_keys("Enemy_Skeleton_Melee01")[0], norm("Hollow Skeleton"));
+        assert_eq!(enemy_keys("Enemy_Vukah_Shaman_Lightning")[0], norm("Vukah Shaman"));
+        assert_eq!(enemy_keys("Enemy_Wildbeast_Wolf_Heavy")[0], norm("Wolf"));
         assert_eq!(enemy_keys("Enemy_Wildlife_Capybara_01"), vec![norm("Capybara")]);
-        assert_eq!(enemy_keys("Enemy_Fog_CritterQueen_T2_BossHealthBar"), vec![norm("Fell Critter Queen")]);
+        assert_eq!(enemy_keys("Enemy_Fog_CritterQueen_T2_BossHealthBar")[0], norm("Fell Critter Queen"));
+        assert_eq!(enemy_keys("Enemy_AncientConstruct_Modular01_Grunt"), vec![norm("Ancient S.P.D.R. Construct Trophy")]);
         assert!(enemy_keys("Totally_Unknown_Thing").is_empty());
+    }
+
+    #[test]
+    fn derived_names_from_debug_names() {
+        let keys = derived_keys("Material_T5_Night_PinkGentian", true);
+        assert_eq!(keys[0], "nightpinkgentian");
+        assert!(keys.contains(&"pinkgentian".to_string()));
+        assert!(!derived_keys("Weapon_T6_1H_Wand_02_Lightning", false).iter().any(|k| k == "wand"));
+        assert!(derived_keys("Food_T5_raw_vegetables_Pumpkin", true).contains(&"pumpkin".to_string()));
+        assert!(derived_keys("Ammo_T2_Arrow_Copper_lvl12", false).contains(&"copperarrow".to_string()));
+        assert_eq!(item_keys("Iron Sword", "Weapon_T3_Iron", "Weapons")[0], norm("Iron Sword"));
+        assert_eq!(item_keys("Pumpkin", "Pumpkin", "Consumables")[0], "pumpkin");
     }
 
     #[test]

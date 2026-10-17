@@ -6,6 +6,7 @@ mod items;
 mod map;
 mod tiles;
 mod powers;
+mod social;
 mod theme;
 mod wiki;
 
@@ -79,7 +80,6 @@ pub struct Place {
 #[derive(PartialEq, Clone, Copy)]
 pub enum Tab {
     Creatures,
-    Objects,
     Items,
     Map,
     Powers,
@@ -92,7 +92,6 @@ pub enum Tab {
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
     Creatures,
-    Objects,
     Items,
 }
 
@@ -116,11 +115,11 @@ pub struct App {
     dir: PathBuf,
     tab: Tab,
     creatures: Catalog,
-    objects: Catalog,
     item_cat: Catalog,
     items: items::ItemsState,
     downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
+    social: social::SocialState,
     map: map::MapState,
     level: u32,
     count: u32,
@@ -225,69 +224,12 @@ fn is_internal(raw: &str) -> bool {
             .any(|w| n.contains(w))
 }
 
-pub fn object_group(name: &str) -> &'static str {
-    let n = name.to_lowercase();
-    let mut parts = n.split('_');
-    let first = parts.next().unwrap_or("");
-    let second = parts.next().unwrap_or("");
-    match first {
-        "lootpickup" => match second {
-            "material" => "Materiales",
-            "consumable" | "food" => "Consumibles",
-            "ammo" => "Munición",
-            "collections" => "Coleccionables",
-            "colorpalette" => "Tintes",
-            "equipment" => "Herramientas",
-            "gravity" | "farmyield" | "tall" | "productionyield" => "Plantas y cultivos",
-            "npc" => "Personajes",
-            _ => "Recogibles",
-        },
-        "lootchest" | "lootcontainer" => "Cofres y botín",
-        "loot" | "scatter" | "fognest" | "deco" | "flower" => "Recursos y naturaleza",
-        "t1" | "t2" | "t3" | "t4" | "t5" | "t6" | "t7" => "Plantas y cultivos",
-        "prop" | "props" => match second {
-            "furniture" | "deco" | "decoration" | "flowerpot" | "collection" | "castle" => "Muebles y decoración",
-            "destructible" => "Destructibles",
-            "npc" => "Personajes",
-            "logic" | "enemy" => "Interno",
-            _ => "Estructuras y props",
-        },
-        "buildings" | "door" | "animated" | "dungeons" | "climbingwall" | "hookshot" => "Estructuras y props",
-        "npc" => "Personajes",
-        "animal" | "fish" | "foodbait" => "Animales",
-        "trap" => "Trampas",
-        "vfx" | "explosion" | "projectile" | "attack" => "Efectos",
-        "visuals" => "Modelos de armas",
-        "waterdispenser" | "waterdrain" | "fishinglocation" | "shroud" => "Otros",
-        "enemy" | "hitable" => "Criaturas (usa la pestaña Criaturas)",
-        _ => "Interno",
-    }
-}
-
-fn is_internal_object(name: &str, group: &str) -> bool {
-    let n = name.to_lowercase();
-    group == "Interno"
-        || group.starts_with("Criaturas")
-        || ["deprecated", "_old", "debug", "dummy", "do_not", "donot", "unused", "delete", "cheat", "_wip", "notfinished"].iter().any(|w| n.contains(w))
-}
-
-fn normalize_category(raw: &str) -> String {
-    match raw {
-        "Municion" => "Munición".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn apply_wiki(entries: &mut [Entry], wiki: &std::collections::HashMap<String, wiki::WikiEntry>, objects: bool) {
+fn apply_wiki(entries: &mut [Entry], wiki: &std::collections::HashMap<String, wiki::WikiEntry>) {
     for e in entries.iter_mut() {
         let Some(w) = wiki.get(&e.raw.to_lowercase()) else { continue };
         e.alias = Some(w.name.clone());
         if !w.file.is_empty() {
             e.icon_file = Some(format!("wiki/{}", w.file));
-        }
-        if objects {
-            e.group = normalize_category(&w.category);
-            e.internal = false;
         }
         e.search = format!("{} {}", e.search, w.name.to_lowercase());
     }
@@ -334,7 +276,7 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
             search: format!("{} {}", label, faction_label(&group)).to_lowercase(),
             kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
-            icon_keys: icons::enemy_keys(parts[0]),
+            icon_keys: enemy_icon_keys(parts[0]),
             alias: None,
             icon_file: None,
             label,
@@ -349,6 +291,16 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+fn enemy_icon_keys(raw: &str) -> Vec<String> {
+    let mut keys = icons::enemy_keys(raw);
+    for k in icons::derived_keys(raw, false) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
 fn index_item(rows: &[items::Item], index: usize) -> Option<&items::Item> {
     rows.get(index)
 }
@@ -359,23 +311,18 @@ fn load_item_catalog(dir: &Path) -> (Catalog, Vec<items::Item>) {
             let entries: Vec<Entry> = rows
                 .iter()
                 .map(|it| {
-                    let mut keys = icons::name_keys(&it.name);
-                    for k in icons::name_keys(&pretty(&it.debug)) {
-                        if !keys.contains(&k) {
-                            keys.push(k);
-                        }
-                    }
+                    let keys = icons::item_keys(&it.name, &it.debug, &it.category);
                     Entry {
                         guid: it.guid.clone(),
                         raw: it.debug.clone(),
-                        label: it.name.clone(),
+                        label: if it.name == it.debug { pretty(it.debug.trim_start_matches('_')) } else { it.name.clone() },
                         alias: None,
                         icon_file: None,
                         group: it.group.clone(),
                         boss: false,
                         search: format!("{} {} {} {}", it.name, it.debug, it.group, it.slot).to_lowercase(),
                         kind: item_kind(&it.group),
-                        internal: it.group == "Personalización",
+                        internal: items::is_internal_item(&it.debug, &it.category),
                         icon_keys: keys,
                     }
                 })
@@ -396,39 +343,6 @@ fn item_kind(group: &str) -> emblems::Kind {
         "Herramientas" | "Equipo y accesorios" => emblems::Kind::Cog,
         _ => emblems::Kind::Crate,
     }
-}
-
-fn load_objects(dir: &Path) -> Result<Vec<Entry>, String> {
-    let path = dir.join("export").join("m182_objects.csv");
-    let text = std::fs::read_to_string(&path).map_err(|_| {
-        "La lista de objetos aún no existe. Cierra el juego, ábrelo una vez con el mod m182_spawn_variants actualizado y vuelve a abrir este panel.".to_string()
-    })?;
-    let mut out = Vec::new();
-    for line in text.lines().skip(1) {
-        let mut parts = line.splitn(3, ',');
-        let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
-        let components = parts.next().unwrap_or("");
-        let group = object_group(name).to_string();
-        let label = pretty(name);
-        out.push(Entry {
-            guid: guid.trim().to_string(),
-            raw: name.to_string(),
-            search: format!("{} {} {}", label, name, group).to_lowercase(),
-            kind: emblems::kind_of_object(name, &group),
-            internal: is_internal_object(name, &group) || !components.contains("Transform"),
-            icon_keys: icons::name_keys(&label),
-            alias: None,
-            icon_file: None,
-            label,
-            group,
-            boss: false,
-        });
-    }
-    out.sort_by(|a, b| a.label.cmp(&b.label));
-    if out.is_empty() {
-        return Err("La lista de objetos está vacía.".to_string());
-    }
-    Ok(out)
 }
 
 fn read_config(dir: &Path) -> Map<String, Value> {
@@ -490,7 +404,7 @@ fn load_icon(ctx: &egui::Context, dir: &Path, entry: &Entry) -> Option<TextureHa
 fn group_label(mode: Mode, group: &str) -> String {
     match mode {
         Mode::Creatures => faction_label(group).to_string(),
-        Mode::Objects | Mode::Items => group.to_string(),
+        Mode::Items => group.to_string(),
     }
 }
 
@@ -502,14 +416,7 @@ impl App {
         let wiki_index = wiki::load(&dir);
         let creatures = match load_enemies(&dir) {
             Ok(mut entries) => {
-                apply_wiki(&mut entries, &wiki_index, false);
-                Catalog { entries, ..Default::default() }
-            }
-            Err(e) => Catalog { error: Some(e), ..Default::default() },
-        };
-        let objects = match load_objects(&dir) {
-            Ok(mut entries) => {
-                apply_wiki(&mut entries, &wiki_index, true);
+                apply_wiki(&mut entries, &wiki_index);
                 Catalog { entries, ..Default::default() }
             }
             Err(e) => Catalog { error: Some(e), ..Default::default() },
@@ -529,6 +436,7 @@ impl App {
             level: 0,
             rarity: 0,
             amount: 1,
+            generic_pickup: items::load_generic_pickup(&dir),
             ..Default::default()
         };
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
@@ -541,7 +449,7 @@ impl App {
             Ok("places") => Tab::Places,
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
-            Ok("objects") => Tab::Objects,
+            Ok("zones") => Tab::SafeZones,
             Ok("items") => Tab::Items,
             Ok("map") => Tab::Map,
             Ok("powers") => Tab::Powers,
@@ -553,11 +461,11 @@ impl App {
         let mut app = Self {
             tab: preview_tab,
             creatures,
-            objects,
             item_cat,
             items: item_state,
             downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
+            social: social::SocialState::load(&dir),
             map: map::MapState::default(),
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
@@ -582,13 +490,11 @@ impl App {
         #[cfg(feature = "linux-preview")]
         if let Ok(q) = std::env::var("M182_PREVIEW_SEARCH") {
             app.creatures.search = q.clone();
-            app.item_cat.search = q.clone();
-            app.objects.search = q;
+            app.item_cat.search = q;
         }
         #[cfg(feature = "linux-preview")]
         if std::env::var("M182_PREVIEW_SELECT").is_ok() {
             app.creatures.selected = Some(120.min(app.creatures.entries.len().saturating_sub(1)));
-            app.objects.selected = Some(30.min(app.objects.entries.len().saturating_sub(1)));
             app.item_cat.selected = Some(40.min(app.item_cat.entries.len().saturating_sub(1)));
         }
         app.cleanup_stale_request();
@@ -610,7 +516,6 @@ impl App {
     fn catalog(&self, mode: Mode) -> &Catalog {
         match mode {
             Mode::Creatures => &self.creatures,
-            Mode::Objects => &self.objects,
             Mode::Items => &self.item_cat,
         }
     }
@@ -643,8 +548,8 @@ impl App {
     fn spawn(&mut self, mode: Mode) {
         let Some(index) = self.catalog(mode).selected else { return };
         let guid = self.catalog(mode).entries[index].guid.clone();
-        let at = self.target_point();
-        if matches!(self.target, Target::Place) && at.is_none() {
+        let at = if mode == Mode::Creatures { self.target_point() } else { None };
+        if mode == Mode::Creatures && matches!(self.target, Target::Place) && at.is_none() {
             self.status = Status::Error("Elige un lugar guardado.".to_string());
             return;
         }
@@ -658,7 +563,7 @@ impl App {
                 ("spawn_damage", json!(self.damage)),
                 ("spawner", json!(true)),
             ]),
-            Mode::Objects | Mode::Items => Ok(()),
+            Mode::Items => Ok(()),
         };
         let result = saved.and_then(|_| {
             let mut request = json!({
@@ -670,30 +575,24 @@ impl App {
                 request["level"] = json!(self.level);
                 request["health"] = json!(self.effective_health());
                 request["damage"] = json!(self.damage);
-            } else if mode == Mode::Objects {
-                request["object"] = json!(true);
             } else {
-                request["object"] = json!(true);
                 request["count"] = json!(1);
+                request["template"] = json!(self.items.generic_pickup.clone());
                 if let Some(item) = index_item(&self.items.rows, index) {
-                    if !item.give_guid.is_empty() {
-                        request["template"] = json!(item.give_guid);
-                        request["item"] = json!(item.id);
-                        request["item_level"] = json!(self.items.level);
-                        request["item_rarity"] = json!(self.items.rarity);
-                        request["item_amount"] = json!(self.items.amount);
-                        request["default_level"] = json!(item.give_level);
-                        request["default_rarity"] = json!(item.rarity_index());
-                    } else {
-                        request["template"] = json!(item.pickup_guid);
-                    }
+                    request["item"] = json!(item.id);
+                    request["item_guid"] = json!(item.guid);
+                    request["item_level"] = json!(self.items.level);
+                    request["item_rarity"] = json!(self.items.rarity);
+                    request["item_amount"] = json!(self.items.amount);
                 }
             }
-            if self.target == Target::Forward {
-                request["forward"] = json!(true);
-            }
-            if let Some(p) = at {
-                request["at"] = json!(p);
+            if mode == Mode::Creatures {
+                if self.target == Target::Forward {
+                    request["forward"] = json!(true);
+                }
+                if let Some(p) = at {
+                    request["at"] = json!(p);
+                }
             }
             write_atomic(&self.dir, REQUEST_FILE, REQUEST_TMP, &request.to_string())
         });
@@ -705,6 +604,7 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.items_pump();
+        self.social_tick();
         if let Some(d) = &self.downloader {
             for id in d.finished() {
                 self.icons.remove(&id);
@@ -749,13 +649,12 @@ impl App {
         for (tab, label, soon) in [
             (Tab::Creatures, "Criaturas", false),
             (Tab::Items, "Ítems", false),
-            (Tab::Objects, "Objetos", false),
             (Tab::Map, "Mapa", false),
             (Tab::Places, "Lugares", false),
             (Tab::Powers, "Poderes", false),
             (Tab::Pvp, "PvP", false),
-            (Tab::SafeZones, "Zonas seguras", true),
-            (Tab::Teams, "Equipos", true),
+            (Tab::SafeZones, "Zonas seguras", false),
+            (Tab::Teams, "Equipos", false),
         ] {
             let selected = self.tab == tab;
             let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
@@ -792,7 +691,6 @@ impl App {
     fn catalog_view(&mut self, ui: &mut egui::Ui, mode: Mode) {
         egui::SidePanel::right(match mode {
             Mode::Creatures => "creature_controls",
-            Mode::Objects => "object_controls",
             Mode::Items => "item_controls",
         })
             .exact_width(320.0)
@@ -800,10 +698,9 @@ impl App {
             .show_inside(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, mode)));
 
         egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 8.0 })).show_inside(ui, |ui| {
-            let App { creatures, objects, item_cat, icons, dir, downloader, .. } = self;
+            let App { creatures, item_cat, icons, dir, downloader, .. } = self;
             let cat = match mode {
                 Mode::Creatures => creatures,
-                Mode::Objects => objects,
                 Mode::Items => item_cat,
             };
             if let Some(error) = &cat.error {
@@ -818,7 +715,6 @@ impl App {
                 let all = if mode == Mode::Creatures { "Todas las facciones" } else { "Todas las categorías" };
                 let salt = match mode {
                     Mode::Creatures => 0,
-                    Mode::Objects => 1,
                     Mode::Items => 2,
                 };
                 let current = if cat.group.is_empty() { all.to_string() } else { group_label(mode, &cat.group) };
@@ -837,8 +733,7 @@ impl App {
             let visible = cat.visible();
             let noun = match mode {
                 Mode::Creatures => "criaturas",
-                Mode::Objects => "objetos",
-                Mode::Items => "ítems entregables",
+                Mode::Items => "ítems",
             };
             let status = downloader.as_ref().map(|d| d.status()).unwrap_or_default();
             ui.label(RichText::new(format!("{} {}    {}", visible.len(), noun, status)).color(MUTED));
@@ -997,7 +892,6 @@ impl App {
             ui,
             match mode {
                 Mode::Creatures => "Invocación",
-                Mode::Objects => "Crear objeto",
                 Mode::Items => "Entregar ítem",
             },
             19.0,
@@ -1032,7 +926,6 @@ impl App {
                 ui.label(
                     RichText::new(match mode {
                         Mode::Creatures => "Elige una criatura de la lista",
-                        Mode::Objects => "Elige un objeto de la lista",
                         Mode::Items => "Elige un ítem de la lista",
                     })
                     .color(MUTED),
@@ -1064,7 +957,7 @@ impl App {
         divider(ui);
 
         let enabled = selected.is_some();
-        if button(ui, if mode == Mode::Creatures { "INVOCAR" } else { "CREAR" }, Vec2::new(ui.available_width(), 52.0), enabled, true) {
+        if button(ui, "INVOCAR", Vec2::new(ui.available_width(), 52.0), enabled, true) {
             self.spawn(mode);
         }
         let (text, color) = self.status_text();
@@ -1138,17 +1031,6 @@ impl App {
             ui.label(RichText::new(&self.notice).color(GOOD));
         }
     }
-
-    fn soon_tab(&mut self, ui: &mut egui::Ui, title: &str, text: &str) {
-        heading(ui, title, 22.0);
-        divider(ui);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(560.0), 120.0), Sense::hover());
-        ornate_frame(ui.painter(), rect);
-        ui.painter().text(rect.center() - Vec2::new(0.0, 22.0), Align2::CENTER_CENTER, "PRÓXIMAMENTE", title_font(20.0), GOLD);
-        let galley = ui.painter().layout(text.to_string(), egui::FontId::proportional(16.0), PARCHMENT, rect.width() - 50.0);
-        let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.center().y + 2.0);
-        ui.painter().galley(pos, galley, PARCHMENT);
-    }
 }
 
 impl eframe::App for App {
@@ -1168,7 +1050,6 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| match self.tab {
             Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
-            Tab::Objects => self.catalog_view(ui, Mode::Objects),
             Tab::Items => self.catalog_view(ui, Mode::Items),
             Tab::Map => self.map_tab(ui),
             tab => {
@@ -1176,8 +1057,8 @@ impl eframe::App for App {
                     Tab::Places => self.places_tab(ui),
                     Tab::Powers => self.powers_tab(ui),
                     Tab::Pvp => self.pvp_tab(ui),
-                    Tab::SafeZones => self.soon_tab(ui, "Zonas seguras", "Crea áreas donde nadie puede ser atacado ni saqueado."),
-                    _ => self.soon_tab(ui, "Equipos", "Arma equipos de jugadores y define quién es aliado."),
+                    Tab::SafeZones => self.zones_tab(ui),
+                    _ => self.teams_tab(ui),
                 });
             }
         });
@@ -1220,11 +1101,11 @@ mod tests {
             dir: dir.to_path_buf(),
             tab: Tab::Creatures,
             creatures: Catalog { entries, selected: Some(0), ..Default::default() },
-            objects: Catalog::default(),
             item_cat: Catalog::default(),
             items: Default::default(),
             downloader: None,
             powers: Default::default(),
+            social: Default::default(),
             map: Default::default(),
             level: 30,
             count: 2,
@@ -1274,58 +1155,6 @@ mod tests {
     fn emblem_kinds() {
         assert_eq!(emblems::kind_of("Enemy_Skeleton_Melee01", "Skeleton"), emblems::Kind::Skull);
         assert_eq!(emblems::kind_of("Enemy_Wildbeast_Wolf_Heavy", "WildBeast"), emblems::Kind::Paw);
-        assert_eq!(emblems::kind_of_object("Chest_Wood", "Contenedores"), emblems::Kind::Chest);
-        assert_eq!(emblems::kind_of_object("Iron_Ore_Node", "Recursos"), emblems::Kind::Gem);
-    }
-
-    #[test]
-    fn object_catalog_is_grouped_and_filtered() {
-        let dir = temp_dir("obj");
-        std::fs::write(
-            dir.join("export").join("m182_objects.csv"),
-            "name,guid,components\nLootChest_Random_Wood,22222222-2222-2222-2222-222222222222,CurrentTransform|Container\nLootPickup_Material_Amber,33333333-3333-3333-3333-333333333333,CurrentTransform\nSomething_Hidden,44444444-4444-4444-4444-444444444444,Health\nProp_Furniture_Table,55555555-5555-5555-5555-555555555555,CurrentTransform|Light\nBase_Logic_Trigger,66666666-6666-6666-6666-666666666666,CurrentTransform\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("export").join("m182_wiki_index.csv"),
-            "template,wiki_name,category,file\nLootPickup_Material_Amber,Amber,Materiales,amber.png\n",
-        )
-        .unwrap();
-        let mut list = load_objects(&dir).unwrap();
-        assert_eq!(list.len(), 5);
-        apply_wiki(&mut list, &wiki::load(&dir), true);
-        let mut cat = Catalog { entries: list, ..Default::default() };
-        assert_eq!(cat.visible().len(), 3);
-        cat.show_internal = true;
-        assert_eq!(cat.visible().len(), 5);
-        cat.show_internal = false;
-        cat.group = "Cofres y botín".into();
-        assert_eq!(cat.visible().len(), 1);
-        cat.group = "Materiales".into();
-        let found = cat.visible();
-        assert_eq!(found.len(), 1);
-        assert_eq!(cat.entries[found[0]].alias.as_deref(), Some("Amber"));
-        assert_eq!(cat.entries[found[0]].icon_file.as_deref(), Some("wiki/amber.png"));
-        assert_eq!(object_group("Prop_Door_Small_Vukah"), "Estructuras y props");
-        assert_eq!(object_group("LootPickup_Consumable_Bandage01"), "Consumibles");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn real_object_catalog_groups() {
-        let path = std::path::Path::new("/mnt/user-data/uploads/Enshrouded");
-        if path.join("export/m182_objects.csv").exists() {
-            let list = load_objects(path).unwrap();
-            let visible = list.iter().filter(|e| !e.internal).count();
-            assert!(visible > 3000, "visible {visible}");
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            for e in list.iter().filter(|e| !e.internal) {
-                *counts.entry(e.group.clone()).or_default() += 1;
-            }
-            let mut sorted: Vec<_> = counts.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
-            println!("{sorted:?}");
-        }
     }
 
     #[test]
@@ -1355,7 +1184,7 @@ mod tests {
         st.fly_speed = 20.0;
         powers::save(&dir, &st).unwrap();
         let back = powers::PowersState::load(&dir);
-        assert!(back.god && back.fly && !back.stamina && !back.reveal);
+        assert!(back.god && back.fly && !back.stamina);
         assert_eq!(back.fly_speed, 20.0);
         powers::command(&dir, &powers::teleport_body([1.0, 2.0, 3.0], true)).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(powers::COMMAND_FILE)).unwrap()).unwrap();
@@ -1394,12 +1223,11 @@ mod tests {
     }
 
     #[test]
-    fn targets_and_object_requests() {
+    fn targets_and_creature_requests() {
         let dir = temp_dir("pl");
         std::fs::write(dir.join(PLAYER_FILE), r#"{"x":10.5,"y":20.0,"z":-3.25}"#).unwrap();
         assert_eq!(read_player(&dir), Some([10.5, 20.0, -3.25]));
         let mut app = app_in(&dir, vec![entry("642098d4-fc09-48e2-811e-782d438bf551", "A", "Drak", false)]);
-        app.objects = Catalog { entries: vec![entry("22222222-2222-2222-2222-222222222222", "Chest", "Contenedores", false)], selected: Some(0), ..Default::default() };
         app.places.push(Place { name: "Torre".into(), x: 1.0, y: 2.0, z: 3.0 });
         app.save_places();
         assert_eq!(load_places(&dir).len(), 1);
@@ -1413,12 +1241,10 @@ mod tests {
         assert_eq!(read_request(&dir)["at"], json!([7.0, 8.0, 9.0]));
 
         app.target = Target::Forward;
-        app.spawn(Mode::Objects);
+        app.spawn(Mode::Creatures);
         let req = read_request(&dir);
         assert_eq!(req["forward"], true);
-        assert_eq!(req["object"], true);
-        assert!(req.get("health").is_none());
-        assert!(req.get("level").is_none());
+        assert!(req.get("object").is_none());
         let cfg = read_config(&dir);
         assert_eq!(cfg.get("spawn_template").and_then(|v| v.as_str()), Some("642098d4-fc09-48e2-811e-782d438bf551"));
 
@@ -1446,24 +1272,21 @@ mod tests {
         app.item_cat.selected = Some(sword);
         app.items.level = 40;
         app.items.rarity = 4;
-        app.items.amount = 1;
-        app.target = Target::Forward;
+        app.items.amount = 3;
+        app.items.generic_pickup = "c15a5c9d-4956-49ff-9d72-9f522229cf1c".into();
+        app.target = Target::Place;
         app.spawn(Mode::Items);
         let req = read_request(&dir);
-        assert_eq!(req["template"], "give-guid");
+        assert_eq!(req["template"], "c15a5c9d-4956-49ff-9d72-9f522229cf1c");
         assert_eq!(req["item"], 1234);
+        assert_eq!(req["item_guid"], "res-guid");
         assert_eq!(req["item_level"], 40);
         assert_eq!(req["item_rarity"], 4);
-        assert_eq!(req["default_level"], 3);
-        assert_eq!(req["default_rarity"], 2);
-        assert_eq!(req["object"], true);
+        assert_eq!(req["item_amount"], 3);
         assert_eq!(req["count"], 1);
-        let mat = app.item_cat.entries.iter().position(|e| e.label == "Old Thing").unwrap();
-        app.item_cat.selected = Some(mat);
-        app.spawn(Mode::Items);
-        let req = read_request(&dir);
-        assert_eq!(req["template"], "pick-guid");
-        assert!(req.get("item").is_none());
+        assert!(req.get("object").is_none());
+        assert!(req.get("forward").is_none());
+        assert!(req.get("at").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1478,6 +1301,39 @@ mod tests {
         assert_eq!(cfg["spawn_level"], 9);
         assert_eq!(cfg["spawner"], true);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn image_coverage_with_the_real_wiki_index() {
+        let path = std::path::Path::new("/mnt/user-data/uploads/Enshrouded");
+        if !path.join("export/m182_icons/wiki_index.tsv").exists() || !path.join("export/m182_items.csv").exists() {
+            return;
+        }
+        let index = icons::load_index(path);
+        let hit = |keys: &[String]| keys.iter().find(|k| index.contains_key(*k)).cloned();
+        let (cat, rows) = load_item_catalog(path);
+        let mut by_group: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut shown = 0;
+        for (e, it) in cat.entries.iter().zip(rows.iter()) {
+            let slot = by_group.entry(it.category.clone()).or_default();
+            slot.1 += 1;
+            if let Some(k) = hit(&e.icon_keys) {
+                slot.0 += 1;
+                if shown < 400 && (shown % 9 == 0) {
+                    println!("ITEM {} -> {}", it.debug, k);
+                }
+                shown += 1;
+            }
+        }
+        println!("ITEM COVERAGE {by_group:?}");
+        let enemies = load_enemies(path).unwrap();
+        let visible: Vec<&Entry> = enemies.iter().filter(|e| !e.internal).collect();
+        let covered = visible.iter().filter(|e| hit(&e.icon_keys).is_some()).count();
+        println!("ENEMY COVERAGE {covered}/{}", visible.len());
+        for e in visible.iter().filter(|e| hit(&e.icon_keys).is_none()).take(60) {
+            println!("ENEMY MISS {}", e.raw);
+        }
+        assert!(covered * 100 / visible.len().max(1) >= 60, "enemy coverage {covered}/{}", visible.len());
     }
 
     #[test]

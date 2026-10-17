@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{config::LIVE, faction, signatures};
+use super::{config::LIVE, faction, groups, signatures};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -37,7 +37,11 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
 }
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
-    faction::enemy(read_faction(a), read_faction(b), LIVE.pvp()) as u8
+    let (fa, fb) = (read_faction(a), read_faction(b));
+    if LIVE.pvp() && fa == faction::PLAYER && fb == faction::PLAYER && groups::same_team(a as usize, b as usize) {
+        return faction::enemy_vanilla(fa, fb) as u8;
+    }
+    faction::enemy(fa, fb, LIVE.pvp()) as u8
 }
 
 extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
@@ -46,7 +50,11 @@ extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
-    faction::friend_opts(read_faction(a), read_faction(b), flag, LIVE.pvp_friend_checks()) as u8
+    let (fa, fb) = (read_faction(a), read_faction(b));
+    if LIVE.pvp_friend_checks() && fa == faction::PLAYER && fb == faction::PLAYER && groups::same_team(a as usize, b as usize) {
+        return faction::friend_opts_vanilla(fa, fb, flag) as u8;
+    }
+    faction::friend_opts(fa, fb, flag, LIVE.pvp_friend_checks()) as u8
 }
 
 // The game may rely on registers that the Windows ABI treats as volatile (it was

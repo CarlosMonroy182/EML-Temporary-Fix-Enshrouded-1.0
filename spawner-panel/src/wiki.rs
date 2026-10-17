@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+#[allow(dead_code)]
 pub struct WikiEntry {
     pub name: String,
     pub category: String,
