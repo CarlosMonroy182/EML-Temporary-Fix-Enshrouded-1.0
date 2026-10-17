@@ -21,7 +21,7 @@ Teams (testing)
 
 Safe zones
 - Draw a circle (center + radius) on the world. Players inside cannot be hit by enemies (against other players: testing). They can still attack from inside.
-- Turn each zone on and off at any time. (Players do not get an on-screen message yet.)
+- Turn each zone on and off at any time. Players inside get a short visual aura (being verified in game).
 
 M182 Admin Pannel (separate .exe, downloaded from GitHub, see Installation)
 - Creatures tab: pick any enemy or boss by its in-game name, choose level, health and damage, and spawn it at your position or at a saved place. Persistent spawners with respawn timers keep a creature in a spot.
