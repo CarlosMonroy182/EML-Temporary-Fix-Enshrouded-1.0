@@ -85,6 +85,8 @@ local function fmt(v)
     return string.format("%.9g", v)
 end
 
+local function trace(step) print("[m182-trace] " .. step) end
+trace("start")
 local diag = {}
 local function dlog(line)
     diag[#diag + 1] = line
@@ -109,6 +111,7 @@ local NAME_FIELDS = {
     ["keen::ecs::LocaTagComponent"] = "locaTag",
 }
 
+trace("templates scan")
 local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end)
 local rows = {}
 local byName = {}
@@ -148,6 +151,7 @@ if templates ~= nil then
     end)
 end
 
+trace("templates scanned " .. #rows)
 local objectLines = {}
 local pickupByItem = {}
 local genericPickup = ""
@@ -185,6 +189,7 @@ pcall(function()
     table.sort(objectLines)
 end)
 
+trace("objects done")
 local function variantGuid(base, index, marker)
     local a, b, _, _, e = string.match(base, "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
     if a == nil then return nil end
@@ -229,11 +234,13 @@ for _, baseName in ipairs(BASES) do
     end
 end
 
+trace("variants done " .. created .. "/" .. failed)
 table.sort(rows, function(a, b)
     if a.faction ~= b.faction then return a.faction < b.faction end
     return a.name < b.name
 end)
 
+trace("loca start")
 -- English names of items come from the localisation table
 local translations = {}
 
@@ -348,6 +355,7 @@ local function display_of(row)
     return ""
 end
 
+trace("loca done")
 local out = { "name,guid,faction,boss,preset,display" }
 for _, r in ipairs(rows) do
     out[#out + 1] = string.format("%s,%s,%s,%s,%s,%s", r.name, r.guid, r.faction, tostring(r.boss), r.preset, display_of(r))
@@ -360,6 +368,7 @@ end
 local itemLines = {}
 local itemHeader = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison,wood,stone,metal,explosion,dmg_set,ar_physical,ar_blunt,ar_pierce,ar_cut,ar_magical,ar_fire,ar_ice,ar_fog,ar_lightning,ar_set"
 
+trace("items start")
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 local seenItemIds = {}
 if type(items) == "table" then
@@ -410,6 +419,7 @@ end
 if genericPickup ~= "" then dlog("generic_pickup=" .. genericPickup) end
 dlog(string.format("items: %d exported, %d English names", #itemLines, translationCount))
 
+trace("items done")
 -- Global balance values
 local balanceLines = { "key,value" }
 pcall(function()
