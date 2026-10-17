@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText, Vec2};
 use serde_json::{json, Value};
 
+use crate::session::{LogWatch, Member};
 use crate::theme::*;
 use crate::{write_atomic, App};
 
@@ -21,9 +22,64 @@ pub struct Zone {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Person {
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Team {
     pub name: String,
-    pub members: Vec<u32>,
+    pub members: Vec<Person>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seen {
+    pub member: Member,
+    pub online: Option<Online>,
+}
+
+impl Seen {
+    pub fn person(&self) -> Person {
+        Person { key: self.member.key(), name: self.member.name.clone() }
+    }
+}
+
+/// Matches the players the game reports in its log (name and platform id) with the characters the
+/// native layer sees in the world: the host first, then the others in the order they appeared.
+pub fn pair_players(log: &[Member], online: &[Online]) -> Vec<Seen> {
+    if log.is_empty() {
+        return online
+            .iter()
+            .map(|p| Seen {
+                member: Member { slot: p.number, name: if p.me { format!("Tú (jugador {})", p.number) } else { format!("Jugador {}", p.number) }, platform: String::new(), id: String::new() },
+                online: Some(p.clone()),
+            })
+            .collect();
+    }
+    let host_online = online.iter().find(|p| p.me).or_else(|| online.first());
+    let mut others = online.iter().filter(|p| Some(p.number) != host_online.map(|h| h.number));
+    log.iter()
+        .map(|m| {
+            let online = if m.slot == 0 { host_online.cloned() } else { others.next().cloned() };
+            Seen { member: m.clone(), online }
+        })
+        .collect()
+}
+
+pub fn team_numbers(teams: &[Team], seen: &[Seen]) -> Vec<Vec<u32>> {
+    teams
+        .iter()
+        .map(|t| {
+            let mut numbers: Vec<u32> = seen
+                .iter()
+                .filter(|s| t.members.iter().any(|m| m.key == s.member.key()))
+                .filter_map(|s| s.online.as_ref().map(|o| o.number))
+                .collect();
+            numbers.sort_unstable();
+            numbers
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +103,9 @@ pub struct SocialState {
     pub zones: Vec<Zone>,
     pub teams: Vec<Team>,
     pub online: Vec<Online>,
+    pub seen: Vec<Seen>,
+    pub watch: LogWatch,
+    pub written: Vec<Vec<u32>>,
     pub checked: Instant,
     pub zone_name: String,
     pub zone_radius: f64,
@@ -60,6 +119,9 @@ impl Default for SocialState {
             zones: Vec::new(),
             teams: Vec::new(),
             online: Vec::new(),
+            seen: Vec::new(),
+            watch: LogWatch::new(),
+            written: Vec::new(),
             checked: Instant::now(),
             zone_name: String::new(),
             zone_radius: 40.0,
@@ -96,15 +158,28 @@ pub fn parse_teams(text: &str) -> Vec<Team> {
     let Some(Value::Array(list)) = root.get("teams") else { return Vec::new() };
     list.iter()
         .filter_map(|v| {
-            let members = v.get("members")?.as_array()?.iter().filter_map(|m| m.as_u64()).map(|m| m as u32).collect();
+            let members = v
+                .get("people")
+                .and_then(|p| p.as_array())
+                .map(|people| {
+                    people
+                        .iter()
+                        .filter_map(|p| Some(Person { key: p.get("key")?.as_str()?.to_string(), name: p.get("name")?.as_str()?.to_string() }))
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(Team { name: v.get("name")?.as_str()?.to_string(), members })
         })
         .collect()
 }
 
-pub fn teams_json(teams: &[Team]) -> Value {
+pub fn teams_json(teams: &[Team], numbers: &[Vec<u32>]) -> Value {
     json!({
-        "teams": teams.iter().map(|t| json!({"name": t.name, "members": t.members})).collect::<Vec<_>>()
+        "teams": teams.iter().enumerate().map(|(i, t)| json!({
+            "name": t.name,
+            "members": numbers.get(i).cloned().unwrap_or_default(),
+            "people": t.members.iter().map(|p| json!({"key": p.key, "name": p.name})).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>()
     })
 }
 
@@ -130,12 +205,11 @@ pub fn zone_at<'a>(zones: &'a [Zone], x: f64, z: f64) -> Option<&'a Zone> {
     zones.iter().find(|zone| zone.enabled && (x - zone.x).powi(2) + (z - zone.z).powi(2) <= zone.radius * zone.radius)
 }
 
-pub fn set_member(teams: &mut [Team], team: usize, number: u32, member: bool) {
+pub fn set_member(teams: &mut [Team], team: usize, person: &Person, member: bool) {
     for (i, t) in teams.iter_mut().enumerate() {
-        t.members.retain(|m| *m != number);
+        t.members.retain(|m| m.key != person.key);
         if member && i == team {
-            t.members.push(number);
-            t.members.sort_unstable();
+            t.members.push(person.clone());
         }
     }
 }
@@ -156,6 +230,8 @@ impl SocialState {
     pub fn refresh(&mut self, dir: &Path) {
         self.checked = Instant::now();
         self.online = std::fs::read_to_string(dir.join(PLAYERS_FILE)).map(|t| parse_online(&t)).unwrap_or_default();
+        self.watch.refresh(dir);
+        self.seen = pair_players(&self.watch.members, &self.online);
     }
 
     pub fn save_zones(&mut self, dir: &Path) {
@@ -166,10 +242,26 @@ impl SocialState {
     }
 
     pub fn save_teams(&mut self, dir: &Path) {
-        self.notice = match write_atomic(dir, TEAMS_FILE, "m182_teams.json.tmp", &teams_json(&self.teams).to_string()) {
+        let numbers = team_numbers(&self.teams, &self.seen);
+        let result = write_atomic(dir, TEAMS_FILE, "m182_teams.json.tmp", &teams_json(&self.teams, &numbers).to_string());
+        if result.is_ok() {
+            self.written = numbers;
+        }
+        self.notice = match result {
             Ok(()) => "Guardado. El juego lo aplica en un par de segundos.".to_string(),
             Err(e) => format!("Error: {e}"),
         };
+    }
+
+    pub fn resync_teams(&mut self, dir: &Path) {
+        if self.teams.is_empty() {
+            return;
+        }
+        if team_numbers(&self.teams, &self.seen) != self.written {
+            let notice = self.notice.clone();
+            self.save_teams(dir);
+            self.notice = notice;
+        }
     }
 }
 
@@ -178,6 +270,7 @@ impl App {
         if self.social.checked.elapsed() >= Duration::from_millis(1000) {
             let dir = self.dir.clone();
             self.social.refresh(&dir);
+            self.social.resync_teams(&dir);
         }
     }
 
@@ -289,29 +382,44 @@ impl App {
             };
         }
         divider(ui);
-        label_title(ui, "JUGADORES EN EL MUNDO");
-        if self.social.online.is_empty() {
-            ui.label(RichText::new("Sin datos: abre el juego y carga el mundo.").color(MUTED));
+        label_title(ui, "JUGADORES CONECTADOS");
+        if self.social.seen.is_empty() {
+            ui.label(RichText::new("Nadie conectado todavía: abre el juego y carga el mundo.").color(MUTED));
         }
-        for p in &self.social.online {
-            let team = self.social.teams.iter().find(|t| t.members.contains(&p.number)).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
-            let text = format!("{}    X {:.0}  Z {:.0}    {}", player_label(p), p.x, p.z, team);
-            if p.me {
-                ui.label(RichText::new(text).color(GOLD));
-            } else {
-                ui.label(text);
-            }
+        for s in &self.social.seen {
+            let team = self.social.teams.iter().find(|t| t.members.iter().any(|m| m.key == s.member.key())).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
+            let place = match &s.online {
+                Some(o) => format!("X {:.0}  Z {:.0}", o.x, o.z),
+                None => "cargando…".to_string(),
+            };
+            let host = s.online.as_ref().map(|o| o.me).unwrap_or(s.member.slot == 0);
+            let name = if host { format!("{}  (tú)", s.member.name) } else { s.member.name.clone() };
+            ui.horizontal_wrapped(|ui| {
+                let label = RichText::new(name).font(title_font(15.0));
+                ui.label(if host { label.color(GOLD) } else { label.color(PARCHMENT) });
+                let id = s.member.id_label();
+                if !id.is_empty() {
+                    ui.label(RichText::new(id).color(MUTED));
+                }
+                ui.label(RichText::new(place).color(MUTED));
+                ui.label(team);
+            });
         }
-        ui.label(RichText::new("Solo aparecen los jugadores conectados ahora mismo. Para saber quién es quién, compara las coordenadas con las que ves en el juego. Los números se reinician cada vez que abres el mundo.").color(MUTED).size(13.0));
+        ui.label(RichText::new("Los nombres y los ID de Steam o PS5 los toma el panel del registro del propio juego. Cada jugador queda en su equipo aunque se desconecte y vuelva a entrar.").color(MUTED).size(13.0));
         divider(ui);
 
-        let online: Vec<Online> = self.social.online.clone();
-        let mut numbers: Vec<u32> = online.iter().map(|p| p.number).chain(self.social.teams.iter().flat_map(|t| t.members.iter().copied())).collect();
-        numbers.sort_unstable();
-        numbers.dedup();
+        let seen: Vec<Seen> = self.social.seen.clone();
+        let mut candidates: Vec<Person> = seen.iter().map(|s| s.person()).collect();
+        for team in &self.social.teams {
+            for m in &team.members {
+                if !candidates.iter().any(|c| c.key == m.key) {
+                    candidates.push(m.clone());
+                }
+            }
+        }
         let mut changed = false;
         let mut remove = None;
-        let mut membership: Vec<(usize, u32, bool)> = Vec::new();
+        let mut membership: Vec<(usize, Person, bool)> = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, team) in self.social.teams.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -322,25 +430,23 @@ impl App {
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        for n in numbers.iter().copied() {
-                            let mut on = team.members.contains(&n);
-                            let label = match online.iter().find(|p| p.number == n) {
-                                Some(p) => player_label(p),
-                                None => format!("Jugador {n} (desconectado)"),
-                            };
+                        for person in &candidates {
+                            let mut on = team.members.iter().any(|m| m.key == person.key);
+                            let connected = seen.iter().any(|s| s.member.key() == person.key);
+                            let label = if connected { person.name.clone() } else { format!("{} (desconectado)", person.name) };
                             if ui.checkbox(&mut on, label).changed() {
-                                membership.push((i, n, on));
+                                membership.push((i, person.clone(), on));
                             }
                         }
-                        if numbers.is_empty() {
+                        if candidates.is_empty() {
                             ui.label(RichText::new("No hay jugadores conectados todavía.").color(MUTED));
                         }
                     });
                 });
             }
         });
-        for (team, number, on) in membership {
-            set_member(&mut self.social.teams, team, number, on);
+        for (team, person, on) in membership {
+            set_member(&mut self.social.teams, team, &person, on);
             changed = true;
         }
         if let Some(i) = remove {
@@ -387,20 +493,56 @@ mod tests {
         assert!(parse_zones("basura").is_empty());
     }
 
-    #[test]
-    fn teams_are_exclusive_and_roundtrip() {
-        let mut teams = vec![Team { name: "A".into(), members: vec![1] }, Team { name: "B".into(), members: vec![] }];
-        set_member(&mut teams, 1, 1, true);
-        assert!(teams[0].members.is_empty());
-        assert_eq!(teams[1].members, vec![1]);
-        set_member(&mut teams, 1, 3, true);
-        set_member(&mut teams, 1, 2, true);
-        assert_eq!(teams[1].members, vec![1, 2, 3]);
-        set_member(&mut teams, 1, 2, false);
-        assert_eq!(teams[1].members, vec![1, 3]);
-        assert_eq!(parse_teams(&teams_json(&teams).to_string()), teams);
+    fn person(key: &str, name: &str) -> Person {
+        Person { key: key.into(), name: name.into() }
     }
 
+    #[test]
+    fn teams_are_exclusive_and_roundtrip() {
+        let a = person("steamid:1", "A");
+        let b = person("steamid:2", "B");
+        let c = person("name:C", "C");
+        let mut teams = vec![Team { name: "A".into(), members: vec![a.clone()] }, Team { name: "B".into(), members: vec![] }];
+        set_member(&mut teams, 1, &a, true);
+        assert!(teams[0].members.is_empty());
+        assert_eq!(teams[1].members, vec![a.clone()]);
+        set_member(&mut teams, 1, &c, true);
+        set_member(&mut teams, 1, &b, true);
+        assert_eq!(teams[1].members.len(), 3);
+        set_member(&mut teams, 1, &b, false);
+        assert_eq!(teams[1].members, vec![a, c]);
+        assert_eq!(parse_teams(&teams_json(&teams, &[vec![], vec![1, 2]]).to_string()), teams);
+    }
+
+    #[test]
+    fn log_players_are_paired_with_world_characters() {
+        let log = vec![
+            Member { slot: 0, name: "moradoox".into(), platform: String::new(), id: String::new() },
+            Member { slot: 1, name: "Nacht".into(), platform: "steamid".into(), id: "7656".into() },
+        ];
+        let online = vec![
+            Online { number: 1, x: 1.0, y: 0.0, z: 2.0, me: true },
+            Online { number: 2, x: 5.0, y: 0.0, z: 6.0, me: false },
+        ];
+        let seen = pair_players(&log, &online);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].online.as_ref().unwrap().number, 1);
+        assert_eq!(seen[1].online.as_ref().unwrap().number, 2);
+        // a friend whose character has not loaded yet is listed without a position
+        let loading = pair_players(&log, &online[..1]);
+        assert_eq!(loading.len(), 2);
+        assert!(loading[1].online.is_none());
+        // a stray extra entity never becomes a listed player
+        let extra = vec![online[0].clone(), online[1].clone(), Online { number: 3, x: 0.0, y: 0.0, z: 0.0, me: false }];
+        assert_eq!(pair_players(&log[..1], &extra).len(), 1);
+        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[1].person()] }];
+        assert_eq!(team_numbers(&teams, &seen), vec![vec![1, 2]]);
+        assert_eq!(team_numbers(&teams, &loading), vec![vec![1]]);
+        // without a readable log the characters of the world are listed by number
+        let fallback = pair_players(&[], &online);
+        assert_eq!(fallback.len(), 2);
+        assert_eq!(fallback[0].member.name, "Tú (jugador 1)");
+    }
     #[test]
     fn online_players_file() {
         let list = parse_online(r#"[{"n":2,"x":1.5,"y":3.0,"z":-4.0},{"n":1,"x":10.0,"y":0.0,"z":5.0}]"#);
@@ -418,14 +560,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut s = SocialState::default();
         s.zones.push(Zone { name: "Torre".into(), x: 5.0, z: 6.0, radius: 20.0, enabled: true });
-        s.teams.push(Team { name: "Rojo".into(), members: vec![1, 2] });
+        s.teams.push(Team { name: "Rojo".into(), members: vec![Person { key: "name:Nacht".into(), name: "Nacht".into() }] });
         s.save_zones(&dir);
         s.save_teams(&dir);
         let loaded = SocialState::load(&dir);
         assert_eq!(loaded.zones, s.zones);
         assert_eq!(loaded.teams, s.teams);
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(TEAMS_FILE)).unwrap()).unwrap();
-        assert_eq!(raw["teams"][0]["members"], json!([1, 2]));
+        assert_eq!(raw["teams"][0]["members"], json!([]));
+        assert_eq!(raw["teams"][0]["people"][0]["name"], json!("Nacht"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

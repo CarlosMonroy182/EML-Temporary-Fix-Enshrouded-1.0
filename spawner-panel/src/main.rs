@@ -6,6 +6,7 @@ mod items;
 mod map;
 mod tiles;
 mod powers;
+mod session;
 mod social;
 mod spawners;
 mod theme;
@@ -230,7 +231,9 @@ fn is_internal(raw: &str) -> bool {
 fn apply_wiki(entries: &mut [Entry], wiki: &std::collections::HashMap<String, wiki::WikiEntry>) {
     for e in entries.iter_mut() {
         let Some(w) = wiki.get(&e.raw.to_lowercase()) else { continue };
-        e.alias = Some(w.name.clone());
+        if e.alias.is_none() {
+            e.alias = Some(w.name.clone());
+        }
         if !w.file.is_empty() {
             e.icon_file = Some(format!("wiki/{}", w.file));
         }
@@ -273,21 +276,22 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
         }
         let label = pretty(parts[0]);
         let group = parts[2].trim().to_string();
+        let game_name = parts.get(5).map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
         out.push(Entry {
             guid: parts[1].trim().to_string(),
             raw: parts[0].to_string(),
-            search: format!("{} {}", label, faction_label(&group)).to_lowercase(),
+            search: format!("{} {} {}", label, faction_label(&group), game_name.clone().unwrap_or_default()).to_lowercase(),
             kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
             icon_keys: enemy_icon_keys(parts[0]),
-            alias: None,
+            alias: game_name,
             icon_file: None,
             label,
             group,
             boss: parts[3].trim() == "true",
         });
     }
-    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out.sort_by(|a, b| a.alias.as_deref().unwrap_or(&a.label).to_lowercase().cmp(&b.alias.as_deref().unwrap_or(&b.label).to_lowercase()));
     if out.is_empty() {
         return Err("La lista de enemigos está vacía.".to_string());
     }
@@ -318,11 +322,13 @@ fn item_labels(rows: &[items::Item], keys: &[Vec<String>], titles: &HashMap<Stri
         .zip(found)
         .map(|(it, title)| {
             let raw = items::friendly_name(&it.debug);
+            if it.name != it.debug && !it.name.trim().is_empty() {
+                return it.name.clone();
+            }
             match title {
                 Some(t) if uses.get(&t).copied().unwrap_or(0) > 1 => format!("{t} · {raw}"),
                 Some(t) => t,
-                None if it.name == it.debug => raw,
-                None => it.name.clone(),
+                None => raw,
             }
         })
         .collect()
@@ -716,7 +722,7 @@ impl App {
                 ui.label(RichText::new("Herramientas de administración para Enshrouded").color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !DONATE_URL.is_empty() && button(ui, "Apoya el proyecto", Vec2::new(190.0, 34.0), true, false) {
+                if !DONATE_URL.is_empty() && button(ui, "Paypal Donations Support", Vec2::new(250.0, 34.0), true, false) {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_URL));
                 }
             });
@@ -730,7 +736,7 @@ impl App {
             (Tab::Items, "Ítems", false),
             (Tab::Map, "Mapa", false),
             (Tab::Places, "Lugares", false),
-            (Tab::Powers, "Poderes", false),
+            (Tab::Powers, "Admin", false),
             (Tab::Pvp, "PvP", false),
             (Tab::SafeZones, "Zonas seguras", false),
             (Tab::Teams, "Equipos", false),
@@ -1515,6 +1521,33 @@ mod tests {
             println!("ENEMY MISS {}", e.raw);
         }
         assert!(covered * 100 / visible.len().max(1) >= 60, "enemy coverage {covered}/{}", visible.len());
+    }
+
+    #[test]
+    fn enemy_names_come_from_the_game_column() {
+        let dir = std::env::temp_dir().join(format!("m182_enemy_names_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        std::fs::write(
+            dir.join("export/m182_enemies.csv"),
+            "name,guid,faction,boss,preset,display\nEnemy_Skeleton_Melee01,aaaa,Skeleton,false,,Skeleton Warrior\nEnemy_Troll_01,bbbb,Troll,false,,\n",
+        )
+        .unwrap();
+        let list = load_enemies(&dir).unwrap();
+        let skeleton = list.iter().find(|e| e.guid == "aaaa").unwrap();
+        assert_eq!(skeleton.alias.as_deref(), Some("Skeleton Warrior"));
+        assert!(skeleton.search.contains("skeleton warrior"));
+        assert!(list.iter().find(|e| e.guid == "bbbb").unwrap().alias.is_none());
+    }
+
+    #[test]
+    fn game_item_names_win_over_wiki_titles() {
+        let mut titles = HashMap::new();
+        titles.insert(icons::norm("Warrior Helmet"), "Wiki Helmet".to_string());
+        let csv = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut\n1,aaaaaaaa-0000-0000-0000-000000000001,Armor_T2_Warrior_Helmet_Loot,Warrior Helmet,Equipment,Rare,1,Armour_Head,10,10,,,,10,1,1,0\n";
+        let rows = items::parse_items(csv);
+        let entries = item_entries(&rows, &titles);
+        assert_eq!(entries[0].label, "Warrior Helmet");
     }
 
     #[test]

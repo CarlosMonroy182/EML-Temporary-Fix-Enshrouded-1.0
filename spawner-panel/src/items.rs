@@ -142,6 +142,7 @@ pub fn is_internal_item(debug: &str, category: &str) -> bool {
         || n.starts_with('_')
         || n.starts_with("z_")
         || n.starts_with("8klore")
+        || n.starts_with("ability_")
         || n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
         || ["deprecated", "norecipe", "_old", "debug", "_test", "test_", "dummy", "placeholder", "_wip", "unused"].iter().any(|w| n.contains(w))
 }
@@ -724,6 +725,27 @@ impl ItemsState {
         Ok(())
     }
 
+    pub fn reset_all(&mut self, dir: &Path) -> Result<usize, String> {
+        let ids: Vec<u32> = self.saved.keys().copied().collect();
+        let count = ids.len();
+        for id in ids {
+            let Some(item) = self.rows.iter().find(|r| r.id == id).cloned() else {
+                self.saved.remove(&id);
+                self.sent.remove(&id);
+                continue;
+            };
+            self.saved.remove(&id);
+            self.working.remove(&id);
+            self.apply_item(dir, &item)?;
+        }
+        self.saved.clear();
+        self.working.clear();
+        self.dirty.clear();
+        self.balance = self.balance_base.clone();
+        self.persist(dir)?;
+        Ok(count)
+    }
+
     pub fn persist(&self, dir: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&stats_json(&self.saved, &self.balance_overrides())).map_err(|e| e.to_string())?;
         write_atomic(dir, STATS_FILE, "m182_item_stats.json.tmp", &text)?;
@@ -938,6 +960,15 @@ impl App {
             ui.label(RichText::new("Durabilidad, vida base del jugador, niveles máximos… Afectan a todo el juego, no a un ítem concreto.").color(MUTED));
             divider(ui);
             self.balance_ui(ui);
+            divider(ui);
+            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego. Los stats de cada ítem cambian ese tipo de ítem para todas sus copias.").color(MUTED).size(12.5));
+            if button(ui, "RESTAURAR TODO A VALORES DEL JUEGO", Vec2::new(ui.available_width().min(360.0), 34.0), true, false) {
+                let dir = self.dir.clone();
+                self.items.notice = match self.items.reset_all(&dir) {
+                    Ok(n) => format!("Todo restaurado ({n} ítems y los ajustes globales). Reinicia el juego para que los ajustes globales vuelvan a su valor."),
+                    Err(e) => format!("Error: {e}"),
+                };
+            }
             if !self.items.notice.is_empty() {
                 ui.add_space(8.0);
                 ui.label(RichText::new(self.items.notice.clone()).color(GOOD));
@@ -1105,6 +1136,39 @@ mod tests {
         assert!(lua.contains("[\"durabilityStart\"] = 500"));
         assert!(lua.contains("[\"rarityDurabilityMod.epic\"] = 3.500000000"));
         assert!(lua.contains("woodDamage = true, stoneDamage = true, metalDamage = true, explosionDamage = true"));
+    }
+
+    #[test]
+    fn reset_all_clears_items_balance_and_the_mod() {
+        let dir = std::env::temp_dir().join(format!("m182_items_reset_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let items = parse_items(&sample());
+        let sword = items.iter().find(|i| i.id == 1234).unwrap().clone();
+        let mut state = ItemsState { rows: items, ..Default::default() };
+        state.balance_base.insert("durabilityStart".to_string(), 100.0);
+        state.balance.insert("durabilityStart".to_string(), 900.0);
+        let mut edit = ItemsState::base_edit(&sword);
+        edit.dmg.as_mut().unwrap()[1] = 9.0;
+        state.set_edit(&sword, edit);
+        state.apply_item(&dir, &sword).unwrap();
+        state.outbox.clear();
+        assert_eq!(state.reset_all(&dir).unwrap(), 1);
+        assert!(state.saved.is_empty());
+        assert_eq!(state.balance["durabilityStart"], 100.0);
+        assert_eq!(state.outbox.len(), 1);
+        assert_eq!(state.outbox[0].1["stats"]["dmg_new"], dmg_hex(&sword.dmg));
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
+        assert!(!lua.contains("dmgMod = 9"));
+        assert!(!lua.contains("durabilityStart\"] = 900"));
+        let (loaded, bal) = load_saved(&dir);
+        assert!(loaded.is_empty() && bal.is_empty());
+    }
+
+    #[test]
+    fn skill_tree_abilities_are_hidden() {
+        assert!(is_internal_item("Ability_DoubleJump", "Materials"));
+        assert!(!is_internal_item("Material_Wood", "Materials"));
     }
 
     #[test]
