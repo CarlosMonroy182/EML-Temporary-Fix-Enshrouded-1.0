@@ -541,6 +541,7 @@ local function put(container, key, value)
 end
 
 local applied, failed = 0, 0
+print("[m182-item-stats] start")
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 if type(items) == "table" then
     for _, resource in ipairs(items) do
@@ -570,6 +571,8 @@ if type(items) == "table" then
         end)
     end
 end
+
+print(string.format("[m182-item-stats] items done applied=%d failed=%d", applied, failed))
 
 local tables = try(function() return game.assets.get_resources_by_type("keen::BalancingTable") end)
 if type(tables) == "table" and #tables > 0 then
@@ -1101,6 +1104,7 @@ mod tests {
         assert!(lua.contains("dmgMod = 5"));
         assert!(lua.contains("[\"durabilityStart\"] = 500"));
         assert!(lua.contains("[\"rarityDurabilityMod.epic\"] = 3.500000000"));
+        assert!(lua.contains("woodDamage = true, stoneDamage = true, metalDamage = true, explosionDamage = true"));
     }
 
     #[test]

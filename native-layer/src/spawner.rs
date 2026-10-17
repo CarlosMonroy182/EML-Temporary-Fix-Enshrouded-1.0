@@ -453,7 +453,7 @@ pub fn keeper_pass() {
 fn keeper_loop() {
     loop {
         std::thread::sleep(Duration::from_millis(150));
-        keeper_pass();
+        let _ = std::panic::catch_unwind(keeper_pass);
     }
 }
 
@@ -2507,7 +2507,7 @@ fn players_loop() {
         if manager == 0 || PLAYER_ID.load(Ordering::SeqCst) == 0 {
             continue;
         }
-        scan_players_once(manager);
+        let _ = std::panic::catch_unwind(|| scan_players_once(manager));
     }
 }
 
