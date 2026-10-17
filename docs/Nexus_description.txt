@@ -1,0 +1,71 @@
+M182 PvP + Admin Tools
+Host-only PvP, teams, safe zones and a creature/item spawner panel for Enshrouded 1.0 - friends need nothing installed (in development)
+
+What is it?
+M182 PvP lets the players in your session damage each other, and comes with the M182 Admin Pannel: a separate window (medieval style) to control your world while you play: spawn creatures with custom health and damage, give yourself items with edited stats, teleport, fly, set safe zones and build teams.
+
+Only the host installs it. Your friends join with the normal, unmodified game (PC or PS5).
+
+IMPORTANT: this project is still in development and will keep being updated here on Nexus. Some parts are marked "testing" below. The panel text is in Spanish because it is my original language; an English translation will come when the project is finished.
+
+Features
+
+Player vs player
+- Players can hit and damage each other with weapons and abilities. Enemies are unchanged, so PvE and PvP happen at the same time.
+- Turn it on and off from the panel (PvP tab) or by editing m182_native.json; it applies in about 2 seconds, no restart needed.
+
+Teams (testing)
+- Create teams from the players connected to your session. The panel reads their names and Steam / platform IDs from the game log.
+- Players in the same team cannot damage each other while PvP is on.
+- Not tested with several real players yet. Feedback is welcome.
+
+Safe zones
+- Draw a circle (center + radius) on the world. Players inside cannot be hit by enemies (against other players: testing). They can still attack from inside.
+- Turn each zone on and off at any time. (Players do not get an on-screen message yet.)
+
+M182 Admin Pannel (separate .exe, downloaded from GitHub, see Installation)
+- Creatures tab: pick any enemy or boss by its in-game name, choose level, health and damage, and spawn it at your position or at a saved place. Persistent spawners with respawn timers keep a creature in a spot.
+- Items tab: browse every item with its in-game name, edit weapon damage and armor values, and deliver the item straight into your inventory. Skill-tree abilities are hidden. Edits are saved automatically.
+- Map tab: world map with your position, saved places and click-to-teleport. Known issue: the map overlay is currently offset from the real world; I am working on it.
+- Places tab: save and name coordinates.
+- Admin tab (host only): god mode, infinite stamina and mana, fly (Space up / Left Ctrl down, adjustable speed), heal, and teleport with protected landing (it only lowers you to the ground when the height is unknown).
+- PvP, Safe zones and Teams tabs: control the features above.
+- Settings tab: global balance values (durability, base health, level caps, ...). They affect the whole world and need a game restart. "Restore everything to game values" resets all item and global edits.
+
+Requirements
+- Enshrouded 1.0 (tested on build 1267041), Windows. Not for dedicated servers yet.
+- Only the host installs it.
+
+Installation
+1. Close Enshrouded.
+2. Copy the contents of the main file into the game folder, next to enshrouded.exe (Steam > Enshrouded > Manage > Browse local files): dbghelp.dll, m182_native.json, eml.json (skip it if you already have EML; then set "use_export_flag" to true) and the folder mods\m182_spawn_variants (into your "mods" folder).
+3. Start the game once and load your world. The mod fills the "export" folder with the creature and item lists.
+4. Optional - Admin Pannel: download M182_AdminPannel.exe from the GitHub link in the README (or the Links section below) and put it next to enshrouded.exe. Open it while the game is running.
+
+Nexus does not allow hosting the .exe, so it is published on my GitHub with its full source code. Windows or your browser may warn about it because it is a new unsigned program.
+
+Configuration
+m182_native.json
+- enabled (true): master switch. false disables the mod completely.
+- pvp (true): players can damage each other.
+- pvp_friend_checks (true): needed for teams to protect their members. If PvP does nothing, try changing it.
+- spawner (true): enables the creature spawner used by the panel.
+
+Notes
+- Known issues: the map overlay is offset; the loot dropped by spawned creatures may not be collectable after restarting the world; infinite stamina can still flicker while a status effect (cold, poison...) is acting. All are on my list.
+- Item stat edits change that item type for every copy of it; global balance values affect every weapon and player of the world.
+- Summons and companions do not attack other players yet.
+- If the game updates, the native part stays inactive until the mod is updated (it checks the game code first).
+- Some antivirus programs flag DLL loaders like this one. The full source code is available on GitHub so you can check or build it yourself.
+- This mod includes a modified version of EML (Enshrouded Mod Loader), so EML mods keep working on 1.0 with it. If you already use EML, replace its dbghelp.dll with this one.
+
+Planned
+- English translation of the panel.
+- Fixed map, safe-zone message/aura, immunity to status effects with infinite stamina.
+- Summons that fight for their owner, chest protection for teammates, more spawner options.
+
+Credits
+Made by M182 for the Enshrouded community.
+Based on EML by Brabb3l (GPL-3.0). This mod is released under GPL-3.0.
+Source code and Admin Pannel download: https://github.com/CarlosMonroy182/EML-Temporary-Fix-Enshrouded-1.0
+Buy me a coffee - PayPal Link: https://www.paypal.me/MoradoGames

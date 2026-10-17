@@ -1,0 +1,15 @@
+[package]
+name = "mod-loader-runtime"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+
+[dependencies]
+mod-loader = { package = "mod-loader-base", path = "../mod-loader-base" }
+
+parking_lot.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# libloading = "0.9.0"
