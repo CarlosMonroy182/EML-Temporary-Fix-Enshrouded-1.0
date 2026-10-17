@@ -112,11 +112,13 @@ local NAME_FIELDS = {
 local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end)
 local rows = {}
 local byName = {}
+local existingGuid = {}
 
 if templates ~= nil then
     pcall(function()
         for _, res in ipairs(templates) do
             local data = res.data
+            existingGuid[string.lower(str(res.guid))] = true
             local name = str(try(function() return data.name end))
             local faction, boss, hasHealth = "", false, false
             local nameRefs = {}
@@ -200,6 +202,7 @@ for _, baseName in ipairs(BASES) do
             local guid = variantGuid(base.guid, index)
             local ok, err = pcall(function()
                 if guid == nil then error("bad guid") end
+                if existingGuid[string.lower(guid)] then return end
                 local source = base.res.data
                 local copy = game.assets.create_resource(source, "keen::ecs::TemplateResource", guid, 0)
                 local data = copy.data
