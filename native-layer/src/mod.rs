@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod faction;
+pub mod groups;
 mod signatures;
 
 #[cfg(windows)]

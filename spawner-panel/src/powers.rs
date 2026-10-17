@@ -15,7 +15,6 @@ pub struct PowersState {
     pub stamina: bool,
     pub fly: bool,
     pub fly_speed: f32,
-    pub reveal: bool,
     pub unknown_height: bool,
     pub teleport: [f64; 3],
     pub notice: String,
@@ -23,7 +22,7 @@ pub struct PowersState {
 
 impl Default for PowersState {
     fn default() -> Self {
-        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, reveal: false, unknown_height: false, teleport: [0.0; 3], notice: String::new() }
+        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, unknown_height: false, teleport: [0.0; 3], notice: String::new() }
     }
 }
 
@@ -34,7 +33,6 @@ impl PowersState {
             s.god = v.get("god").and_then(|x| x.as_bool()).unwrap_or(false);
             s.stamina = v.get("stamina").and_then(|x| x.as_bool()).unwrap_or(false);
             s.fly = v.get("fly").and_then(|x| x.as_bool()).unwrap_or(false);
-            s.reveal = v.get("reveal_map").and_then(|x| x.as_bool()).unwrap_or(false);
             if let Some(f) = v.get("fly_speed").and_then(|x| x.as_f64()) {
                 s.fly_speed = (f as f32).clamp(2.0, 60.0);
             }
@@ -48,7 +46,6 @@ impl PowersState {
             "stamina": self.stamina,
             "fly": self.fly,
             "fly_speed": self.fly_speed,
-            "reveal_map": self.reveal,
         })
     }
 }
@@ -90,7 +87,6 @@ impl App {
             label_title(ui, "VELOCIDAD DE VUELO (metros por segundo)");
             changed |= ui.add(egui::Slider::new(&mut self.powers.fly_speed, 2.0..=60.0).fixed_decimals(0)).changed();
         });
-        changed |= ui.checkbox(&mut self.powers.reveal, "Revelar mapa (experimental): descubre el terreno alrededor de ti desde lejos").changed();
         if changed {
             self.save_powers();
         }

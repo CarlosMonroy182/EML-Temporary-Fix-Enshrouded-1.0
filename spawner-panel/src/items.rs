@@ -88,8 +88,6 @@ pub struct Item {
     pub slot: String,
     pub level_min: u32,
     pub level_max: u32,
-    pub give_guid: String,
-    pub pickup_guid: String,
     pub give_level: u32,
     pub dmg: [f32; 15],
     pub dmg_set: bool,
@@ -104,9 +102,19 @@ impl Item {
     }
 
     pub fn deliverable(&self) -> bool {
-        !self.give_guid.is_empty() || !self.pickup_guid.is_empty()
+        self.id != 0
     }
 
+}
+
+pub fn is_internal_item(debug: &str, category: &str) -> bool {
+    let n = debug.to_lowercase();
+    category == "Customization"
+        || n.starts_with('_')
+        || n.starts_with("z_")
+        || n.starts_with("8klore")
+        || n.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        || ["deprecated", "norecipe", "_old", "debug", "_test", "test_", "dummy", "placeholder", "_wip", "unused"].iter().any(|w| n.contains(w))
 }
 
 pub fn group_of(category: &str, slot: &str) -> &'static str {
@@ -178,8 +186,6 @@ pub fn parse_items(text: &str) -> Vec<Item> {
             slot: c(&parts, "slot"),
             level_min: num_u(&c(&parts, "level_min")).max(1),
             level_max: num_u(&c(&parts, "level_max")).max(1),
-            give_guid: c(&parts, "give_guid"),
-            pickup_guid: c(&parts, "pickup_guid"),
             give_level: num_u(&c(&parts, "give_level")).max(1),
             dmg_set: c(&parts, "dmg_set") == "1",
             arm_set: c(&parts, "ar_set") == "1",
@@ -202,7 +208,10 @@ pub fn parse_items(text: &str) -> Vec<Item> {
         item.group = group_of(&item.category, &item.slot).to_string();
         out.push(item);
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+    out.sort_by(|a, b| {
+        let key = |i: &Item| i.name.trim_start_matches(|c: char| c == '_' || c.is_ascii_digit()).to_lowercase();
+        key(a).cmp(&key(b)).then(a.id.cmp(&b.id))
+    });
     out
 }
 
@@ -216,6 +225,22 @@ pub fn load_items(dir: &Path) -> Result<Vec<Item>, String> {
         return Err("La lista de ítems está vacía. Abre el juego una vez con el mod m182_spawn_variants actualizado.".to_string());
     }
     Ok(items)
+}
+
+pub const GENERIC_PICKUP: &str = "c15a5c9d-4956-49ff-9d72-9f522229cf1c";
+
+pub fn load_generic_pickup(dir: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_items_diag.txt")) {
+        for line in text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("generic_pickup=") {
+                let guid = rest.trim();
+                if guid.len() == 36 {
+                    return guid.to_string();
+                }
+            }
+        }
+    }
+    GENERIC_PICKUP.to_string()
 }
 
 pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
@@ -255,6 +280,7 @@ pub struct ItemsState {
     pub selected_for: Option<usize>,
     pub notice: String,
     pub outbox: VecDeque<(Instant, Value)>,
+    pub generic_pickup: String,
 }
 
 pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
@@ -552,14 +578,6 @@ impl App {
         }
         let rarity_name = RARITIES[item.rarity_index().min(4) as usize];
         ui.label(RichText::new(format!("{}  ·  rareza base {}  ·  niveles {}–{}", item.group, rarity_name, item.level_min, item.level_max)).color(MUTED).size(13.0));
-        let method = if !item.give_guid.is_empty() {
-            ("Entrega directa disponible", GOOD)
-        } else if !item.pickup_guid.is_empty() {
-            ("Entrega por recogida existente", GOOD)
-        } else {
-            ("Este ítem no se puede entregar con este método", BAD)
-        };
-        ui.label(RichText::new(method.0).color(method.1).size(13.0));
         divider(ui);
         label_title(ui, "NIVEL DEL ÍTEM");
         ui.add(egui::Slider::new(&mut self.items.level, 1..=255));
@@ -578,8 +596,6 @@ impl App {
             self.items.amount = 1;
         }
         divider(ui);
-        self.target_controls(ui);
-        divider(ui);
         if button(ui, "ENTREGAR", Vec2::new(ui.available_width(), 52.0), item.deliverable(), true) {
             self.spawn(crate::Mode::Items);
         }
@@ -587,7 +603,7 @@ impl App {
         if !text.is_empty() {
             ui.label(RichText::new(text).color(color));
         }
-        ui.label(RichText::new("El ítem aparece en el suelo delante de ti: recógelo con la tecla de interactuar.").color(MUTED).size(13.0));
+        ui.label(RichText::new("Va directo a tu inventario: aparece a tus pies y se recoge solo. Para eso activa en las opciones del juego la recogida automática de botín suelto.").color(MUTED).size(13.0));
         divider(ui);
         self.item_stats_ui(ui, index);
         if !self.items.notice.is_empty() {
@@ -756,6 +772,7 @@ mod tests {
         assert_eq!(sword.dmg[1], 1.25);
         assert_eq!(sword.rarity_index(), 2);
         assert!(sword.deliverable());
+        assert_eq!(sword.give_level, 3);
         let bread = items.iter().find(|i| i.id == 9).unwrap();
         assert_eq!(bread.group, "Comida y pociones");
     }
@@ -778,6 +795,25 @@ mod tests {
         balance.insert("durabilityStart".to_string(), 500.0);
         balance.insert("rarityDurabilityMod.epic".to_string(), 3.5);
         std::fs::write(path, lua_source(&saved, &balance)).unwrap();
+    }
+
+    #[test]
+    fn generic_pickup_comes_from_the_diag_file_or_the_default() {
+        let dir = std::env::temp_dir().join(format!("m182_generic_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        assert_eq!(load_generic_pickup(&dir), GENERIC_PICKUP);
+        std::fs::write(dir.join("export").join("m182_items_diag.txt"), "loca: 5 texts\ngeneric_pickup=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n").unwrap();
+        assert_eq!(load_generic_pickup(&dir), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn junk_items_are_internal() {
+        assert!(is_internal_item("_Consumable_Potion_Mana", "Consumables"));
+        assert!(is_internal_item("Z_Prop_Decoration_T3_Fence_OLD_NORECIPE", "BuildTools"));
+        assert!(is_internal_item("8kLoreText_scroll_bard_song_01", "Collectibles"));
+        assert!(is_internal_item("VC_Body_Feet_01", "Customization"));
+        assert!(!is_internal_item("Material_T5_Night_Blackflower", "Materials"));
     }
 
     #[test]

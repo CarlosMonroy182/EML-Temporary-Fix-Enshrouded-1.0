@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::time::{Duration, Instant};
 
 use super::config::{SpawnSettings, LIVE, SPAWN};
+use super::groups;
 use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
 
 #[link(name = "user32")]
@@ -50,6 +51,8 @@ const GUID_PLAYER: [u8; 16] = [0xd6, 0x66, 0xdb, 0xc3, 0xa5, 0x89, 0x6c, 0x4a, 0
 
 const HASH_CURRENT_TRANSFORM: u32 = 0x027a_c564;
 const HASH_OVERRIDE_LEVEL: u32 = 0xa21e_7ee7;
+const HASH_PICKUP_ITEM: u32 = 0x0877_5a90;
+const PICKUP_ITEM_SIZE: usize = 28;
 
 const TRANSFORM_SIZE: usize = 56;
 const COMPONENT_SLOTS: usize = 640;
@@ -444,8 +447,7 @@ struct Request {
     item_level: Option<u32>,
     item_rarity: Option<u32>,
     item_amount: Option<u32>,
-    default_level: Option<u32>,
-    default_rarity: Option<u32>,
+    item_guid: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -454,8 +456,7 @@ pub struct GiveSpec {
     pub level: u32,
     pub rarity: u32,
     pub amount: u32,
-    pub default_level: u32,
-    pub default_rarity: u32,
+    pub guid: [u8; 16],
 }
 
 static REQUEST_GIVE: Mutex<Option<GiveSpec>> = Mutex::new(None);
@@ -508,8 +509,7 @@ pub fn poll_request() {
             level: req.item_level.unwrap_or(1).clamp(1, 255),
             rarity: req.item_rarity.unwrap_or(0).min(4),
             amount: req.item_amount.unwrap_or(1).clamp(1, 65535),
-            default_level: req.default_level.unwrap_or(1).clamp(0, 255),
-            default_rarity: req.default_rarity.unwrap_or(0).min(4),
+            guid: req.item_guid.as_deref().and_then(super::config::parse_guid).unwrap_or([0u8; 16]),
         });
     }
     REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
@@ -774,10 +774,8 @@ fn dump_failure(manager: usize, id: u32, record: Option<usize>, why: &str) {
     log(&text);
 }
 
-fn player_transform() -> Option<Vec<u8>> {
+fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
     let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
-    let id = PLAYER_ID.load(Ordering::SeqCst);
-    let manager = SERVER_MGR.load(Ordering::SeqCst);
     if index < 0 || id == 0 || manager == 0 {
         return None;
     }
@@ -788,6 +786,10 @@ fn player_transform() -> Option<Vec<u8>> {
         return None;
     }
     read_bytes(addr, TRANSFORM_SIZE)
+}
+
+fn player_transform() -> Option<Vec<u8>> {
+    transform_of(SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))
 }
 
 fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Option<Vec<u8>> {
@@ -847,9 +849,18 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
         return;
     }
     if head[4..20] == GUID_PLAYER && edx == 1 {
-        PLAYER_ID.store(ret, Ordering::SeqCst);
-        SERVER_MGR.store(manager, Ordering::SeqCst);
-        log(&format!("player entity id={ret} mgr={manager:#x}"));
+        let current = PLAYER_ID.load(Ordering::SeqCst);
+        let previous_manager = SERVER_MGR.load(Ordering::SeqCst);
+        let primary = current == 0
+            || current == ret
+            || previous_manager != manager
+            || find_record(manager, current).is_none();
+        if primary {
+            PLAYER_ID.store(ret, Ordering::SeqCst);
+            SERVER_MGR.store(manager, Ordering::SeqCst);
+        }
+        track_player(manager, ret);
+        log(&format!("player entity id={ret} mgr={manager:#x} primary={primary}"));
     }
     if settled {
         return;
@@ -929,9 +940,14 @@ fn spawn_now(manager: usize) {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
     }
     let give = REQUEST_GIVE.lock().ok().and_then(|mut g| g.take());
-    let object = REQUEST_OBJECT.swap(false, Ordering::SeqCst);
-    let forward = REQUEST_FORWARD.swap(false, Ordering::SeqCst) && at.is_none();
-    let mut radius = if at.is_some() && settings.count == 1 { 0.0 } else { settings.distance as f64 };
+    let delivery = give.is_some();
+    let mut settings = settings;
+    if delivery {
+        settings.count = 1;
+    }
+    let object = REQUEST_OBJECT.swap(false, Ordering::SeqCst) || delivery;
+    let forward = REQUEST_FORWARD.swap(false, Ordering::SeqCst) && at.is_none() && !delivery;
+    let mut radius = if (at.is_some() || delivery) && settings.count == 1 { 0.0 } else { settings.distance as f64 };
     if forward {
         let (fx, fz) = facing_direction(&t);
         base.0 = base.0.wrapping_add((fx * settings.distance as f64 * METERS) as i64);
@@ -975,17 +991,29 @@ fn spawn_now(manager: usize) {
             write_u64(&mut entries.0, 40, 4);
         }
 
+        let mut pickup = [0u8; PICKUP_ITEM_SIZE];
+        if let Some(g) = &give {
+            pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
+            pickup[4..20].copy_from_slice(&g.guid);
+            pickup[20..24].copy_from_slice(&g.level.to_le_bytes());
+            pickup[24] = g.rarity as u8;
+            pickup[26..28].copy_from_slice(&(g.amount as u16).to_le_bytes());
+            write_u32(&mut entries.0, 24, HASH_PICKUP_ITEM);
+            write_u64(&mut entries.0, 32, pickup.as_ptr() as u64);
+            write_u64(&mut entries.0, 40, PICKUP_ITEM_SIZE as u64);
+        }
+
         let mut desc = Block([0u8; 0x100]);
         desc.0[4..20].copy_from_slice(&template);
         write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
-        write_u64(&mut desc.0, 0x20, if object { 1 } else { 2 });
+        write_u64(&mut desc.0, 0x20, if delivery { 2 } else if object { 1 } else { 2 });
 
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
         LAST_SPAWNED.store(id, Ordering::SeqCst);
         log(&format!("create returned entity id={id}"));
         if let Some(g) = give {
             if id != 0 {
-                patch_give(manager, id, &g);
+                verify_pickup(manager, id, &g);
             }
         }
         if id != 0 && !object {
@@ -1001,7 +1029,6 @@ struct Powers {
     stamina: bool,
     fly: bool,
     fly_speed: Option<f32>,
-    reveal_map: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1023,8 +1050,6 @@ struct PowerState {
     protect_until: Option<Instant>,
     stamina_peak: u32,
     mana_peak: u32,
-    fog: Option<(usize, u32)>,
-    fog_logged: bool,
     heal_once: bool,
     stamina_peak_c: u32,
     mana_peak_c: u32,
@@ -1034,6 +1059,7 @@ struct PowerState {
     gravity_saved: [u8; 2],
     gravity_off: bool,
     client_logged: bool,
+    groups: GroupState,
 }
 
 static RES_INDEX: [[AtomicI32; 3]; 2] = [
@@ -1186,12 +1212,9 @@ fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
                 st.protect_until = Some(Instant::now() + Duration::from_secs(8));
                 st.hover = None;
             }
-            if st.powers.reveal_map != p.reveal_map {
-                st.fog_logged = false;
-            }
             log(&format!(
-                "powers: god={} stamina={} fly={} reveal_map={}",
-                p.god, p.stamina, p.fly, p.reveal_map
+                "powers: god={} stamina={} fly={}",
+                p.god, p.stamina, p.fly
             ));
             st.powers = p;
         }
@@ -1267,48 +1290,155 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
 
 static POWER_FLY_FORCE: Mutex<bool> = Mutex::new(false);
 
-fn apply_fog(st: &mut PowerState, manager: usize, id: u32) {
-    let want = st.powers.reveal_map;
-    if want == st.fog.is_some() {
+struct Tracked {
+    id: u32,
+    number: u32,
+    misses: u8,
+}
+
+static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
+static TRACKED_MGR: AtomicUsize = AtomicUsize::new(0);
+static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
+
+fn track_player(manager: usize, id: u32) {
+    let Ok(mut list) = TRACKED.lock() else { return };
+    if TRACKED_MGR.swap(manager, Ordering::SeqCst) != manager {
+        list.clear();
+        NEXT_NUMBER.store(1, Ordering::SeqCst);
+    }
+    if list.iter().any(|p| p.id == id) {
         return;
     }
-    let Some(record) = find_record(manager, id) else { return };
-    let Some(p) = placement(record) else { return };
-    if want {
-        let mut found: Vec<(usize, u32)> = Vec::new();
-        for index in 0..COMPONENT_SLOTS {
-            let Some((addr, stride)) = component_address(&p, index) else { continue };
-            if stride != 4 {
-                continue;
+    let number = NEXT_NUMBER.fetch_add(1, Ordering::SeqCst);
+    list.push(Tracked { id, number, misses: 0 });
+    log(&format!("players: entity {id} is player {number}"));
+}
+
+struct GroupState {
+    zones: Vec<groups::Zone>,
+    teams: Vec<Vec<u32>>,
+    zones_mtime: Option<std::time::SystemTime>,
+    teams_mtime: Option<std::time::SystemTime>,
+    last_fast: Option<Instant>,
+    last_slow: Option<Instant>,
+}
+
+impl GroupState {
+    fn new() -> Self {
+        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, last_fast: None, last_slow: None }
+    }
+}
+
+fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return out };
+    for slot in &slots {
+        if slot.stride != 1 {
+            continue;
+        }
+        if let Some(b) = read_bytes(slot.addr, 1) {
+            if b.first() == Some(&super::faction::PLAYER) {
+                out.push(slot.addr);
             }
-            if let Some(b) = read_bytes(addr, 4) {
-                if b.len() >= 4 {
-                    let v = u32_at(&b, 0);
-                    if (250..=1000).contains(&v) {
-                        found.push((addr, v));
-                        if !st.fog_logged {
-                            log(&format!("reveal map: candidate component {index} value {v}"));
-                        }
-                    }
+        }
+    }
+    out
+}
+
+fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
+    let now = Instant::now();
+    let g = &mut st.groups;
+    if g.last_fast.map(|t| now.duration_since(t) < Duration::from_millis(200)).unwrap_or(false) {
+        return;
+    }
+    g.last_fast = Some(now);
+
+    let zones_path = dir.join(groups::ZONES_FILE);
+    let zones_mtime = std::fs::metadata(&zones_path).and_then(|m| m.modified()).ok();
+    if zones_mtime != g.zones_mtime {
+        g.zones_mtime = zones_mtime;
+        g.zones = std::fs::read_to_string(&zones_path).map(|t| groups::parse_zones(&t)).unwrap_or_default();
+        log(&format!("zones: {} active", g.zones.len()));
+    }
+    let teams_path = dir.join(groups::TEAMS_FILE);
+    let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
+    if teams_mtime != g.teams_mtime {
+        g.teams_mtime = teams_mtime;
+        g.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_teams(&t)).unwrap_or_default();
+        log(&format!("teams: {} defined", g.teams.len()));
+        g.last_slow = None;
+    }
+
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    if manager == 0 {
+        return;
+    }
+    let players: Vec<(u32, u32)> = match TRACKED.lock() {
+        Ok(list) => list.iter().map(|p| (p.id, p.number)).collect(),
+        Err(_) => return,
+    };
+    if players.is_empty() {
+        return;
+    }
+
+    if !g.zones.is_empty() {
+        for (id, _) in &players {
+            if let Some(t) = transform_of(manager, *id) {
+                let x = le_i64(&t, 0) as f64 / METERS;
+                let z = le_i64(&t, 16) as f64 / METERS;
+                if groups::inside(&g.zones, x, z) {
+                    refill_health(manager, *id);
                 }
             }
         }
-        st.fog_logged = true;
-        if found.len() == 1 {
-            let (addr, v) = found[0];
-            if put_u32(addr, 30000) {
-                st.fog = Some((addr, v));
-                log(&format!("reveal map: discovery range {v} -> 30000"));
+    }
+
+    if g.last_slow.map(|t| now.duration_since(t) < Duration::from_millis(1000)).unwrap_or(false) {
+        return;
+    }
+    g.last_slow = Some(now);
+
+    let mut rows = Vec::new();
+    let mut map: Vec<(usize, u8)> = Vec::new();
+    let mut dead: Vec<u32> = Vec::new();
+    for (id, number) in &players {
+        match transform_of(manager, *id) {
+            Some(t) => {
+                rows.push(format!(
+                    "{{\"n\":{},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1}}}",
+                    number,
+                    le_i64(&t, 0) as f64 / METERS,
+                    le_i64(&t, 8) as f64 / METERS,
+                    le_i64(&t, 16) as f64 / METERS
+                ));
+                let team = groups::team_of_player(&g.teams, *number);
+                if team != 0 {
+                    for addr in faction_addresses(manager, *id) {
+                        map.push((addr, team));
+                    }
+                }
             }
-        } else if st.fog.is_none() {
-            log(&format!("reveal map: {} candidates, nothing changed", found.len()));
-            st.powers.reveal_map = false;
+            None => {
+                if find_record(manager, *id).is_none() {
+                    dead.push(*id);
+                }
+            }
         }
-    } else if let Some((addr, v)) = st.fog.take() {
-        put_u32(addr, v);
-        log(&format!("reveal map: discovery range restored to {v}"));
+    }
+    groups::set_team_map(map);
+    let _ = std::fs::write(dir.join(groups::PLAYERS_FILE), format!("[{}]", rows.join(",")));
+    if let Ok(mut list) = TRACKED.lock() {
+        for p in list.iter_mut() {
+            if dead.contains(&p.id) {
+                p.misses = p.misses.saturating_add(1);
+            } else {
+                p.misses = 0;
+            }
+        }
+        list.retain(|p| p.misses < 5);
     }
 }
+
 
 fn record_trail(pos: (i64, i64, i64)) {
     static LAST: Mutex<Option<(f64, f64)>> = Mutex::new(None);
@@ -1435,6 +1565,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if manager == 0 || id == 0 {
         return;
     }
+    if tick % 4 == 0 {
+        groups_tick(st, dir);
+    }
     let client = client_pair();
     let forced = POWER_FLY_FORCE.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or(false);
     if forced {
@@ -1463,9 +1596,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
             refill_stamina(m, c, &mut st.stamina_peak_c);
             refill_mana(m, c, &mut st.mana_peak_c);
         }
-    }
-    if tick % 25 == 0 {
-        apply_fog(st, manager, id);
     }
     if st.powers.fly {
         if !st.gravity_off {
@@ -1537,8 +1667,6 @@ pub fn new_power_state() -> PowerState {
         protect_until: None,
         stamina_peak: 0,
         mana_peak: 0,
-        fog: None,
-        fog_logged: false,
         heal_once: false,
         stamina_peak_c: 0,
         mana_peak_c: 0,
@@ -1548,60 +1676,33 @@ pub fn new_power_state() -> PowerState {
         gravity_saved: [1, 1],
         gravity_off: false,
         client_logged: false,
+        groups: GroupState::new(),
     }
 }
 
 
-pub fn patch_give(manager: usize, id: u32, g: &GiveSpec) -> bool {
+fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
     let Some((_, _, slots)) = entity_layout(manager, id) else {
-        log(&format!("give: entity {id} not readable"));
-        return false;
+        log(&format!("delivery: entity {id} not readable"));
+        return;
     };
     for slot in &slots {
-        if slot.stride < 12 || slot.stride > 512 {
+        if slot.stride != PICKUP_ITEM_SIZE {
             continue;
         }
         let Some(b) = read_bytes(slot.addr, slot.stride) else { continue };
-        let mut o = 0usize;
-        while o + 8 <= b.len() {
-            if u32_at(&b, o) == g.item {
-                let tiny = b[o + 4] as u32 == g.default_level && b[o + 5] as u32 == g.default_rarity && u16::from_le_bytes([b[o + 6], b[o + 7]]) == 1;
-                if tiny {
-                    let ok = write_bytes(slot.addr + o + 4, &[g.level as u8, g.rarity as u8])
-                        && write_bytes(slot.addr + o + 6, &(g.amount as u16).to_le_bytes());
-                    log(&format!(
-                        "give: item {} patched at component {} offset {} (level {} rarity {} amount {}) written={ok}",
-                        g.item, slot.index, o, g.level, g.rarity, g.amount
-                    ));
-                    return ok;
-                }
-                if o + 14 <= b.len()
-                    && b[o + 4] as u32 == g.default_level
-                    && u32_at(&b, o + 8) == g.default_rarity
-                    && u16::from_le_bytes([b[o + 12], b[o + 13]]) == 1
-                {
-                    let ok = write_bytes(slot.addr + o + 4, &[g.level as u8])
-                        && write_bytes(slot.addr + o + 8, &g.rarity.to_le_bytes())
-                        && write_bytes(slot.addr + o + 12, &(g.amount as u16).to_le_bytes());
-                    log(&format!(
-                        "give: item {} patched (wide rarity) at component {} offset {} written={ok}",
-                        g.item, slot.index, o
-                    ));
-                    return ok;
-                }
-                log(&format!(
-                    "give: item {} found in component {} offset {} but the following bytes are unexpected: {}",
-                    g.item,
-                    slot.index,
-                    o,
-                    hex(&b[o..(o + 24).min(b.len())])
-                ));
-            }
-            o += 4;
+        if b.len() >= PICKUP_ITEM_SIZE && u32_at(&b, 0) == g.item {
+            log(&format!(
+                "delivery: item {} placed (level {} rarity {} amount {})",
+                g.item,
+                u32_at(&b, 20),
+                b[24],
+                u16::from_le_bytes([b[26], b[27]])
+            ));
+            return;
         }
     }
-    log(&format!("give: item {} not found in entity {id}; it keeps the default level, rarity and amount", g.item));
-    false
+    log(&format!("delivery: item {} requested; the pickup entity {id} was created", g.item));
 }
 
 pub fn readable_regions() -> Vec<(usize, usize)> {
