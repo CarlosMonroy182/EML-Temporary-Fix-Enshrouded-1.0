@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, V
 
 use crate::theme::*;
 use crate::tiles::{self, Markers, Slot, TileCache};
-use crate::{powers, App, Place, Tab, Target};
+use crate::{powers, App, Place};
 
 pub const CELL: f64 = 12.0;
 
@@ -38,7 +38,6 @@ pub struct MapState {
     pub selected_height_known: bool,
     pub selected_label: String,
     pub name: String,
-    pub paste: String,
     pub notice: String,
     pub tiles: Option<TileCache>,
     pub markers: Markers,
@@ -68,7 +67,6 @@ impl Default for MapState {
             selected_height_known: false,
             selected_label: String::new(),
             name: String::new(),
-            paste: String::new(),
             notice: String::new(),
             tiles: None,
             markers: Markers::default(),
@@ -99,16 +97,6 @@ pub fn parse_trail(text: &str) -> HashMap<(i32, i32), (f32, u32)> {
         e.1 += 1;
     }
     cells
-}
-
-pub fn parse_coordinates(text: &str) -> Option<[f64; 3]> {
-    let cleaned: String = text.chars().map(|c| if c.is_ascii_digit() || c == '-' || c == '.' { c } else { ' ' }).collect();
-    let numbers: Vec<f64> = cleaned.split_whitespace().filter_map(|t| t.parse::<f64>().ok()).collect();
-    match numbers.len() {
-        3 => Some([numbers[0], numbers[1], numbers[2]]),
-        2 => Some([numbers[0], f64::NAN, numbers[1]]),
-        _ => None,
-    }
 }
 
 pub fn ground_around(cells: &HashMap<(i32, i32), (f32, u32)>, places: &[(f64, f64, f64)], x: f64, z: f64) -> Option<f64> {
@@ -500,7 +488,18 @@ impl App {
                 ui.label(RichText::new("Aún no elegiste ningún punto. Haz clic en el mapa.").color(MUTED));
             }
         }
-        ui.add_space(4.0);
+        ui.add_space(6.0);
+        if button(ui, "Teletransportarme aquí", Vec2::new(width, 38.0), self.map.selected.is_some(), true) {
+            if let Some(sel) = self.map.selected {
+                let ground = self.ground_estimate(sel[0], sel[2]);
+                let body = powers::teleport_body_with_ground(sel, self.map.selected_height_known, ground);
+                self.map.notice = match powers::command(&self.dir, &body) {
+                    Ok(()) => "Pedido de teletransporte enviado.".to_string(),
+                    Err(e) => format!("Error: {e}"),
+                };
+            }
+        }
+        ui.add_space(8.0);
         let frame = egui::Frame::none().fill(CARD).stroke(Stroke::new(1.5_f32, GOLD_DIM)).rounding(5.0).inner_margin(egui::Margin::same(10.0));
         frame.show(ui, |ui| {
             label_title(ui, "GUARDAR LUGAR");
@@ -511,7 +510,7 @@ impl App {
                     self.places.push(Place { name: self.map.name.trim().to_string(), x: sel[0], y: sel[1], z: sel[2] });
                     self.map.name.clear();
                     self.save_places();
-                    self.map.notice = "Lugar guardado. Ya aparece en el mapa y en la pestaña Lugares.".to_string();
+                    self.map.notice = "Lugar guardado. Ya aparece en el mapa y puedes usarlo para crear apariciones.".to_string();
                 }
             }
             if button(ui, "Guardar mi posición actual", Vec2::new(ui.available_width(), 32.0), can_name && self.player.is_some(), false) {
@@ -523,123 +522,9 @@ impl App {
                 }
             }
         });
-        ui.add_space(6.0);
-        if let Some(sel) = self.map.selected {
-            if button(ui, "Copiar coordenadas", Vec2::new(width, 30.0), true, false) {
-                ui.ctx().copy_text(format!("{:.0}, {:.0}, {:.0}", sel[0], sel[1], sel[2]));
-                self.map.notice = "Coordenadas copiadas al portapapeles.".to_string();
-            }
-            if button(ui, "Teletransportarme aquí", Vec2::new(width, 32.0), true, true) {
-                let ground = self.ground_estimate(sel[0], sel[2]);
-                let body = powers::teleport_body_with_ground(sel, self.map.selected_height_known, ground);
-                self.map.notice = match powers::command(&self.dir, &body) {
-                    Ok(()) => "Pedido de teletransporte enviado.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                };
-            }
-            ui.horizontal(|ui| {
-                if button(ui, "Invocar aquí", Vec2::new((width - 10.0) / 2.0, 30.0), true, false) {
-                    self.target = Target::Coords;
-                    self.coords = sel;
-                    self.tab = Tab::Creatures;
-                }
-                if button(ui, "Entregar aquí", Vec2::new((width - 10.0) / 2.0, 30.0), true, false) {
-                    self.target = Target::Coords;
-                    self.coords = sel;
-                    self.tab = Tab::Items;
-                }
-            });
-        }
         if !self.map.notice.is_empty() {
+            ui.add_space(6.0);
             ui.label(RichText::new(self.map.notice.clone()).color(GOOD));
-        }
-        divider(ui);
-        label_title(ui, "PEGAR COORDENADAS");
-        ui.add(egui::TextEdit::singleline(&mut self.map.paste).hint_text("Ej: 3722, 842, 1367").desired_width(width));
-        if button(ui, "Usar estas coordenadas", Vec2::new(width, 30.0), !self.map.paste.trim().is_empty(), false) {
-            match parse_coordinates(&self.map.paste) {
-                Some(c) => {
-                    let known = c[1].is_finite();
-                    let y = if known { c[1] } else { self.player.map(|p| p[1]).unwrap_or(0.0) };
-                    self.map.selected = Some([c[0], y, c[2]]);
-                    self.map.selected_height_known = known;
-                    self.map.selected_label.clear();
-                    let (px, py) = tiles::world_to_px(c[0], c[2]);
-                    self.map.center = [px, py];
-                    self.map.zf = self.map.zf.max(12.0);
-                    self.map.notice = "Punto colocado en el mapa.".to_string();
-                }
-                None => self.map.notice = "No entendí las coordenadas. Escribe X, Y, Z o solo X, Z.".to_string(),
-            }
-        }
-        divider(ui);
-        label_title(ui, "VISTA");
-        label_title(ui, "ZOOM");
-        ui.add(egui::Slider::new(&mut self.map.zf, 8.0..=18.0).fixed_decimals(1));
-        if button(ui, "Centrar en mi posición", Vec2::new(width, 30.0), self.player.is_some(), false) {
-            if let Some(p) = self.player {
-                let (px, py) = tiles::world_to_px(p[0], p[2]);
-                self.map.center = [px, py];
-                self.map.zf = self.map.zf.max(12.5);
-            }
-        }
-        if button(ui, "Ver todo el mundo", Vec2::new(width, 30.0), true, false) {
-            self.map.center = world_center();
-            self.map.zf = 10.8;
-        }
-        ui.checkbox(&mut self.map.show_places, "Mostrar mis lugares guardados");
-        ui.checkbox(&mut self.map.show_trail, format!("Mostrar mi recorrido ({} puntos)", self.map.points));
-        ui.checkbox(&mut self.map.show_markers, "Mostrar marcadores del mapa");
-        if self.map.show_markers {
-            self.marker_panel(ui);
-        }
-    }
-
-    fn marker_panel(&mut self, ui: &mut egui::Ui) {
-        match self.map.marker_state {
-            MarkerLoad::Loading | MarkerLoad::Idle => {
-                ui.label(RichText::new("Descargando marcadores…").color(MUTED));
-            }
-            MarkerLoad::Failed => {
-                ui.label(RichText::new("No pude descargar los marcadores. Revisa tu conexión y vuelve a abrir esta pestaña.").color(BAD));
-                if button(ui, "Reintentar", Vec2::new(ui.available_width(), 28.0), true, false) {
-                    self.map.marker_state = MarkerLoad::Loading;
-                    self.map.marker_rx = Some(tiles::spawn_marker_download(&self.dir));
-                }
-            }
-            MarkerLoad::Ready => {
-                ui.add(egui::TextEdit::singleline(&mut self.map.marker_search).hint_text("Buscar marcador…").desired_width(ui.available_width()));
-                ui.horizontal(|ui| {
-                    if ui.small_button("Todos").clicked() {
-                        self.map.visible_cats = self.map.markers.categories.iter().map(|c| c.id).collect();
-                    }
-                    if ui.small_button("Ninguno").clicked() {
-                        self.map.visible_cats.clear();
-                    }
-                });
-                let mut counts: HashMap<u64, usize> = HashMap::new();
-                for m in &self.map.markers.markers {
-                    *counts.entry(m.category).or_default() += 1;
-                }
-                let mut groups: Vec<String> = self.map.markers.categories.iter().map(|c| c.group.clone()).collect();
-                groups.sort();
-                groups.dedup();
-                for group in groups {
-                    egui::CollapsingHeader::new(RichText::new(if group.is_empty() { "Otros".to_string() } else { group.clone() }).color(group_color(&group))).id_salt(("mkgroup", group.clone())).show(ui, |ui| {
-                        for c in self.map.markers.categories.iter().filter(|c| c.group == group) {
-                            let mut on = self.map.visible_cats.contains(&c.id);
-                            let count = counts.get(&c.id).copied().unwrap_or(0);
-                            if ui.checkbox(&mut on, format!("{} ({})", c.title, count)).changed() {
-                                if on {
-                                    self.map.visible_cats.insert(c.id);
-                                } else {
-                                    self.map.visible_cats.remove(&c.id);
-                                }
-                            }
-                        }
-                    });
-                }
-            }
         }
     }
 }
