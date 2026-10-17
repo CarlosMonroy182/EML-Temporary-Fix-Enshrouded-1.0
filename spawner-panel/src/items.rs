@@ -53,6 +53,35 @@ pub const ARM_LABELS: [&str; 9] = ["Física", "Contundente", "Perforación", "Co
 pub const RARITIES: [&str; 5] = ["Común", "Poco común", "Rara", "Épica", "Legendaria"];
 pub const RARITY_NAMES: [&str; 5] = ["Common", "Uncommon", "Rare", "Epic", "Legendary"];
 
+pub const BALANCE_INTEGER: &[&str] = &[
+    "durabilityLossCap",
+    "playerBaseHealth",
+    "playerHealthPerAP",
+    "playerBaseMana",
+    "playerManaPerAP",
+    "playerBaseStamina",
+    "playerStaminaPerAP",
+    "itemLevelCap",
+    "playerLevelCap",
+    "hookShotCostBase",
+    "maximumAnimalsInWorld",
+];
+
+pub fn balance_is_integer(key: &str) -> bool {
+    BALANCE_INTEGER.contains(&key)
+}
+
+pub fn balance_normalize(key: &str, value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    if balance_is_integer(key) {
+        value.round().clamp(0.0, 1_000_000.0)
+    } else {
+        value.clamp(-1_000_000.0, 1_000_000.0)
+    }
+}
+
 pub const BALANCE_LABELS: &[(&str, &str)] = &[
     ("durabilityStart", "Durabilidad base de las armas y armaduras"),
     ("durabilityGrowth", "Durabilidad extra por nivel de objeto"),
@@ -392,7 +421,18 @@ local function hash_of(v)
     return tonumber(tostring(v))
 end
 
+local INTEGER_KEYS = {
+    durabilityLossCap = true, playerBaseHealth = true, playerHealthPerAP = true, playerBaseMana = true,
+    playerManaPerAP = true, playerBaseStamina = true, playerStaminaPerAP = true, itemLevelCap = true,
+    playerLevelCap = true, hookShotCostBase = true, maximumAnimalsInWorld = true,
+}
+
 local function put(container, key, value)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then return false end
+    if INTEGER_KEYS[key] then
+        value = math.floor(value + 0.5)
+        if value < 0 then value = 0 end
+    end
     return pcall(function() container[key] = value end)
 end
 
@@ -434,7 +474,7 @@ if type(tables) == "table" and #tables > 0 then
         local rarity = string.match(key, "^rarityDurabilityMod%.(%a+)$")
         local ok
         if rarity then
-            ok = pcall(function() d.rarityDurabilityMod[rarity] = value end)
+            ok = put(d.rarityDurabilityMod, rarity, value)
         else
             ok = put(d, key, value)
         end
@@ -543,8 +583,8 @@ impl ItemsState {
     pub fn balance_overrides(&self) -> BTreeMap<String, f64> {
         self.balance
             .iter()
-            .filter(|(k, v)| self.balance_base.get(*k).map(|b| (b - **v).abs() > 1e-9).unwrap_or(true))
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| (k.clone(), balance_normalize(k, *v)))
+            .filter(|(k, v)| self.balance_base.get(k).map(|b| (b - *v).abs() > 1e-9).unwrap_or(false))
             .collect()
     }
 }
@@ -722,7 +762,12 @@ impl App {
                 if let Some(value) = self.items.balance.get_mut(*key) {
                     ui.horizontal(|ui| {
                         ui.label(*label);
-                        changed |= ui.add(egui::DragValue::new(value).speed(0.1).max_decimals(3)).changed();
+                        if balance_is_integer(key) {
+                            changed |= ui.add(egui::DragValue::new(value).speed(1.0).max_decimals(0).range(0.0..=1_000_000.0)).changed();
+                            *value = value.round();
+                        } else {
+                            changed |= ui.add(egui::DragValue::new(value).speed(0.05).max_decimals(3)).changed();
+                        }
                     });
                 }
             }
@@ -814,6 +859,26 @@ mod tests {
         assert!(is_internal_item("8kLoreText_scroll_bard_song_01", "Collectibles"));
         assert!(is_internal_item("VC_Body_Feet_01", "Customization"));
         assert!(!is_internal_item("Material_T5_Night_Blackflower", "Materials"));
+    }
+
+    #[test]
+    fn integer_balance_fields_never_receive_decimals() {
+        assert_eq!(balance_normalize("itemLevelCap", 85.8), 86.0);
+        assert_eq!(balance_normalize("durabilityLossCap", 0.1), 0.0);
+        assert_eq!(balance_normalize("playerLevelCap", -4.0), 0.0);
+        assert_eq!(balance_normalize("durabilityStart", 398.5), 398.5);
+        assert_eq!(balance_normalize("critBonus", f64::NAN), 0.0);
+        let mut state = ItemsState::default();
+        state.balance_base.insert("itemLevelCap".to_string(), 55.0);
+        state.balance_base.insert("durabilityStart".to_string(), 145.0);
+        state.balance.insert("itemLevelCap".to_string(), 85.8);
+        state.balance.insert("durabilityStart".to_string(), 145.0);
+        let o = state.balance_overrides();
+        assert_eq!(o.len(), 1);
+        assert_eq!(o["itemLevelCap"], 86.0);
+        let lua = lua_source(&BTreeMap::new(), &o);
+        assert!(lua.contains("[\"itemLevelCap\"] = 86,"));
+        assert!(lua.contains("INTEGER_KEYS"));
     }
 
     #[test]
