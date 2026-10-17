@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use serde::Deserialize;
@@ -78,6 +79,15 @@ pub fn team_of(addr: usize) -> u8 {
     }
     let Ok(map) = TEAM_MAP.try_lock() else { return 0 };
     map.iter().find(|(a, _)| *a == addr).map(|(_, t)| *t).unwrap_or(0)
+}
+
+static PAIR_REPORTS: AtomicU32 = AtomicU32::new(0);
+
+pub fn pair_report(a: usize, b: usize) -> Option<String> {
+    if PAIR_REPORTS.fetch_add(1, Ordering::Relaxed) >= 40 {
+        return None;
+    }
+    Some(format!("teams: player pair a={a:#x} team={} b={b:#x} team={}", team_of(a), team_of(b)))
 }
 
 pub fn same_team(a: usize, b: usize) -> bool {

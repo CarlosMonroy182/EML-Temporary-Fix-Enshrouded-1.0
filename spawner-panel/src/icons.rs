@@ -85,6 +85,24 @@ pub fn load_index(dir: &Path) -> WikiIndex {
     out
 }
 
+pub fn load_titles(dir: &Path) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(text) = std::fs::read_to_string(icons_dir(dir).join(INDEX_FILE)) else { return out };
+    for line in text.lines() {
+        if let Some((title, _)) = line.split_once('\t') {
+            let title = title.trim();
+            if !title.is_empty() {
+                out.entry(norm(title)).or_insert_with(|| title.to_string());
+            }
+        }
+    }
+    out
+}
+
+pub fn display_name(titles: &HashMap<String, String>, keys: &[String]) -> Option<String> {
+    keys.iter().find_map(|k| titles.get(k).cloned())
+}
+
 pub fn parse_index_page(json: &serde_json::Value, titles: &mut HashMap<String, String>) {
     let Some(pages) = json.get("query").and_then(|q| q.get("pages")).and_then(|p| p.as_array()) else { return };
     for page in pages {

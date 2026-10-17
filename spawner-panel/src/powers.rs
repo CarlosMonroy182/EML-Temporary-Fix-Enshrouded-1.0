@@ -58,11 +58,20 @@ pub fn command(dir: &Path, body: &Value) -> Result<(), String> {
     write_atomic(dir, COMMAND_FILE, "m182_command.request.tmp", &body.to_string())
 }
 
+#[allow(dead_code)]
 pub fn teleport_body(point: [f64; 3], height_known: bool) -> Value {
+    teleport_body_with_ground(point, height_known, None)
+}
+
+pub fn teleport_body_with_ground(point: [f64; 3], height_known: bool, ground: Option<f64>) -> Value {
     if height_known {
         json!({"cmd": "teleport", "at": [point[0], point[1], point[2]]})
     } else {
-        json!({"cmd": "teleport", "at": [point[0], Value::Null, point[2]]})
+        let mut body = json!({"cmd": "teleport", "at": [point[0], Value::Null, point[2]]});
+        if let Some(g) = ground.filter(|g| g.is_finite()) {
+            body["ground"] = json!(g);
+        }
+        body
     }
 }
 
@@ -122,7 +131,7 @@ impl App {
                 ui.add(egui::DragValue::new(value).speed(1.0).fixed_decimals(1));
             });
         }
-        ui.checkbox(&mut self.powers.unknown_height, "No conozco la altura: aparecer en el cielo y volar para bajar");
+        ui.checkbox(&mut self.powers.unknown_height, "No conozco la altura: bajar solo hasta el suelo con caída protegida");
         ui.horizontal(|ui| {
             if let Some(p) = self.player {
                 if button(ui, "Usar mi posición", Vec2::new(170.0, 32.0), true, false) {
@@ -136,7 +145,9 @@ impl App {
                 }
             }
             if button(ui, "TELETRANSPORTAR", Vec2::new(210.0, 32.0), true, true) {
-                let body = teleport_body(self.powers.teleport, !self.powers.unknown_height);
+                let t = self.powers.teleport;
+                let ground = self.ground_estimate(t[0], t[2]);
+                let body = teleport_body_with_ground(t, !self.powers.unknown_height, ground);
                 self.powers.notice = match command(&self.dir, &body) {
                     Ok(()) => "Pedido de teletransporte enviado.".to_string(),
                     Err(e) => format!("Error: {e}"),
