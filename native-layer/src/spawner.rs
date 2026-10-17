@@ -68,6 +68,7 @@ const FALL_DAMAGE_SIZE: usize = 24;
 const FALL_SEQUENCE: [u8; 16] = [0x53, 0xb0, 0xb6, 0x2d, 0x90, 0x4e, 0x82, 0x47, 0xab, 0x37, 0xf7, 0xff, 0xe8, 0x83, 0x50, 0x63];
 const FALL_UNLIMITED: f32 = 1.0e9;
 const BODY_HEAT_SIGNATURE: u32 = 3_350_114_077;
+const ITEM_LEVEL_OFFSET: usize = 1652;
 const ITEM_DAMAGE_OFFSET: usize = 1660;
 const ITEM_ARMOR_OFFSET: usize = 1724;
 const ITEM_INFO_SPAN: usize = 2100;
@@ -119,6 +120,12 @@ pub fn start() {
     }
     if let Err(e) = std::thread::Builder::new().name("m182-powers".into()).spawn(powers_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start powers thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-keeper".into()).spawn(keeper_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start keeper thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
     }
 }
 
@@ -350,7 +357,25 @@ fn f32_at(b: &[u8], off: usize) -> f32 {
     f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
-fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Option<[f32; 2]>) -> bool {
+struct Keep {
+    manager: usize,
+    id: u32,
+    health: u32,
+    damage: f32,
+    orig: Option<[f32; 2]>,
+    born: Instant,
+    ready: bool,
+    missing: u8,
+    rewrites: u32,
+}
+
+static KEEPS: Mutex<Vec<Keep>> = Mutex::new(Vec::new());
+const KEEP_LIMIT: usize = 400;
+
+/// Brings one spawned creature to the wanted health and damage. Only the maximum health is compared:
+/// when the game resets it (it recomputes it from the level whenever the creature is activated), the
+/// whole health is set again; otherwise the damage the creature has taken is left alone.
+fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Option<[f32; 2]>, rewrites: &mut u32) -> bool {
     let want_damage = (damage - 1.0).abs() >= 1e-6;
     if health == 0 && !want_damage {
         return true;
@@ -363,14 +388,24 @@ fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Optio
         if b.len() < slot.stride {
             continue;
         }
-        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE && u32_at(&b, 8) != 0 {
+        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE {
             let current = u32_at(&b, 8);
-            if current != health || u32_at(&b, 16) != health || u32_at(&b, 36) != health {
+            if current == 0 {
+                // dead (or not initialised yet): never bring it back
+                health_done = true;
+                continue;
+            }
+            let maximum = u32_at(&b, 36);
+            if maximum != health {
                 for off in [8usize, 16, 36] {
                     b[off..off + 4].copy_from_slice(&health.to_le_bytes());
                 }
                 let ok = write_bytes(slot.addr, &b);
-                log(&format!("stats: entity {id} health {current} -> {health} (written={ok})"));
+                *rewrites += 1;
+                log(&format!("stats: entity {id} health {current}/{maximum} -> {health} (written={ok}, times={})", *rewrites));
+            } else if current > health {
+                b[8..12].copy_from_slice(&health.to_le_bytes());
+                write_bytes(slot.addr, &b);
             }
             health_done = true;
         } else if slot.stride == 24 && want_damage && u32_at(&b, 0) == DAMAGE_SIGNATURE && f32_at(&b, 8) > 0.0 {
@@ -390,53 +425,48 @@ fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Optio
 
 pub fn apply_stats(manager: usize, id: u32, health: u32, damage: f32) -> bool {
     let mut orig = None;
-    try_apply(manager, id, health, damage, &mut orig)
+    let mut rewrites = 0;
+    try_apply(manager, id, health, damage, &mut orig, &mut rewrites)
 }
 
-fn stats_worker(manager: usize, id: u32, health: u32, damage: f32) {
-    let mut orig = None;
-    let mut applied = false;
-    for _ in 0..200 {
-        if try_apply(manager, id, health, damage, &mut orig) {
-            applied = true;
-            break;
+/// One pass over every creature that has custom stats. Runs forever in its own thread, so the
+/// values survive however late the game decides to reset them.
+pub fn keeper_pass() {
+    let current = SERVER_MGR.load(Ordering::SeqCst);
+    let Ok(mut list) = KEEPS.lock() else { return };
+    list.retain(|k| k.manager == current);
+    for k in list.iter_mut() {
+        if entity_layout(k.manager, k.id).is_none() {
+            k.missing = k.missing.saturating_add(1);
+            continue;
         }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if !applied {
-        log(&format!("stats: entity {id} health/damage components never became ready"));
-        return;
-    }
-    for wait in [1u64, 2, 4, 8] {
-        std::thread::sleep(Duration::from_secs(wait));
-        if entity_layout(manager, id).is_none() {
-            log(&format!("stats: entity {id} is gone"));
-            return;
+        k.missing = 0;
+        let done = try_apply(k.manager, k.id, k.health, k.damage, &mut k.orig, &mut k.rewrites);
+        if done && !k.ready {
+            k.ready = true;
+            log(&format!("stats: entity {} ready after {} ms", k.id, k.born.elapsed().as_millis()));
         }
-        try_apply(manager, id, health, damage, &mut orig);
     }
-    if let Some((_, _, slots)) = entity_layout(manager, id) {
-        for slot in &slots {
-            if slot.stride == 40 {
-                if let Some(b) = read_bytes(slot.addr, 40) {
-                    if b.len() >= 40 && u32_at(&b, 0) == HEALTH_SIGNATURE {
-                        log(&format!("stats: entity {id} final health {} / {} / {}", u32_at(&b, 8), u32_at(&b, 16), u32_at(&b, 36)));
-                    }
-                }
-            }
-        }
+    list.retain(|k| k.missing < 40);
+}
+
+fn keeper_loop() {
+    loop {
+        std::thread::sleep(Duration::from_millis(150));
+        keeper_pass();
     }
 }
 
-fn start_stats(manager: usize, id: u32, health: u32, damage: f32) {
+pub fn start_stats(manager: usize, id: u32, health: u32, damage: f32) {
     if health == 0 && (damage - 1.0).abs() < 1e-6 {
         return;
     }
-    if let Err(e) = std::thread::Builder::new()
-        .name("m182-spawner-stats".into())
-        .spawn(move || stats_worker(manager, id, health, damage))
-    {
-        log(&format!("stats: worker could not start: {e}"));
+    let Ok(mut list) = KEEPS.lock() else { return };
+    list.retain(|k| !(k.manager == manager && k.id == id));
+    list.push(Keep { manager, id, health, damage, orig: None, born: Instant::now(), ready: false, missing: 0, rewrites: 0 });
+    if list.len() > KEEP_LIMIT {
+        let extra = list.len() - KEEP_LIMIT;
+        list.drain(0..extra);
     }
 }
 
@@ -447,6 +477,8 @@ struct StatsPatch {
     dmg_old: Vec<String>,
     arm_new: String,
     arm_old: Vec<String>,
+    lvl_new: String,
+    lvl_old: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -486,6 +518,8 @@ static FACE_SCORES: Mutex<[f64; 4]> = Mutex::new([0.0; 4]);
 static FACE_SAMPLES: AtomicU32 = AtomicU32::new(0);
 static FACE_CHOSEN: AtomicU32 = AtomicU32::new(0);
 static REQUEST: Mutex<Option<SpawnSettings>> = Mutex::new(None);
+static SPAWN_TAG: Mutex<Option<String>> = Mutex::new(None);
+static CREATED: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
 const REQUEST_FILE: &str = "m182_spawn.request";
 
 pub fn poll_request() {
@@ -497,6 +531,9 @@ pub fn poll_request() {
         log("panel request ignored: invalid file");
         return;
     };
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = None;
+    }
     let mut s = match SPAWN.lock() {
         Ok(s) => s.clone(),
         Err(_) => return,
@@ -540,7 +577,7 @@ pub fn poll_request() {
     match (req.stats, give) {
         (Some(stats), Some(spec)) if spec.guid != [0u8; 16] => {
             let started = std::thread::Builder::new().name("m182-item-patch".into()).spawn(move || {
-                apply_stats_patch(&spec, &stats);
+                apply_stats_patch(spec.item, &spec.guid, &stats);
                 PENDING.store(1, Ordering::SeqCst);
                 log("spawn requested from the panel");
             });
@@ -600,7 +637,7 @@ pub fn patch_item_struct(
                 target = Some(base + offset);
             } else {
                 for old in olds {
-                    if old.len() != new.len() || old.iter().all(|b| *b == 0) {
+                    if old.len() != new.len() || old.len() < 16 || old.iter().all(|b| *b == 0) {
                         continue;
                     }
                     let mut found: Vec<usize> = Vec::new();
@@ -637,7 +674,7 @@ pub fn patch_item_struct(
     (done, notes)
 }
 
-fn apply_stats_patch(spec: &GiveSpec, stats: &StatsPatch) {
+fn apply_stats_patch(item: u32, guid: &[u8; 16], stats: &StatsPatch) {
     let mut blocks: Vec<(usize, Vec<u8>, Vec<Vec<u8>>)> = Vec::new();
     let dmg_new = hex_to_bytes(&stats.dmg_new);
     if dmg_new.len() == 60 {
@@ -647,27 +684,37 @@ fn apply_stats_patch(spec: &GiveSpec, stats: &StatsPatch) {
     if arm_new.len() == 36 {
         blocks.push((ITEM_ARMOR_OFFSET, arm_new, stats.arm_old.iter().map(|s| hex_to_bytes(s)).filter(|v| v.len() == 36).collect()));
     }
+    let lvl_new = hex_to_bytes(&stats.lvl_new);
+    if lvl_new.len() == 8 {
+        blocks.push((ITEM_LEVEL_OFFSET, lvl_new, stats.lvl_old.iter().map(|s| hex_to_bytes(s)).filter(|v| v.len() == 8).collect()));
+    }
     if blocks.is_empty() {
         return;
     }
     let wanted: Vec<Vec<u8>> = blocks.iter().map(|b| b.1.clone()).collect();
-    if patched_still_holds(spec.item, &wanted) {
-        log(&format!("item stats {}: already applied", spec.item));
+    if patched_still_holds(item, &wanted) {
+        log(&format!("item stats {}: already applied", item));
         return;
     }
     let started = Instant::now();
     let regions = readable_regions();
-    let (done, notes) = patch_item_struct(&spec.guid, spec.item, &blocks, &regions);
+    let (done, notes) = patch_item_struct(guid, item, &blocks, &regions);
     log(&format!(
         "item stats {}: patched {} block(s) ({notes}) in {} ms over {} regions",
-        spec.item,
+        item,
         done.len(),
         started.elapsed().as_millis(),
         regions.len()
     ));
     if !done.is_empty() {
         if let Ok(mut guard) = PATCHED.lock() {
-            guard.get_or_insert_with(HashMap::new).insert(spec.item, done);
+            let list = guard.get_or_insert_with(HashMap::new).entry(item).or_default();
+            for (addr, bytes) in done {
+                match list.iter_mut().find(|(a, _)| *a == addr) {
+                    Some(slot) => slot.1 = bytes,
+                    None => list.push((addr, bytes)),
+                }
+            }
         }
     }
 }
@@ -1064,6 +1111,7 @@ fn write_u64(b: &mut [u8], off: usize, v: u64) {
 }
 
 fn spawn_now(manager: usize) {
+    let tag = SPAWN_TAG.lock().ok().and_then(|mut t| t.take());
     let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
     let settings = match requested {
         Some(s) => s,
@@ -1169,6 +1217,11 @@ fn spawn_now(manager: usize) {
         }
         if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
+            if let Some(tag) = &tag {
+                if let Ok(mut created) = CREATED.lock() {
+                    created.push((tag.clone(), id));
+                }
+            }
         }
     }
 }
@@ -1190,8 +1243,7 @@ pub struct Command {
     label: Option<String>,
     guid: Option<String>,
     item_id: Option<u32>,
-    old: Vec<String>,
-    new: Option<String>,
+    stats: Option<StatsPatch>,
     ground: Option<f64>,
 }
 
@@ -1199,6 +1251,8 @@ pub struct Command {
 struct Saved {
     susceptibility: Vec<u8>,
     fall: Option<[u8; 8]>,
+    retries: u32,
+    seen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1239,9 +1293,9 @@ struct PowerState {
     saved: HashMap<(usize, u32), Saved>,
     zone_ids: Vec<u32>,
     tp: Option<Tp>,
-    limit_peak: [u32; 2],
     diag_left: u32,
     diag_last: Option<Instant>,
+    spawners: SpawnerSet,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -1309,14 +1363,22 @@ pub fn refill_health(manager: usize, id: u32) -> bool {
 pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
     let Some((addr, b)) = resource(manager, id, 1, STAMINA_SIGNATURE) else { return false };
     let current = u32_at(&b, 8);
-    let limit = u32_at(&b, 32);
     if current > *peak && current < 1_000_000 {
         *peak = current;
     }
-    let target = (*peak).max(limit);
-    if target > 0 && current < target {
+    let target = *peak;
+    if target > 0 && (current != target || u32_at(&b, 16) != target) {
         put_u32(addr + 8, target);
         put_u32(addr + 16, target);
+    }
+    // the bar on screen reads the replicated copy: keep it full too, and learn the real maximum from it
+    if let Some((net, cur, max)) = net_stamina(manager, id, current.max(target)) {
+        if max as u32 > *peak && max < 60_000 {
+            *peak = max as u32;
+        }
+        if cur != max && max > 0 {
+            write_bytes(net, &max.to_le_bytes());
+        }
     }
     true
 }
@@ -1336,14 +1398,72 @@ pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
     true
 }
 
-fn restore_stamina_limit(manager: usize, id: u32, peak: &mut u32) {
-    let Some((addr, b)) = resource(manager, id, 1, STAMINA_SIGNATURE) else { return };
-    let limit = u32_at(&b, 32);
-    if limit > *peak && limit < 1_000_000 {
-        *peak = limit;
-    } else if limit < *peak {
-        put_u32(addr + 32, *peak);
+static NET_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+static NET_TRIES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+fn net_plausible(b: &[u8]) -> Option<(u16, u16)> {
+    if b.len() < 4 {
+        return None;
     }
+    let cur = u16::from_le_bytes([b[0], b[1]]);
+    let max = u16::from_le_bytes([b[2], b[3]]);
+    if max >= 100 && cur <= max {
+        Some((cur, max))
+    } else {
+        None
+    }
+}
+
+/// Finds the replicated `NetworkStamina {stamina, staminaMax}` (two u16) of an entity: the 4-byte
+/// component whose first value follows the known stamina. Returns its address and both values.
+fn net_stamina(manager: usize, id: u32, known: u32) -> Option<(usize, u16, u16)> {
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let kind = kind_of(manager);
+    let cached = NET_INDEX[kind].load(Ordering::Relaxed);
+    if cached >= 0 {
+        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+            if stride == 4 {
+                if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
+                    return Some((addr, cur, max));
+                }
+            }
+        }
+    }
+    if NET_TRIES[kind].load(Ordering::Relaxed) >= 40 {
+        return None;
+    }
+    NET_TRIES[kind].fetch_add(1, Ordering::Relaxed);
+    let tolerance = (known / 10).max(40);
+    let mut found: Vec<(usize, usize, u16, u16)> = Vec::new();
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != 4 {
+            continue;
+        }
+        if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
+            if (cur as i64 - known as i64).unsigned_abs() as u32 <= tolerance && max as u32 + tolerance >= known {
+                found.push((index, addr, cur, max));
+            }
+        }
+    }
+    let &(index, addr, cur, max) = found.first()?;
+    NET_INDEX[kind].store(index as i32, Ordering::Relaxed);
+    log(&format!(
+        "stamina: NetworkStamina found at component {index} ({}) = {cur}/{max} ({} candidate(s))",
+        if kind == 1 { "client" } else { "server" },
+        found.len()
+    ));
+    Some((addr, cur, max))
+}
+
+/// Keeps the on-screen stamina of the client copy of the player full.
+fn refill_client_stamina(manager: usize, id: u32, known: u32) -> Option<u32> {
+    let (net, cur, max) = net_stamina(manager, id, known)?;
+    if cur != max && max > 0 {
+        write_bytes(net, &max.to_le_bytes());
+    }
+    Some(max as u32)
 }
 
 fn find_fall(manager: usize, id: u32) -> Option<usize> {
@@ -1376,25 +1496,50 @@ fn find_fall(manager: usize, id: u32) -> Option<usize> {
     None
 }
 
+static LAST_GOOD_SUSCEPTIBILITY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+const SHIELD_RETRIES: u32 = 600;
+
+/// Zeroes the damage susceptibility (and lifts the fall damage limit) of one entity.
+/// The original values are stored exactly once, the first time they are seen, and are never
+/// overwritten afterwards: whatever the game writes in between must not become the "original".
 fn shield_on(st: &mut PowerState, manager: usize, id: u32) {
     let key = (manager, id);
     if let Some((addr, b)) = resource_sized(manager, id, 3, SUSCEPTIBILITY_SIGNATURE, SUSCEPTIBILITY_SIZE) {
         let data = &b[8..SUSCEPTIBILITY_SIZE];
-        if data.iter().any(|v| *v != 0) {
-            let entry = st.saved.entry(key).or_default();
-            entry.susceptibility = data.to_vec();
-            write_bytes(addr + 8, &[0u8; SUSCEPTIBILITY_SIZE - 8]);
-        } else {
-            st.saved.entry(key).or_default();
+        let zero = data.iter().all(|v| *v == 0);
+        let known = st.saved.get(&key).map(|e| e.seen).unwrap_or(false);
+        if !known {
+            if !zero {
+                if let Ok(mut last) = LAST_GOOD_SUSCEPTIBILITY.lock() {
+                    *last = data.to_vec();
+                }
+                log(&format!("shield: entity {id} original susceptibility {}", hex(data)));
+                let entry = st.saved.entry(key).or_default();
+                entry.susceptibility = data.to_vec();
+                entry.seen = true;
+            } else {
+                // already zero and never seen otherwise: borrow the last healthy values for the way back
+                let guess = LAST_GOOD_SUSCEPTIBILITY.lock().map(|l| l.clone()).unwrap_or_default();
+                log(&format!("shield: entity {id} susceptibility was already zero (fallback {} bytes)", guess.len()));
+                let entry = st.saved.entry(key).or_default();
+                entry.susceptibility = guess;
+                entry.seen = true;
+            }
         }
+        if !zero {
+            write_bytes(addr + 8, &[0u8; SUSCEPTIBILITY_SIZE - 8]);
+        }
+        st.saved.entry(key).or_default();
     }
     if let Some(addr) = find_fall(manager, id) {
         if let Some(b) = read_bytes(addr, 8) {
             if b.len() >= 8 {
                 let start = f32_at(&b, 0);
+                let entry = st.saved.entry(key).or_default();
                 if start < FALL_UNLIMITED * 0.5 {
-                    let entry = st.saved.entry(key).or_default();
-                    entry.fall = Some([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                    if entry.fall.is_none() {
+                        entry.fall = Some([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                    }
                     let mut huge = [0u8; 8];
                     huge[0..4].copy_from_slice(&FALL_UNLIMITED.to_le_bytes());
                     huge[4..8].copy_from_slice(&FALL_UNLIMITED.to_le_bytes());
@@ -1405,22 +1550,45 @@ fn shield_on(st: &mut PowerState, manager: usize, id: u32) {
     }
 }
 
+/// Gives the saved originals back, value by value, and checks the result. The entry is only dropped
+/// once everything is verified (or after many tries), so a failed write is retried on the next tick.
 fn shield_off(st: &mut PowerState, manager: usize, id: u32) {
-    let Some(saved) = st.saved.remove(&(manager, id)) else { return };
+    let key = (manager, id);
+    let Some(saved) = st.saved.get(&key).cloned() else { return };
+    let mut done = true;
     if !saved.susceptibility.is_empty() {
-        if let Some((addr, b)) = resource_sized(manager, id, 3, SUSCEPTIBILITY_SIGNATURE, SUSCEPTIBILITY_SIZE) {
-            if b[8..SUSCEPTIBILITY_SIZE].iter().all(|v| *v == 0) {
-                write_bytes(addr + 8, &saved.susceptibility);
+        match resource_sized(manager, id, 3, SUSCEPTIBILITY_SIGNATURE, SUSCEPTIBILITY_SIZE) {
+            Some((addr, b)) => {
+                if b[8..SUSCEPTIBILITY_SIZE] != saved.susceptibility[..] {
+                    write_bytes(addr + 8, &saved.susceptibility);
+                    let ok = read_bytes(addr + 8, saved.susceptibility.len()).map(|r| r == saved.susceptibility).unwrap_or(false);
+                    done &= ok;
+                }
             }
+            None => done = false,
         }
     }
     if let Some(original) = saved.fall {
-        if let Some(addr) = find_fall(manager, id) {
-            if let Some(b) = read_bytes(addr, 8) {
-                if b.len() >= 8 && f32_at(&b, 0) >= FALL_UNLIMITED * 0.5 {
-                    write_bytes(addr, &original);
+        match find_fall(manager, id) {
+            Some(addr) => {
+                if let Some(b) = read_bytes(addr, 8) {
+                    if b.len() >= 8 && b[..8] != original {
+                        write_bytes(addr, &original);
+                        done &= read_bytes(addr, 8).map(|r| r[..8] == original).unwrap_or(false);
+                    }
                 }
             }
+            None => done = false,
+        }
+    }
+    if done {
+        st.saved.remove(&key);
+        log(&format!("shield: entity {id} restored"));
+    } else if let Some(entry) = st.saved.get_mut(&key) {
+        entry.retries += 1;
+        if entry.retries >= SHIELD_RETRIES {
+            st.saved.remove(&key);
+            log(&format!("shield: entity {id} could not be restored, giving up"));
         }
     }
 }
@@ -1867,6 +2035,17 @@ fn diagnostics(st: &mut PowerState, manager: usize, id: u32, client: Option<(usi
         let stamina = resource(m, i, 1, STAMINA_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
         let heat = resource(m, i, 4, BODY_HEAT_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
         log(&format!("diag {label}: stamina={stamina} heat={heat}"));
+        if let Some(p) = find_record(m, i).and_then(placement) {
+            let mut small = Vec::new();
+            for index in 0..COMPONENT_SLOTS {
+                if let Some((addr, 4)) = component_address(&p, index) {
+                    if let Some(b) = read_bytes(addr, 4) {
+                        small.push(format!("{index}:{}", hex(&b)));
+                    }
+                }
+            }
+            log(&format!("diag {label}: 4-byte components {}", small.join(" ")));
+        }
     }
 }
 
@@ -1933,6 +2112,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if tick % 4 == 0 {
         groups_tick(st, dir);
     }
+    if tick % 16 == 0 {
+        spawners_tick(&mut st.spawners, dir);
+    }
     let client = client_pair();
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
@@ -1969,11 +2151,15 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if st.powers.stamina {
         refill_stamina(manager, id, &mut st.stamina_peak);
         refill_mana(manager, id, &mut st.mana_peak);
-        restore_stamina_limit(manager, id, &mut st.limit_peak[0]);
         if let Some((m, c)) = client {
-            refill_stamina(m, c, &mut st.stamina_peak_c);
             refill_mana(m, c, &mut st.mana_peak_c);
-            restore_stamina_limit(m, c, &mut st.limit_peak[1]);
+            if !refill_stamina(m, c, &mut st.stamina_peak_c) {
+                if let Some(max) = refill_client_stamina(m, c, st.stamina_peak) {
+                    if max > st.stamina_peak && max < 60_000 {
+                        st.stamina_peak = max;
+                    }
+                }
+            }
         }
         diagnostics(st, manager, id, client);
     }
@@ -2064,9 +2250,9 @@ pub fn new_power_state() -> PowerState {
         saved: HashMap::new(),
         zone_ids: Vec::new(),
         tp: None,
-        limit_peak: [0, 0],
-        diag_left: 30,
+        diag_left: 12,
         diag_last: None,
+        spawners: SpawnerSet::default(),
     }
 }
 
@@ -2187,63 +2373,6 @@ pub fn read_window(base: usize, len: usize) -> Vec<u8> {
     out
 }
 
-pub fn patch_item_stats(guid: &[u8; 16], item_id: u32, olds: &[Vec<u8>], new: &[u8], regions: &[(usize, usize)]) -> (usize, String) {
-    let hits = scan_regions(regions, guid, 64);
-    let mut patched = 0usize;
-    let mut notes = format!("{} guid hits", hits.len());
-    let mut seen: HashSet<usize> = HashSet::new();
-    for h in hits {
-        for back in [4usize, 8, 0] {
-            if h < back + 0x10000 {
-                continue;
-            }
-            let base = h - back;
-            if back != 0 {
-                let Some(w) = read_bytes(base, 4) else { continue };
-                if u32_at(&w, 0) != item_id {
-                    continue;
-                }
-            }
-            let window = read_window(base, 0x40000);
-            if window.len() < 64 {
-                continue;
-            }
-            'olds: for old in olds {
-                if old.is_empty() || old.len() != new.len() {
-                    continue;
-                }
-                let mut found: Vec<usize> = Vec::new();
-                let mut i = 0usize;
-                while i + old.len() <= window.len() {
-                    if window[i..i + old.len()] == old[..] {
-                        found.push(i);
-                    }
-                    i += 4;
-                }
-                if found.len() == 1 {
-                    let addr = base + found[0];
-                    if seen.insert(addr) {
-                        if write_anywhere(addr, new) {
-                            if let Some(check) = read_bytes(addr, new.len()) {
-                                if check == new {
-                                    patched += 1;
-                                }
-                            }
-                        }
-                    }
-                    break 'olds;
-                } else if found.len() > 1 {
-                    notes.push_str(&format!("; {} matches inside one struct, skipped", found.len()));
-                }
-            }
-            if patched > 0 {
-                break;
-            }
-        }
-    }
-    (patched, notes)
-}
-
 fn hex_to_bytes(text: &str) -> Vec<u8> {
     let t = text.trim();
     let mut out = Vec::with_capacity(t.len() / 2);
@@ -2266,20 +2395,372 @@ fn run_item_stats(cmd: Command) {
         return;
     };
     let item_id = cmd.item_id.unwrap_or(0);
-    let new = hex_to_bytes(cmd.new.as_deref().unwrap_or(""));
-    let olds: Vec<Vec<u8>> = cmd.old.iter().map(|s| hex_to_bytes(s)).filter(|v| !v.is_empty()).collect();
-    if new.is_empty() || olds.is_empty() || item_id == 0 {
+    let Some(stats) = cmd.stats else {
         log(&format!("item stats {label}: missing data"));
         return;
+    };
+    if item_id == 0 {
+        log(&format!("item stats {label}: missing item id"));
+        return;
     }
-    let started = Instant::now();
-    let regions = readable_regions();
-    let (count, notes) = patch_item_stats(&guid, item_id, &olds, &new, &regions);
-    log(&format!(
-        "item stats {label}: patched {count} copies ({notes}) in {} ms over {} regions",
-        started.elapsed().as_millis(),
-        regions.len()
-    ));
+    apply_stats_patch(item_id, &guid, &stats);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Players: every player entity of the world is found by looking at the entity table, not only the
+// ones whose creation was seen by the hook (friends join through other paths).
+// ---------------------------------------------------------------------------------------------
+
+static DEF_CLASS: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
+static DEF_MGR: AtomicUsize = AtomicUsize::new(0);
+
+pub fn reset_player_cache() {
+    if let Ok(mut g) = DEF_CLASS.lock() {
+        *g = None;
+    }
+}
+
+pub fn tracked_ids() -> Vec<u32> {
+    TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default()
+}
+
+fn def_is_player(manager: usize, id: u32, p: &Placement) -> bool {
+    if let Ok(guard) = DEF_CLASS.lock() {
+        if let Some(known) = guard.as_ref().and_then(|m| m.get(&p.def)) {
+            return *known;
+        }
+    }
+    let verdict = match layout(p) {
+        Some(slots) => slots.iter().any(|slot| {
+            slot.stride == 40 && matches!(read_bytes(slot.addr, 4), Some(b) if b.len() >= 4 && u32_at(&b, 0) == STAMINA_SIGNATURE)
+        }),
+        None => return false,
+    };
+    if let Ok(mut guard) = DEF_CLASS.lock() {
+        guard.get_or_insert_with(HashMap::new).insert(p.def, verdict);
+    }
+    if verdict {
+        log(&format!("players: entity definition {:#x} (first seen on entity {id}) looks like a player", p.def));
+    }
+    let _ = manager;
+    verdict
+}
+
+/// Looks through the whole entity table once and tracks every player-like entity. Returns how many
+/// new players were found.
+pub fn scan_players_once(manager: usize) -> usize {
+    if manager == 0 {
+        return 0;
+    }
+    if DEF_MGR.swap(manager, Ordering::SeqCst) != manager {
+        reset_player_cache();
+    }
+    let Some(head) = read_bytes(manager + 0x148, 0x58) else { return 0 };
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return 0;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let Some(bitmap) = read_bytes(u64_at(&head, 8) as usize, words * 8) else { return 0 };
+    let Some(keys) = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4) else { return 0 };
+    let Some(values) = read_bytes(u64_at(&head, 0x40) as usize, capacity as usize * 8) else { return 0 };
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 || values.len() < capacity as usize * 8 {
+        return 0;
+    }
+    let known: HashSet<u32> = TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default();
+    let mut found = 0;
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 0 {
+            continue;
+        }
+        let id = u32_at(&keys, slot * 4);
+        if id == 0 || known.contains(&id) {
+            continue;
+        }
+        let record = u64_at(&values, slot * 8) as usize;
+        if record < 0x10000 {
+            continue;
+        }
+        let Some(p) = placement(record) else { continue };
+        if let Ok(guard) = DEF_CLASS.lock() {
+            if guard.as_ref().and_then(|m| m.get(&p.def)) == Some(&false) {
+                continue;
+            }
+        }
+        if !def_is_player(manager, id, &p) {
+            continue;
+        }
+        if faction_addresses(manager, id).is_empty() {
+            continue;
+        }
+        track_player(manager, id);
+        found += 1;
+    }
+    found
+}
+
+fn players_loop() {
+    loop {
+        std::thread::sleep(Duration::from_millis(2500));
+        let manager = SERVER_MGR.load(Ordering::SeqCst);
+        if manager == 0 || PLAYER_ID.load(Ordering::SeqCst) == 0 {
+            continue;
+        }
+        scan_players_once(manager);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spawners: creatures bound to a place that come back after they die (or after a restart).
+// ---------------------------------------------------------------------------------------------
+
+pub const SPAWNERS_FILE: &str = "m182_spawners.json";
+pub const SPAWNER_STATUS_FILE: &str = "m182_spawner_status.json";
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+struct SpawnerDef {
+    id: String,
+    name: String,
+    template: String,
+    level: u32,
+    count: u32,
+    health: u32,
+    damage: f32,
+    at: Option<[f64; 3]>,
+    radius: f32,
+    respawn: u32,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SpawnersFile {
+    spawners: Vec<SpawnerDef>,
+}
+
+struct SpawnerRt {
+    def: SpawnerDef,
+    ids: Vec<u32>,
+    missing: HashMap<u32, u8>,
+    respawn_at: Option<Instant>,
+    spawned: u32,
+    manager: usize,
+    state: &'static str,
+}
+
+#[derive(Default)]
+pub struct SpawnerSet {
+    list: Vec<SpawnerRt>,
+    mtime: Option<std::time::SystemTime>,
+    last: Option<Instant>,
+    pending: Option<(String, Instant)>,
+    status: String,
+    status_at: Option<Instant>,
+}
+
+fn health_now(manager: usize, id: u32) -> Option<u32> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    for slot in &slots {
+        if slot.stride == 40 {
+            if let Some(b) = read_bytes(slot.addr, 12) {
+                if b.len() >= 12 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+                    return Some(u32_at(&b, 8));
+                }
+            }
+        }
+    }
+    Some(u32::MAX)
+}
+
+/// A creature counts as gone only after it was missing, or at zero health, on three checks in a row
+/// (a few seconds): right after creation or while the world streams, one bad reading is not a death.
+fn creature_alive(manager: usize, id: u32, missing: &mut HashMap<u32, u8>) -> bool {
+    let bad = matches!(health_now(manager, id), None | Some(0));
+    if bad {
+        let n = missing.entry(id).or_insert(0);
+        *n += 1;
+        *n < 3
+    } else {
+        missing.remove(&id);
+        true
+    }
+}
+
+fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
+    let path = dir.join(SPAWNERS_FILE);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if mtime == set.mtime {
+        return;
+    }
+    set.mtime = mtime;
+    let defs: Vec<SpawnerDef> = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<SpawnersFile>(&text) {
+            Ok(f) => f.spawners.into_iter().filter(|d| !d.id.is_empty() && !d.template.trim().is_empty() && d.enabled.unwrap_or(true)).collect(),
+            Err(e) => {
+                log(&format!("spawners: invalid file ({e})"));
+                return;
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut next: Vec<SpawnerRt> = Vec::new();
+    for def in defs {
+        match set.list.iter().position(|r| r.def.id == def.id) {
+            Some(i) => {
+                let mut rt = set.list.swap_remove(i);
+                rt.def = def;
+                next.push(rt);
+            }
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando" }),
+        }
+    }
+    set.list = next;
+    log(&format!("spawners: {} active", set.list.len()));
+}
+
+fn issue_spawn(rt: &SpawnerRt, need: u32) {
+    let d = &rt.def;
+    let settings = SpawnSettings {
+        template: d.template.trim().to_string(),
+        level: d.level.clamp(1, 1000),
+        count: need.clamp(1, 20),
+        distance: if d.radius > 0.0 { d.radius.clamp(0.5, 60.0) } else { 3.0 },
+        health: d.health.min(2_000_000_000),
+        damage: d.damage.clamp(0.0, 1000.0).max(if d.damage == 0.0 { 1.0 } else { 0.0 }),
+        key: 0,
+        dump_player_key: 0,
+        dump_spawned_key: 0,
+        watch_key: 0,
+    };
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(settings);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = None;
+    }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = d.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
+    }
+    REQUEST_OBJECT.store(false, Ordering::SeqCst);
+    REQUEST_FORWARD.store(false, Ordering::SeqCst);
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = Some(d.id.clone());
+    }
+    PENDING.store(1, Ordering::SeqCst);
+}
+
+fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
+    let now = Instant::now();
+    if set.last.map(|t| now.duration_since(t) < Duration::from_secs(1)).unwrap_or(false) {
+        return;
+    }
+    set.last = Some(now);
+    load_spawners(set, dir);
+
+    let created: Vec<(String, u32)> = CREATED.lock().map(|mut c| c.drain(..).collect()).unwrap_or_default();
+    for (tag, id) in created {
+        if let Some(rt) = set.list.iter_mut().find(|r| r.def.id == tag) {
+            rt.ids.push(id);
+            rt.spawned += 1;
+        }
+    }
+    if let Some((tag, since)) = set.pending.clone() {
+        let finished = PENDING.load(Ordering::SeqCst) == 0 && SPAWN_TAG.lock().map(|t| t.is_none()).unwrap_or(true);
+        if finished {
+            set.pending = None;
+        } else if since.elapsed() > Duration::from_secs(12) {
+            PENDING.store(0, Ordering::SeqCst);
+            if let Ok(mut r) = REQUEST.lock() {
+                *r = None;
+            }
+            if let Ok(mut r) = REQUEST_AT.lock() {
+                *r = None;
+            }
+            if let Ok(mut t) = SPAWN_TAG.lock() {
+                *t = None;
+            }
+            log(&format!("spawners: {tag} could not be created in time, will retry"));
+            set.pending = None;
+        }
+    }
+
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    let ready_world = manager != 0 && player_transform().is_some();
+    let busy = set.pending.is_some() || PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true);
+    let mut issued: Option<(String, u32)> = None;
+    for rt in set.list.iter_mut() {
+        if manager == 0 {
+            rt.state = "esperando el mundo";
+            continue;
+        }
+        if rt.manager != manager {
+            if rt.manager != 0 {
+                rt.respawn_at = Some(now + Duration::from_secs(10));
+                log(&format!("spawners: world changed, {} will be created again", rt.def.id));
+            }
+            rt.manager = manager;
+            rt.ids.clear();
+            rt.missing.clear();
+        }
+        let before = rt.ids.len();
+        let mut missing = std::mem::take(&mut rt.missing);
+        rt.ids.retain(|id| creature_alive(manager, *id, &mut missing));
+        rt.missing = missing;
+        let respawn = Duration::from_secs(rt.def.respawn.clamp(1, 86_400) as u64);
+        if rt.ids.len() < before && rt.respawn_at.is_none() {
+            rt.respawn_at = Some(now + respawn);
+            log(&format!("spawners: {} lost a creature, it comes back in {} s", rt.def.id, respawn.as_secs()));
+        }
+        let want = rt.def.count.clamp(1, 20) as usize;
+        if rt.ids.len() >= want {
+            rt.respawn_at = None;
+            rt.state = "vivo";
+            continue;
+        }
+        let due = *rt.respawn_at.get_or_insert(now);
+        if now < due {
+            rt.state = "esperando para reaparecer";
+            continue;
+        }
+        rt.state = "creando";
+        if busy || issued.is_some() || !ready_world {
+            continue;
+        }
+        let need = (want - rt.ids.len()) as u32;
+        issue_spawn(rt, need);
+        rt.respawn_at = Some(now + Duration::from_secs(30));
+        issued = Some((rt.def.id.clone(), need));
+    }
+    if let Some((tag, need)) = issued {
+        set.pending = Some((tag.clone(), now));
+        log(&format!("spawners: creating {need} for {tag}"));
+    }
+
+    // status for the panel
+    let rows: Vec<String> = set
+        .list
+        .iter()
+        .map(|rt| {
+            let next = rt.respawn_at.map(|t| t.saturating_duration_since(now).as_secs().to_string()).unwrap_or_else(|| "null".to_string());
+            format!(
+                "{{\"id\":{},\"alive\":{},\"want\":{},\"state\":\"{}\",\"next\":{},\"spawned\":{}}}",
+                serde_json::to_string(&rt.def.id).unwrap_or_else(|_| "\"\"".into()),
+                rt.ids.len(),
+                rt.def.count.clamp(1, 20),
+                rt.state,
+                if rt.ids.len() >= rt.def.count.clamp(1, 20) as usize { "null".to_string() } else { next },
+                rt.spawned
+            )
+        })
+        .collect();
+    let text = format!("{{\"spawners\":[{}]}}", rows.join(","));
+    if text != set.status && set.status_at.map(|t| now.duration_since(t) >= Duration::from_secs(2)).unwrap_or(true) {
+        set.status = text.clone();
+        set.status_at = Some(now);
+        let _ = std::fs::write(dir.join(SPAWNER_STATUS_FILE), text);
+    }
 }
 
 fn powers_loop() {

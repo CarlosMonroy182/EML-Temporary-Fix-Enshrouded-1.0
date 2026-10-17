@@ -7,6 +7,7 @@ mod map;
 mod tiles;
 mod powers;
 mod social;
+mod spawners;
 mod theme;
 mod wiki;
 
@@ -87,6 +88,7 @@ pub enum Tab {
     SafeZones,
     Teams,
     Places,
+    Settings,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -97,10 +99,8 @@ enum Mode {
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Target {
-    Forward,
     Around,
     Place,
-    Coords,
 }
 
 enum Status {
@@ -131,7 +131,10 @@ pub struct App {
     pvp_friends: bool,
     target: Target,
     place_index: usize,
-    coords: [f64; 3],
+    respawn_minutes: u32,
+    spawners: Vec<spawners::Spawner>,
+    spawner_status: HashMap<String, spawners::Live>,
+    spawner_checked: Instant,
     places: Vec<Place>,
     new_place: String,
     player: Option<[f64; 3]>,
@@ -478,6 +481,7 @@ impl App {
             Ok("items") => Tab::Items,
             Ok("map") => Tab::Map,
             Ok("powers") => Tab::Powers,
+            Ok("settings") => Tab::Settings,
             _ => Tab::Creatures,
         };
         #[cfg(not(feature = "linux-preview"))]
@@ -500,9 +504,12 @@ impl App {
             damage: get_f("spawn_damage", 1.0).clamp(0.0, 20.0),
             pvp: get_b("pvp"),
             pvp_friends: get_b("pvp_friend_checks"),
-            target: Target::Forward,
+            target: Target::Around,
             place_index: 0,
-            coords: [0.0; 3],
+            respawn_minutes: spawners::DEFAULT_RESPAWN_MINUTES,
+            spawners: spawners::load(&dir),
+            spawner_status: spawners::load_status(&dir),
+            spawner_checked: Instant::now(),
             player: read_player(&dir),
             player_checked: Instant::now(),
             places,
@@ -562,22 +569,49 @@ impl App {
         }
     }
 
-    fn target_point(&self) -> Option<[f64; 3]> {
-        match self.target {
-            Target::Forward | Target::Around => None,
-            Target::Place => self.places.get(self.place_index).map(|p| [p.x, p.y, p.z]),
-            Target::Coords => Some(self.coords),
-        }
+    /// Creates a creature spawner on the chosen place: it appears there, and comes back every few
+    /// minutes after it is killed (and every time the game starts, since summoned creatures are not saved).
+    fn create_spawner(&mut self) {
+        let Some(index) = self.creatures.selected else { return };
+        let Some(entry) = self.creatures.entries.get(index) else { return };
+        let (creature, template) = (entry.alias.clone().unwrap_or_else(|| entry.label.clone()), entry.guid.clone());
+        let Some(place) = self.places.get(self.place_index).cloned() else {
+            self.status = Status::Error("Elige un lugar guardado.".to_string());
+            return;
+        };
+        let spawner = spawners::Spawner {
+            id: spawners::new_id(),
+            creature,
+            template,
+            place: place.name.clone(),
+            at: [place.x, place.y, place.z],
+            level: self.level,
+            count: self.count,
+            health: self.effective_health(),
+            damage: self.damage,
+            radius: if self.count > 1 { self.distance } else { 3.0 },
+            respawn: self.respawn_minutes.clamp(1, 1440) * 60,
+        };
+        self.spawners.push(spawner);
+        self.status = match spawners::save(&self.dir, &self.spawners) {
+            Ok(()) => Status::Delivered,
+            Err(e) => Status::Error(e),
+        };
+        self.notice = format!("Aparición creada en «{}». Aparecerá en unos segundos y reaparecerá cada {} min si la matan.", place.name, self.respawn_minutes);
+    }
+
+    fn delete_spawner(&mut self, id: &str) {
+        self.spawners.retain(|s| s.id != id);
+        self.status = match spawners::save(&self.dir, &self.spawners) {
+            Ok(()) => Status::Idle,
+            Err(e) => Status::Error(e),
+        };
+        self.notice = "Aparición borrada: ya no reaparecerá. Si ahora hay criaturas vivas, se quedan hasta que las mates.".to_string();
     }
 
     fn spawn(&mut self, mode: Mode) {
         let Some(index) = self.catalog(mode).selected else { return };
         let guid = self.catalog(mode).entries[index].guid.clone();
-        let at = if mode == Mode::Creatures { self.target_point() } else { None };
-        if mode == Mode::Creatures && matches!(self.target, Target::Place) && at.is_none() {
-            self.status = Status::Error("Elige un lugar guardado.".to_string());
-            return;
-        }
         if mode == Mode::Items {
             if let Some(item) = self.items.rows.get(index).cloned() {
                 if self.items.dirty.contains_key(&item.id) {
@@ -625,14 +659,6 @@ impl App {
                     }
                 }
             }
-            if mode == Mode::Creatures {
-                if self.target == Target::Forward {
-                    request["forward"] = json!(true);
-                }
-                if let Some(p) = at {
-                    request["at"] = json!(p);
-                }
-            }
             write_atomic(&self.dir, REQUEST_FILE, REQUEST_TMP, &request.to_string())
         });
         self.status = match result {
@@ -672,6 +698,10 @@ impl App {
                 }
             }
         }
+        if self.spawner_checked.elapsed() >= Duration::from_secs(2) {
+            self.spawner_checked = Instant::now();
+            self.spawner_status = spawners::load_status(&self.dir);
+        }
         if self.player_checked.elapsed() >= Duration::from_millis(700) {
             self.player_checked = Instant::now();
             self.player = read_player(&self.dir);
@@ -704,6 +734,7 @@ impl App {
             (Tab::Pvp, "PvP", false),
             (Tab::SafeZones, "Zonas seguras", false),
             (Tab::Teams, "Equipos", false),
+            (Tab::Settings, "Ajustes", false),
         ] {
             let selected = self.tab == tab;
             let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
@@ -885,23 +916,17 @@ impl App {
     fn target_controls(&mut self, ui: &mut egui::Ui) {
         label_title(ui, "DÓNDE APARECE");
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.target, Target::Forward, "Delante de mí");
-            ui.selectable_value(&mut self.target, Target::Around, "Alrededor");
-            ui.selectable_value(&mut self.target, Target::Place, "Lugar");
-            ui.selectable_value(&mut self.target, Target::Coords, "Punto");
+            ui.selectable_value(&mut self.target, Target::Around, "A mi alrededor");
+            ui.selectable_value(&mut self.target, Target::Place, "En un lugar");
         });
         match self.target {
-            Target::Forward => {
-                ui.label("Distancia hacia donde mira tu personaje (m)");
-                ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
-            }
             Target::Around => {
                 ui.label("Distancia de ti (metros)");
                 ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
             }
             Target::Place => {
                 if self.places.is_empty() {
-                    ui.label(RichText::new("Aún no tienes lugares. Guárdalos en la pestaña Lugares.").color(MUTED));
+                    ui.label(RichText::new("Aún no tienes lugares. Guárdalos en la pestaña Mapa.").color(MUTED));
                 } else {
                     self.place_index = self.place_index.min(self.places.len() - 1);
                     let current = self.places[self.place_index].name.clone();
@@ -914,25 +939,39 @@ impl App {
                         ui.label("Radio alrededor del lugar");
                         ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
                     }
+                    ui.label("Reaparece cada (minutos)");
+                    ui.add(egui::Slider::new(&mut self.respawn_minutes, 1..=120));
+                    ui.label(RichText::new("Queda guardado: vuelve a aparecer ahí cuando lo matan y cada vez que abres el juego.").color(MUTED).size(12.5));
                 }
             }
-            Target::Coords => {
-                for (label, value) in ["X", "Y (altura)", "Z"].iter().zip(self.coords.iter_mut()) {
-                    ui.horizontal(|ui| {
-                        ui.label(*label);
-                        ui.add(egui::DragValue::new(value).speed(1.0).fixed_decimals(1));
-                    });
-                }
-                if let Some(p) = self.player {
-                    if button(ui, "Usar mi posición", Vec2::new(ui.available_width(), 30.0), true, false) {
-                        self.coords = p;
+        }
+    }
+
+    fn spawner_list(&mut self, ui: &mut egui::Ui) {
+        label_title(ui, &format!("APARICIONES ACTIVAS ({})", self.spawners.len()));
+        if self.spawners.is_empty() {
+            ui.label(RichText::new("Ninguna todavía.").color(MUTED).size(12.5));
+            return;
+        }
+        let mut remove: Option<String> = None;
+        for s in &self.spawners {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
+                    ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
+                    ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(12.0));
+                    ui.label(RichText::new(spawners::describe(self.spawner_status.get(&s.id))).color(GOLD_DIM).size(12.5));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if button(ui, "Borrar", Vec2::new(70.0, 26.0), true, false) {
+                        remove = Some(s.id.clone());
                     }
-                }
-                if self.count > 1 {
-                    ui.label("Radio alrededor del punto");
-                    ui.add(egui::Slider::new(&mut self.distance, 1.0..=60.0).fixed_decimals(0));
-                }
-            }
+                });
+            });
+            ui.add_space(4.0);
+        }
+        if let Some(id) = remove {
+            self.delete_spawner(&id);
         }
     }
 
@@ -1006,15 +1045,27 @@ impl App {
         divider(ui);
 
         let enabled = selected.is_some();
-        if button(ui, "INVOCAR", Vec2::new(ui.available_width(), 52.0), enabled, true) {
-            self.spawn(mode);
+        let place_mode = mode == Mode::Creatures && self.target == Target::Place;
+        let label = if place_mode { "CREAR APARICIÓN" } else { "INVOCAR" };
+        let enabled = enabled && (!place_mode || !self.places.is_empty());
+        if button(ui, label, Vec2::new(ui.available_width(), 52.0), enabled, true) {
+            if place_mode {
+                self.create_spawner();
+            } else {
+                self.spawn(mode);
+            }
         }
         let (text, color) = self.status_text();
         if !text.is_empty() {
             ui.label(RichText::new(text).color(color));
         }
+        if place_mode && !self.notice.is_empty() {
+            ui.label(RichText::new(self.notice.clone()).color(GOOD).size(13.0));
+        }
         if mode == Mode::Creatures {
             ui.label(RichText::new("En el juego, F8 invoca con estos mismos valores.").color(MUTED).size(13.0));
+            divider(ui);
+            self.spawner_list(ui);
         }
     }
 
@@ -1107,6 +1158,7 @@ impl eframe::App for App {
                     Tab::Powers => self.powers_tab(ui),
                     Tab::Pvp => self.pvp_tab(ui),
                     Tab::SafeZones => self.zones_tab(ui),
+                    Tab::Settings => self.settings_tab(ui),
                     _ => self.teams_tab(ui),
                 });
             }
@@ -1166,7 +1218,10 @@ mod tests {
             pvp_friends: false,
             target: Target::Around,
             place_index: 0,
-            coords: [0.0; 3],
+            respawn_minutes: 5,
+            spawners: Vec::new(),
+            spawner_status: HashMap::new(),
+            spawner_checked: Instant::now(),
             places: Vec::new(),
             new_place: String::new(),
             player: None,
@@ -1213,11 +1268,6 @@ mod tests {
         let c = cells[&map::cell_of(100.0, 200.0)];
         assert_eq!(c.1, 2);
         assert!((c.0 - 60.0).abs() < 0.01);
-        assert_eq!(map::parse_coordinates("3722, 842, 1367"), Some([3722.0, 842.0, 1367.0]));
-        let two = map::parse_coordinates("X: -12.5  Z: 40").unwrap();
-        assert_eq!((two[0], two[2]), (-12.5, 40.0));
-        assert!(two[1].is_nan());
-        assert!(map::parse_coordinates("hola").is_none());
         let mut state = map::MapState::default();
         state.cells = cells;
         assert!(state.height_near(110.0, 205.0).is_some());
@@ -1268,7 +1318,7 @@ mod tests {
         assert!(st.dirty.contains_key(&77));
         let req = st.stats_request(&item).unwrap();
         assert_eq!(req["dmg_new"].as_str().unwrap().len(), 120);
-        assert_eq!(req["dmg_old"][0].as_str().unwrap(), items::hex_of(&item.dmg));
+        assert_eq!(req["dmg_old"][0].as_str().unwrap(), items::dmg_hex(&item.dmg));
         assert!(req.get("arm_new").is_none());
         st.apply_item(&dir, &item).unwrap();
         assert!(st.dirty.is_empty());
@@ -1276,9 +1326,11 @@ mod tests {
         let saved = std::fs::read_to_string(dir.join(items::STATS_FILE)).unwrap();
         assert!(saved.contains("77"));
         st.set_edit(&item, items::ItemsState::base_edit(&item));
-        assert!(st.stats_request(&item).is_none());
+        let undo = st.stats_request(&item).unwrap();
+        assert_eq!(undo["dmg_new"].as_str().unwrap(), items::dmg_hex(&item.dmg));
         st.apply_item(&dir, &item).unwrap();
         assert_eq!(st.outbox.len(), 2);
+        assert!(st.stats_request(&item).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1330,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn targets_and_creature_requests() {
+    fn creatures_appear_around_you_or_become_persistent_spawners() {
         let dir = temp_dir("pl");
         std::fs::write(dir.join(PLAYER_FILE), r#"{"x":10.5,"y":20.0,"z":-3.25}"#).unwrap();
         assert_eq!(read_player(&dir), Some([10.5, 20.0, -3.25]));
@@ -1339,26 +1391,48 @@ mod tests {
         app.save_places();
         assert_eq!(load_places(&dir).len(), 1);
 
-        app.target = Target::Place;
-        app.spawn(Mode::Creatures);
-        assert_eq!(read_request(&dir)["at"], json!([1.0, 2.0, 3.0]));
-        app.target = Target::Coords;
-        app.coords = [7.0, 8.0, 9.0];
-        app.spawn(Mode::Creatures);
-        assert_eq!(read_request(&dir)["at"], json!([7.0, 8.0, 9.0]));
-
-        app.target = Target::Forward;
+        // around you: a one-off request, no coordinates, nothing saved as a spawner
+        app.target = Target::Around;
         app.spawn(Mode::Creatures);
         let req = read_request(&dir);
-        assert_eq!(req["forward"], true);
+        assert!(req.get("at").is_none());
+        assert!(req.get("forward").is_none());
         assert!(req.get("object").is_none());
         let cfg = read_config(&dir);
         assert_eq!(cfg.get("spawn_template").and_then(|v| v.as_str()), Some("642098d4-fc09-48e2-811e-782d438bf551"));
+        assert!(spawners::load(&dir).is_empty());
+
+        // on a place: a spawner that comes back every few minutes
+        app.target = Target::Place;
+        app.respawn_minutes = 5;
+        app.create_spawner();
+        let saved = spawners::load(&dir);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].at, [1.0, 2.0, 3.0]);
+        assert_eq!(saved[0].respawn, 300);
+        assert_eq!(saved[0].level, 30);
+        assert_eq!(saved[0].health, 500);
+        assert_eq!(saved[0].count, 2);
+        assert_eq!(saved[0].template, "642098d4-fc09-48e2-811e-782d438bf551");
+        assert_eq!(saved[0].place, "Torre");
+
+        // the game reports the creature dead: the list tells when it comes back
+        std::fs::write(
+            dir.join(spawners::STATUS_FILE),
+            format!(r#"{{"spawners":[{{"id":"{}","alive":0,"want":2,"state":"esperando para reaparecer","next":125,"spawned":2}}]}}"#, saved[0].id),
+        )
+        .unwrap();
+        app.spawner_status = spawners::load_status(&dir);
+        assert_eq!(spawners::describe(app.spawner_status.get(&saved[0].id)), "Muerto: reaparece en 2:05");
+
+        let id = saved[0].id.clone();
+        app.delete_spawner(&id);
+        assert!(spawners::load(&dir).is_empty());
 
         app.places.clear();
-        app.target = Target::Place;
-        app.spawn(Mode::Creatures);
+        app.create_spawner();
         assert!(matches!(app.status, Status::Error(_)));
+        assert!(spawners::load(&dir).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

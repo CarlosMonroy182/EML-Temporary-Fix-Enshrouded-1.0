@@ -146,7 +146,6 @@ impl TileCache {
 #[derive(Clone, Debug)]
 pub struct Category {
     pub id: u64,
-    pub title: String,
     pub group: String,
 }
 
@@ -173,7 +172,7 @@ pub fn parse_markers_file(text: &str) -> Markers {
             if a.len() < 3 {
                 continue;
             }
-            out.categories.push(Category { id: a[0].as_u64().unwrap_or(0), title: a[1].as_str().unwrap_or("").to_string(), group: a[2].as_str().unwrap_or("").to_string() });
+            out.categories.push(Category { id: a[0].as_u64().unwrap_or(0), group: a[2].as_str().unwrap_or("").to_string() });
         }
     }
     if let Some(locs) = v.get("locs").and_then(|c| c.as_array()) {

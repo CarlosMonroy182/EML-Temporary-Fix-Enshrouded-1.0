@@ -359,6 +359,34 @@ pub fn hex_of(values: &[f32]) -> String {
     values.iter().flat_map(|v| v.to_le_bytes()).map(|b| format!("{b:02x}")).collect()
 }
 
+/// The last four damage fields (wood, stone, metal, explosion) are unsigned integers in the game.
+pub const DMG_INT_FROM: usize = 11;
+
+pub fn normalize_dmg(d: &mut [f32; 15]) {
+    for (i, v) in d.iter_mut().enumerate() {
+        if !v.is_finite() || *v < 0.0 {
+            *v = 0.0;
+        }
+        if i >= DMG_INT_FROM {
+            *v = v.round().min(4_000_000_000.0);
+        }
+    }
+}
+
+/// Bytes of the damage block exactly as the game keeps them: 11 floats followed by 4 u32.
+pub fn dmg_hex(values: &[f32; 15]) -> String {
+    let mut out = hex_of(&values[..DMG_INT_FROM]);
+    for v in &values[DMG_INT_FROM..] {
+        let n = if v.is_finite() && *v > 0.0 { v.round().min(4_000_000_000.0) as u32 } else { 0 };
+        out.extend(n.to_le_bytes().iter().map(|b| format!("{b:02x}")));
+    }
+    out
+}
+
+pub fn level_hex(min: u32, max: u32) -> String {
+    min.to_le_bytes().iter().chain(max.to_le_bytes().iter()).map(|b| format!("{b:02x}")).collect()
+}
+
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Edit {
     pub dmg: Option<[f32; 15]>,
@@ -400,6 +428,7 @@ pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
                     for (i, x) in a.iter().enumerate() {
                         arr[i] = x.as_f64().unwrap_or(0.0) as f32;
                     }
+                    normalize_dmg(&mut arr);
                     edit.dmg = Some(arr);
                 }
             }
@@ -432,6 +461,8 @@ pub fn stats_json(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) 
     for (id, e) in items {
         let mut o = serde_json::Map::new();
         if let Some(d) = e.dmg {
+            let mut d = d;
+            normalize_dmg(&mut d);
             o.insert("dmg".into(), json!(d.iter().map(|v| *v as f64).collect::<Vec<_>>()));
         }
         if let Some(a) = e.arm {
@@ -497,6 +528,7 @@ local INTEGER_KEYS = {
     durabilityLossCap = true, playerBaseHealth = true, playerHealthPerAP = true, playerBaseMana = true,
     playerManaPerAP = true, playerBaseStamina = true, playerStaminaPerAP = true, itemLevelCap = true,
     playerLevelCap = true, hookShotCostBase = true, maximumAnimalsInWorld = true,
+    woodDamage = true, stoneDamage = true, metalDamage = true, explosionDamage = true,
 }
 
 local function put(container, key, value)
@@ -581,17 +613,6 @@ pub fn write_mod(dir: &Path, items: &BTreeMap<u32, Edit>, balance: &BTreeMap<Str
     Ok(())
 }
 
-pub fn live_command(item: &Item, kind: &str, old: Vec<String>, new: String) -> Value {
-    json!({
-        "cmd": "item_stats",
-        "label": format!("{} {}", item.name, kind),
-        "guid": item.guid,
-        "item_id": item.id,
-        "old": old,
-        "new": new,
-    })
-}
-
 impl ItemsState {
     pub fn base_edit(item: &Item) -> Edit {
         Edit { dmg: Some(item.dmg), arm: Some(item.arm) }
@@ -606,6 +627,10 @@ impl ItemsState {
     }
 
     pub fn set_edit(&mut self, item: &Item, edit: Edit) {
+        let mut edit = edit;
+        if let Some(d) = edit.dmg.as_mut() {
+            normalize_dmg(d);
+        }
         let stripped = Edit {
             dmg: edit.dmg.filter(|d| *d != item.dmg),
             arm: edit.arm.filter(|a| *a != item.arm),
@@ -619,16 +644,43 @@ impl ItemsState {
         self.dirty.insert(item.id, Instant::now());
     }
 
-    pub fn stats_request(&self, item: &Item) -> Option<Value> {
-        let edit = self.saved.get(&item.id)?;
+    /// Everything the game has to change in memory for this item: the damage and armour blocks
+    /// (only when edited, or when a previous edit has to be undone) and the allowed level range
+    /// (only when the level to deliver lies outside the range the item normally has).
+    pub fn stats_for(&self, item: &Item, level: u32) -> Option<Value> {
+        let edit = self.saved.get(&item.id);
+        let previous = self.sent.get(&item.id);
         let mut out = serde_json::Map::new();
-        if let Some(d) = edit.dmg {
-            out.insert("dmg_new".into(), json!(hex_of(&d)));
-            out.insert("dmg_old".into(), json!([hex_of(&item.dmg)]));
+        let mut put_dmg = |new: [f32; 15]| {
+            let mut olds = vec![dmg_hex(&item.dmg)];
+            if let Some(p) = previous.and_then(|p| p.dmg) {
+                olds.push(dmg_hex(&p));
+            }
+            out.insert("dmg_new".into(), json!(dmg_hex(&new)));
+            out.insert("dmg_old".into(), json!(olds));
+        };
+        match (edit.and_then(|e| e.dmg), previous.and_then(|p| p.dmg)) {
+            (Some(d), _) => put_dmg(d),
+            (None, Some(_)) => put_dmg(item.dmg),
+            _ => {}
         }
-        if let Some(a) = edit.arm {
+        let arm = match (edit.and_then(|e| e.arm), previous.and_then(|p| p.arm)) {
+            (Some(a), _) => Some(a),
+            (None, Some(_)) => Some(item.arm),
+            _ => None,
+        };
+        if let Some(a) = arm {
+            let mut olds = vec![hex_of(&item.arm)];
+            if let Some(p) = previous.and_then(|p| p.arm) {
+                olds.push(hex_of(&p));
+            }
             out.insert("arm_new".into(), json!(hex_of(&a)));
-            out.insert("arm_old".into(), json!([hex_of(&item.arm)]));
+            out.insert("arm_old".into(), json!(olds));
+        }
+        if level > 0 && item.level_max > 0 && (level < item.level_min || level > item.level_max) {
+            let (lo, hi) = (item.level_min.min(level), item.level_max.max(level));
+            out.insert("lvl_new".into(), json!(level_hex(lo, hi)));
+            out.insert("lvl_old".into(), json!([level_hex(item.level_min, item.level_max)]));
         }
         if out.is_empty() {
             None
@@ -637,29 +689,14 @@ impl ItemsState {
         }
     }
 
+    pub fn stats_request(&self, item: &Item) -> Option<Value> {
+        self.stats_for(item, self.level)
+    }
+
+    /// Saves the item to disk and queues one live command so a running game picks it up.
     pub fn apply_item(&mut self, dir: &Path, item: &Item) -> Result<(), String> {
         self.dirty.remove(&item.id);
-        let current = self.saved.get(&item.id).cloned().unwrap_or_default();
-        let previous = self.sent.get(&item.id).cloned();
-        let mut commands = Vec::new();
-        if let Some(new) = current.dmg.or(previous.as_ref().and(Some(item.dmg))) {
-            let mut old = vec![hex_of(&item.dmg)];
-            if let Some(p) = previous.as_ref().and_then(|p| p.dmg) {
-                old.push(hex_of(&p));
-            }
-            if previous.as_ref().and_then(|p| p.dmg) != current.dmg {
-                commands.push(live_command(item, "daño", old, hex_of(&new)));
-            }
-        }
-        if let Some(new) = current.arm.or(previous.as_ref().and(Some(item.arm))) {
-            let mut old = vec![hex_of(&item.arm)];
-            if let Some(p) = previous.as_ref().and_then(|p| p.arm) {
-                old.push(hex_of(&p));
-            }
-            if previous.as_ref().and_then(|p| p.arm) != current.arm {
-                commands.push(live_command(item, "armadura", old, hex_of(&new)));
-            }
-        }
+        let stats = self.stats_for(item, 0);
         match self.saved.get(&item.id) {
             Some(e) => {
                 self.sent.insert(item.id, e.clone());
@@ -669,10 +706,17 @@ impl ItemsState {
             }
         }
         self.persist(dir)?;
-        let mut at = Instant::now();
-        for c in commands {
-            self.outbox.push_back((at, c));
-            at += Duration::from_millis(900);
+        if let Some(stats) = stats {
+            self.outbox.push_back((
+                Instant::now(),
+                json!({
+                    "cmd": "item_stats",
+                    "label": item.name,
+                    "guid": item.guid,
+                    "item_id": item.id,
+                    "stats": stats,
+                }),
+            ));
         }
         Ok(())
     }
@@ -694,7 +738,7 @@ impl ItemsState {
 
 impl App {
     pub fn items_pump(&mut self) {
-        let due: Vec<u32> = self.items.dirty.iter().filter(|(_, t)| t.elapsed() >= Duration::from_millis(400)).map(|(id, _)| *id).collect();
+        let due: Vec<u32> = self.items.dirty.iter().filter(|(_, t)| t.elapsed() >= Duration::from_millis(1500)).map(|(id, _)| *id).collect();
         for id in due {
             let Some(item) = self.items.rows.iter().find(|r| r.id == id).cloned() else {
                 self.items.dirty.remove(&id);
@@ -721,7 +765,6 @@ impl App {
     pub fn item_controls(&mut self, ui: &mut egui::Ui, selected: Option<usize>) {
         let Some(index) = selected.filter(|i| *i < self.items.rows.len()) else {
             ui.label(RichText::new("Aquí puedes entregarte armas, armaduras, comida, pociones y más, con el nivel, la rareza y los stats que quieras.").color(MUTED));
-            self.balance_ui(ui);
             return;
         };
         let item = self.items.rows[index].clone();
@@ -740,6 +783,9 @@ impl App {
         divider(ui);
         label_title(ui, "NIVEL DEL ÍTEM");
         ui.add(egui::Slider::new(&mut self.items.level, 1..=255));
+        if self.items.level > item.level_max && item.level_max > 0 {
+            ui.label(RichText::new(format!("Por encima del máximo normal ({}). Se amplía el rango del ítem al entregarlo.", item.level_max)).color(MUTED).size(12.5));
+        }
         label_title(ui, "RAREZA");
         egui::ComboBox::from_id_salt("item_rarity").selected_text(RARITIES[self.items.rarity.min(4) as usize]).show_ui(ui, |ui| {
             for (i, name) in RARITIES.iter().enumerate() {
@@ -768,8 +814,6 @@ impl App {
         if !self.items.notice.is_empty() {
             ui.label(RichText::new(self.items.notice.clone()).color(GOOD));
         }
-        divider(ui);
-        self.balance_ui(ui);
     }
 
     pub fn item_stats_ui(&mut self, ui: &mut egui::Ui, index: usize) {
@@ -789,8 +833,13 @@ impl App {
             egui::Grid::new(("dmg", item.id)).num_columns(2).show(ui, |ui| {
                 for i in 0..15 {
                     ui.label(DMG_LABELS[i]);
-                    let speed = if i < 2 { 0.01 } else { 0.5 };
-                    changed |= ui.add(egui::DragValue::new(&mut values[i]).speed(speed).range(0.0..=100000.0).max_decimals(3)).changed();
+                    if i >= DMG_INT_FROM {
+                        changed |= ui.add(egui::DragValue::new(&mut values[i]).speed(1.0).range(0.0..=1_000_000.0).max_decimals(0)).changed();
+                        values[i] = values[i].round();
+                    } else {
+                        let speed = if i < 2 { 0.01 } else { 0.5 };
+                        changed |= ui.add(egui::DragValue::new(&mut values[i]).speed(speed).range(0.0..=100000.0).max_decimals(3)).changed();
+                    }
                     ui.end_row();
                 }
             });
@@ -830,6 +879,9 @@ impl App {
                 }
             });
             ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura. Todo se guarda solo.").color(MUTED).size(12.5));
+            if matches!(item.slot.as_str(), "RangedWeapon") || item.category == "Ammunition" {
+                ui.label(RichText::new("Los bastones y arcos hacen el daño de su munición o hechizo: para subirlo, edita también la munición.").color(MUTED).size(12.5));
+            }
             if button(ui, "Restaurar valores originales", Vec2::new(ui.available_width(), 30.0), modified, false) {
                 self.items.set_edit(&item, ItemsState::base_edit(&item));
                 self.items.notice = "Valores originales restaurados.".to_string();
@@ -838,7 +890,7 @@ impl App {
     }
 
     pub fn balance_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(RichText::new("Ajustes globales: durabilidad, vida base…").font(title_font(14.0)).color(GOLD)).show(ui, |ui| {
+        {
             ui.label(RichText::new("Se guardan en el mod zz_m182_item_stats y se aplican al abrir el juego de nuevo.").color(MUTED).size(12.5));
             if self.items.balance.is_empty() {
                 ui.label(RichText::new("Aún no hay valores. Abre el juego una vez con el mod m182_spawn_variants actualizado.").color(MUTED));
@@ -873,6 +925,20 @@ impl App {
                     self.items.notice = "Ajustes globales restaurados. Reinicia el juego.".to_string();
                 }
             });
+        }
+    }
+
+    pub fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(12.0);
+            ui.label(RichText::new("AJUSTES GLOBALES").font(title_font(22.0)).color(GOLD));
+            ui.label(RichText::new("Durabilidad, vida base del jugador, niveles máximos… Afectan a todo el juego, no a un ítem concreto.").color(MUTED));
+            divider(ui);
+            self.balance_ui(ui);
+            if !self.items.notice.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(self.items.notice.clone()).color(GOOD));
+            }
         });
     }
 }
@@ -985,6 +1051,41 @@ mod tests {
     }
 
     #[test]
+    fn damage_block_keeps_integer_fields_as_integers() {
+        let mut d = [0f32; 15];
+        d[0] = 1.0;
+        d[11] = 63.0;
+        d[12] = 76.4;
+        d[13] = 98.0;
+        d[14] = -3.0;
+        normalize_dmg(&mut d);
+        assert_eq!(d[12], 76.0);
+        assert_eq!(d[14], 0.0);
+        let h = dmg_hex(&d);
+        assert_eq!(h.len(), 120);
+        assert_eq!(&h[0..8], "0000803f");
+        assert_eq!(&h[88..96], "3f000000");
+        assert_eq!(&h[96..104], "4c000000");
+        assert_eq!(&h[112..120], "00000000");
+        assert_eq!(level_hex(1, 255), "01000000ff000000");
+    }
+
+    #[test]
+    fn level_range_is_only_widened_when_needed() {
+        let items = parse_items(&sample());
+        let sword = items.iter().find(|i| i.id == 1234).unwrap().clone();
+        let st = ItemsState::default();
+        assert!(st.stats_for(&sword, 10).is_none());
+        assert!(st.stats_for(&sword, 0).is_none());
+        let wide = st.stats_for(&sword, 255).unwrap();
+        assert_eq!(wide["lvl_new"], level_hex(3, 255));
+        assert_eq!(wide["lvl_old"][0], level_hex(3, 20));
+        assert!(wide.get("dmg_new").is_none());
+        let low = st.stats_for(&sword, 1).unwrap();
+        assert_eq!(low["lvl_new"], level_hex(1, 20));
+    }
+
+    #[test]
     fn lua_source_has_values_and_is_valid_text() {
         let items = parse_items(&sample());
         let sword = items.iter().find(|i| i.id == 1234).unwrap();
@@ -1018,7 +1119,7 @@ mod tests {
         let first = &state.outbox[0].1;
         assert_eq!(first["cmd"], "item_stats");
         assert_eq!(first["item_id"], 1234);
-        assert_eq!(first["old"][0], hex_of(&sword.dmg));
+        assert_eq!(first["stats"]["dmg_old"][0], dmg_hex(&sword.dmg));
         assert!(dir.join(STATS_FILE).exists());
         let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
         assert!(lua.contains("dmgMod = 9"));
@@ -1030,7 +1131,7 @@ mod tests {
         state.outbox.clear();
         state.apply_item(&dir, &sword).unwrap();
         let second = &state.outbox[0].1;
-        assert_eq!(second["old"].as_array().unwrap().len(), 2);
+        assert_eq!(second["stats"]["dmg_old"].as_array().unwrap().len(), 2);
         let restore = ItemsState::base_edit(&sword);
         state.set_edit(&sword, restore);
         state.apply_item(&dir, &sword).unwrap();
