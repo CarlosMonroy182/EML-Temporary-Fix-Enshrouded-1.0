@@ -543,34 +543,69 @@ end
 
 local applied, failed = 0, 0
 print("[m182-item-stats] start")
-local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
-if type(items) == "table" then
-    for _, resource in ipairs(items) do
-        pcall(function()
-            local data = resource.data
-            local id = hash_of(data.itemId)
-            local o = id and OVERRIDES[math.floor(id)]
-            if o == nil then return end
-            if o.dmg ~= nil then
-                local setup = data.damageSetup
-                for k, v in pairs(o.dmg) do
-                    local ok
-                    if k == "speedMod" or k == "dmgMod" then
-                        ok = put(setup, k, v)
-                    else
-                        ok = put(setup.distribution, k, v)
-                    end
-                    if ok then applied = applied + 1 else failed = failed + 1 end
-                end
-            end
-            if o.arm ~= nil then
-                local setup = data.armorSetup
-                for k, v in pairs(o.arm) do
-                    if put(setup.distribution, k, v) then applied = applied + 1 else failed = failed + 1 end
-                end
-            end
-        end)
+
+local function unsigned(id)
+    if type(id) ~= "number" then return nil end
+    id = math.floor(id)
+    if id < 0 then id = id + 4294967296 end
+    return id
+end
+
+local function close(a, b)
+    if type(a) ~= "number" or type(b) ~= "number" then return false end
+    return math.abs(a - b) <= 0.001 + math.abs(b) * 0.0001
+end
+
+local function write_group(container, values, label, report)
+    if container == nil then
+        failed = failed + 1
+        report.missing = report.missing + 1
+        return
     end
+    for k, v in pairs(values) do
+        local target = container
+        if label == "dmg" and k ~= "speedMod" and k ~= "dmgMod" then target = try(function() return container.distribution end) end
+        if label == "arm" then target = try(function() return container.distribution end) end
+        if target ~= nil and put(target, k, v) then
+            applied = applied + 1
+            report.written = report.written + 1
+            local back = try(function() return target[k] end)
+            local expected = v
+            if INTEGER_KEYS[k] then expected = math.floor(v + 0.5) end
+            if not close(back, expected) then
+                report.mismatch = report.mismatch + 1
+                if report.first == nil then report.first = string.format("%s=%s expected %s", k, tostring(back), tostring(expected)) end
+            end
+        else
+            failed = failed + 1
+            report.missing = report.missing + 1
+        end
+    end
+end
+
+local found = {}
+local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
+if items ~= nil then
+    pcall(function()
+        for _, resource in ipairs(items) do
+            pcall(function()
+                local data = resource.data
+                local id = unsigned(hash_of(data.itemId))
+                local o = id and OVERRIDES[id]
+                if o == nil then return end
+                local report = { written = 0, mismatch = 0, missing = 0 }
+                if o.dmg ~= nil then write_group(try(function() return data.damageSetup end), o.dmg, "dmg", report) end
+                if o.arm ~= nil then write_group(try(function() return data.armorSetup end), o.arm, "arm", report) end
+                found[id] = (found[id] or 0) + 1
+                print(string.format("[m182-item-stats] item %d (%s): wrote %d, not written %d, read-back mismatches %d%s",
+                    id, tostring(try(function() return data.debugName end)), report.written, report.missing, report.mismatch,
+                    report.first and (" first: " .. report.first) or ""))
+            end)
+        end
+    end)
+end
+for id in pairs(OVERRIDES) do
+    if found[id] == nil then print(string.format("[m182-item-stats] item %d not found in the game data", id)) end
 end
 
 print(string.format("[m182-item-stats] items done applied=%d failed=%d", applied, failed))

@@ -1440,10 +1440,22 @@ pub fn refill_health(manager: usize, id: u32) -> bool {
 pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
     let Some((addr, b)) = resource(manager, id, 1, STAMINA_SIGNATURE) else { return false };
     let current = u32_at(&b, 8);
+    let base = u32_at(&b, 32);
+    let modifier = u32_at(&b, 36) as i32;
+    let effective = base as i64 + modifier as i64;
+    if base > 0 && base < 1_000_000 && effective > 0 && effective < 1_000_000 {
+        let target = effective as u32;
+        *peak = target;
+        if current < target || u32_at(&b, 16) < target {
+            put_u32(addr + 8, target);
+            put_u32(addr + 16, target);
+        }
+        return true;
+    }
     if current > *peak && current < 1_000_000 {
         *peak = current;
     }
-    let target = (*peak).max(u32_at(&b, 32));
+    let target = (*peak).max(base);
     if target > 0 && (current < target || u32_at(&b, 16) < target) {
         put_u32(addr + 8, target);
         put_u32(addr + 16, target);
@@ -1836,6 +1848,12 @@ struct Tracked {
     misses: u8,
 }
 
+static LISTED: Mutex<String> = Mutex::new(String::new());
+
+fn team_label(teams: &[Vec<u32>], number: u32) -> u8 {
+    groups::team_of_player(teams, number)
+}
+
 static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
 static TRACKED_MGR: AtomicUsize = AtomicUsize::new(0);
 static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
@@ -1905,7 +1923,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     if teams_mtime != st.groups.teams_mtime {
         st.groups.teams_mtime = teams_mtime;
         st.groups.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_teams(&t)).unwrap_or_default();
-        log(&format!("teams: {} defined", st.groups.teams.len()));
+        log(&format!("teams: {} defined, members {:?}", st.groups.teams.len(), st.groups.teams));
     }
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
@@ -1950,6 +1968,18 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     dead.push(*id);
                 }
             }
+        }
+    }
+    let listed = format!(
+        "{:?} me={} teams={:?}",
+        players.iter().map(|(id, n)| (*n, *id, team_label(&st.groups.teams, *n))).collect::<Vec<_>>(),
+        me,
+        map.len()
+    );
+    if let Ok(mut last) = LISTED.lock() {
+        if *last != listed {
+            log(&format!("players: listed (number, entity, team) {listed}"));
+            *last = listed;
         }
     }
     if st.zone_ids != inside_ids {
