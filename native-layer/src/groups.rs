@@ -81,6 +81,31 @@ pub fn team_of(addr: usize) -> u8 {
     map.iter().find(|(a, _)| *a == addr).map(|(_, t)| *t).unwrap_or(0)
 }
 
+static PROTECTED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+pub fn set_protected(addrs: Vec<usize>) {
+    if let Ok(mut p) = PROTECTED.lock() {
+        *p = addrs;
+    }
+}
+
+pub fn is_protected(addr: usize) -> bool {
+    if addr == 0 {
+        return false;
+    }
+    let Ok(p) = PROTECTED.try_lock() else { return false };
+    p.contains(&addr)
+}
+
+static PROTECTED_REPORTS: AtomicU32 = AtomicU32::new(0);
+
+pub fn protected_report(a: usize, b: usize, fa: u8, fb: u8) -> Option<String> {
+    if PROTECTED_REPORTS.fetch_add(1, Ordering::Relaxed) >= 40 {
+        return None;
+    }
+    Some(format!("zones: hostile check blocked a={a:#x} faction={fa} protected={} b={b:#x} faction={fb} protected={}", is_protected(a), is_protected(b)))
+}
+
 static PAIR_REPORTS: AtomicU32 = AtomicU32::new(0);
 
 pub fn pair_report(a: usize, b: usize) -> Option<String> {
@@ -116,6 +141,16 @@ mod tests {
         assert_eq!(team_of_player(&teams, 3), 1);
         assert_eq!(team_of_player(&teams, 2), 2);
         assert_eq!(team_of_player(&teams, 4), 0);
+    }
+
+    #[test]
+    fn protected_addresses() {
+        set_protected(vec![0x10, 0x20]);
+        assert!(is_protected(0x10));
+        assert!(!is_protected(0x30));
+        assert!(!is_protected(0));
+        set_protected(Vec::new());
+        assert!(!is_protected(0x10));
     }
 
     #[test]

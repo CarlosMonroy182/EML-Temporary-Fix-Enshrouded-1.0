@@ -103,6 +103,12 @@ local function find_comp(data, typeName)
     return found
 end
 
+local NAME_FIELDS = {
+    ["keen::ecs::BossHealthBar"] = "displayName",
+    ["keen::ecs::NpcSetup"] = "name",
+    ["keen::ecs::LocaTagComponent"] = "locaTag",
+}
+
 local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end)
 local rows = {}
 local byName = {}
@@ -113,6 +119,7 @@ if templates ~= nil then
             local data = res.data
             local name = str(try(function() return data.name end))
             local faction, boss, hasHealth = "", false, false
+            local nameRefs = {}
             pcall(function()
                 for _, c in ipairs(data.components) do
                     local ct = str(c.type)
@@ -123,10 +130,15 @@ if templates ~= nil then
                     elseif ct == "keen::ecs::Boss" or ct == "keen::ecs::BossHealthBar" then
                         boss = true
                     end
+                    local field = NAME_FIELDS[ct]
+                    if field ~= nil then
+                        local ref = try(function() return c.value[field] end)
+                        if ref ~= nil then nameRefs[#nameRefs + 1] = ref end
+                    end
                 end
             end)
             if HOSTILE[faction] and hasHealth then
-                local row = { name = name, guid = str(res.guid), faction = faction, boss = boss, preset = "", res = res }
+                local row = { name = name, guid = str(res.guid), faction = faction, boss = boss, preset = "", res = res, nameRefs = nameRefs }
                 rows[#rows + 1] = row
                 if byName[name] == nil then byName[name] = row end
             end
@@ -206,7 +218,7 @@ for _, baseName in ipairs(BASES) do
             if not ok and #errors < 3 then errors[#errors + 1] = tostring(err) end
             if ok then
                 created = created + 1
-                variants[#variants + 1] = { name = baseName .. "@" .. preset.id, guid = guid, faction = base.faction, boss = base.boss, preset = preset.id }
+                variants[#variants + 1] = { name = baseName .. "@" .. preset.id, guid = guid, faction = base.faction, boss = base.boss, preset = preset.id, nameRefs = base.nameRefs }
             else
                 failed = failed + 1
             end
@@ -218,14 +230,6 @@ table.sort(rows, function(a, b)
     if a.faction ~= b.faction then return a.faction < b.faction end
     return a.name < b.name
 end)
-
-local out = { "name,guid,faction,boss,preset" }
-for _, r in ipairs(rows) do
-    out[#out + 1] = string.format("%s,%s,%s,%s,%s", r.name, r.guid, r.faction, tostring(r.boss), r.preset)
-end
-for _, v in ipairs(variants) do
-    out[#out + 1] = string.format("%s,%s,%s,%s,%s", v.name, v.guid, v.faction, tostring(v.boss), v.preset)
-end
 
 -- English names of items come from the localisation table
 local translations = {}
@@ -268,15 +272,17 @@ local function read_loca(ref, label)
         if ok and collection ~= nil then
             local added = 0
             local tags = try(function() return collection.tags end)
-            if type(tags) == "table" then
-                for _, tag in ipairs(tags) do
-                    local h = hash_of(try(function() return tag.id end))
-                    local text = try(function() return tag.text end)
-                    if h ~= nil and text ~= nil and translations[h] == nil then
-                        translations[h] = tostring(text)
-                        added = added + 1
+            if tags ~= nil then
+                pcall(function()
+                    for _, tag in ipairs(tags) do
+                        local h = hash_of(try(function() return tag.id end))
+                        local text = try(function() return tag.text end)
+                        if h ~= nil and text ~= nil and translations[h] == nil then
+                            translations[h] = tostring(text)
+                            added = added + 1
+                        end
                     end
-                end
+                end)
             end
             dlog("loca " .. label .. ": " .. added .. " texts (" .. str(how) .. ")")
             return added
@@ -317,6 +323,36 @@ local translationCount = 0
 for _ in pairs(translations) do translationCount = translationCount + 1 end
 dlog("loca: " .. translationCount .. " English texts")
 
+local function loca_text(ref)
+    if ref == nil then return nil end
+    local keys = {}
+    local hashed = try(function() return game.guid.hash(ref) end)
+    if type(hashed) == "number" then keys[#keys + 1] = hashed end
+    local direct = hash_of(ref)
+    if type(direct) == "number" then keys[#keys + 1] = direct end
+    for _, k in ipairs(keys) do
+        local text = translations[k]
+        if text ~= nil and text ~= "" then return text end
+    end
+    return nil
+end
+
+local function display_of(row)
+    for _, ref in ipairs(row.nameRefs or {}) do
+        local text = loca_text(ref)
+        if text ~= nil then return safe(text) end
+    end
+    return ""
+end
+
+local out = { "name,guid,faction,boss,preset,display" }
+for _, r in ipairs(rows) do
+    out[#out + 1] = string.format("%s,%s,%s,%s,%s,%s", r.name, r.guid, r.faction, tostring(r.boss), r.preset, display_of(r))
+end
+for _, v in ipairs(variants) do
+    out[#out + 1] = string.format("%s,%s,%s,%s,%s,%s", v.name, v.guid, v.faction, tostring(v.boss), v.preset, display_of(v))
+end
+
 -- Item catalogue and delivery templates
 local itemLines = {}
 local itemHeader = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison,wood,stone,metal,explosion,dmg_set,ar_physical,ar_blunt,ar_pierce,ar_cut,ar_magical,ar_fire,ar_ice,ar_fog,ar_lightning,ar_set"
@@ -333,7 +369,7 @@ if type(items) == "table" then
             seenItemIds[id] = true
             local debugName = safe(try(function() return data.debugName end))
             local category = str(try(function() return data.category end))
-            local english = translations[hash_of(data.name)]
+            local english = loca_text(data.name)
             local displayName = english or debugName
             if displayName == "" then displayName = "Item " .. tostring(id) end
             local rarity = str(try(function() return data.rarity end))
@@ -398,6 +434,16 @@ if loader and loader.features and loader.features.export then
     local objectsOk = pcall(function() io.export("m182_objects.csv", "name,guid,components\n" .. table.concat(objectLines, "\n")) end)
     local itemsOk = pcall(function() io.export("m182_items.csv", itemHeader .. "\n" .. table.concat(itemLines, "\n")) end)
     pcall(function() io.export("m182_balance.csv", table.concat(balanceLines, "\n")) end)
+    pcall(function()
+        local body = {}
+        for id, text in pairs(translations) do
+            body[#body + 1] = tostring(id) .. "," .. safe(text)
+        end
+        table.sort(body)
+        local lines = { "id,text" }
+        for _, l in ipairs(body) do lines[#lines + 1] = l end
+        io.export("m182_loca_en.csv", table.concat(lines, "\n"))
+    end)
     pcall(function() io.export("m182_items_diag.txt", table.concat(diag, "\n")) end)
     print(string.format("[m182-spawn-variants] enemies=%d variants created=%d failed=%d export=%s objects=%d objectsExport=%s items=%d itemsExport=%s", #rows, created, failed, tostring(ok), #objectLines, tostring(objectsOk), #itemLines, tostring(itemsOk)))
     for _, e in ipairs(errors) do print("[m182-spawn-variants] error: " .. e) end

@@ -267,4 +267,4 @@ foreach ($r in $rows) {
 Write-Host ''
 Write-Host '===== LISTO =====' -ForegroundColor Green
 Write-Host ("Imagenes guardadas en: {0}" -f $Icons)
-Write-Host 'Cierra y vuelve a abrir M182_Spawner.exe para verlas.'
+Write-Host 'Cierra y vuelve a abrir M182_AdminPannel.exe para verlas.'

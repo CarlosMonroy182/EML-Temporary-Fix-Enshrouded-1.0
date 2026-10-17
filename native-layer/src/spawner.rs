@@ -1367,18 +1367,9 @@ pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
         *peak = current;
     }
     let target = *peak;
-    if target > 0 && (current != target || u32_at(&b, 16) != target) {
+    if target > 0 && (current < target || u32_at(&b, 16) < target) {
         put_u32(addr + 8, target);
         put_u32(addr + 16, target);
-    }
-    // the bar on screen reads the replicated copy: keep it full too, and learn the real maximum from it
-    if let Some((net, cur, max)) = net_stamina(manager, id, current.max(target)) {
-        if max as u32 > *peak && max < 60_000 {
-            *peak = max as u32;
-        }
-        if cur != max && max > 0 {
-            write_bytes(net, &max.to_le_bytes());
-        }
     }
     true
 }
@@ -1396,74 +1387,6 @@ pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
         put_u32(addr + 12, target);
     }
     true
-}
-
-static NET_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
-static NET_TRIES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
-
-fn net_plausible(b: &[u8]) -> Option<(u16, u16)> {
-    if b.len() < 4 {
-        return None;
-    }
-    let cur = u16::from_le_bytes([b[0], b[1]]);
-    let max = u16::from_le_bytes([b[2], b[3]]);
-    if max >= 100 && cur <= max {
-        Some((cur, max))
-    } else {
-        None
-    }
-}
-
-/// Finds the replicated `NetworkStamina {stamina, staminaMax}` (two u16) of an entity: the 4-byte
-/// component whose first value follows the known stamina. Returns its address and both values.
-fn net_stamina(manager: usize, id: u32, known: u32) -> Option<(usize, u16, u16)> {
-    let record = find_record(manager, id)?;
-    let p = placement(record)?;
-    let kind = kind_of(manager);
-    let cached = NET_INDEX[kind].load(Ordering::Relaxed);
-    if cached >= 0 {
-        if let Some((addr, stride)) = component_address(&p, cached as usize) {
-            if stride == 4 {
-                if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
-                    return Some((addr, cur, max));
-                }
-            }
-        }
-    }
-    if NET_TRIES[kind].load(Ordering::Relaxed) >= 40 {
-        return None;
-    }
-    NET_TRIES[kind].fetch_add(1, Ordering::Relaxed);
-    let tolerance = (known / 10).max(40);
-    let mut found: Vec<(usize, usize, u16, u16)> = Vec::new();
-    for index in 0..COMPONENT_SLOTS {
-        let Some((addr, stride)) = component_address(&p, index) else { continue };
-        if stride != 4 {
-            continue;
-        }
-        if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
-            if (cur as i64 - known as i64).unsigned_abs() as u32 <= tolerance && max as u32 + tolerance >= known {
-                found.push((index, addr, cur, max));
-            }
-        }
-    }
-    let &(index, addr, cur, max) = found.first()?;
-    NET_INDEX[kind].store(index as i32, Ordering::Relaxed);
-    log(&format!(
-        "stamina: NetworkStamina found at component {index} ({}) = {cur}/{max} ({} candidate(s))",
-        if kind == 1 { "client" } else { "server" },
-        found.len()
-    ));
-    Some((addr, cur, max))
-}
-
-/// Keeps the on-screen stamina of the client copy of the player full.
-fn refill_client_stamina(manager: usize, id: u32, known: u32) -> Option<u32> {
-    let (net, cur, max) = net_stamina(manager, id, known)?;
-    if cur != max && max > 0 {
-        write_bytes(net, &max.to_le_bytes());
-    }
-    Some(max as u32)
 }
 
 fn find_fall(manager: usize, id: u32) -> Option<usize> {
@@ -1859,6 +1782,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
 
     let mut rows = Vec::new();
     let mut map: Vec<(usize, u8)> = Vec::new();
+    let mut shielded: Vec<usize> = Vec::new();
     let mut dead: Vec<u32> = Vec::new();
     let mut inside_ids: Vec<u32> = Vec::new();
     for (id, number) in &players {
@@ -1866,8 +1790,12 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             Some(t) => {
                 let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
                 rows.push(format!("{{\"n\":{},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1},\"me\":{}}}", number, x, y, z, *id == me));
-                if !st.groups.zones.is_empty() && groups::inside(&st.groups.zones, x, z) {
+                let in_zone = !st.groups.zones.is_empty() && groups::inside(&st.groups.zones, x, z);
+                if in_zone {
                     inside_ids.push(*id);
+                }
+                if in_zone {
+                    shielded.extend(faction_addresses(manager, *id));
                 }
                 let team = groups::team_of_player(&st.groups.teams, *number);
                 if team != 0 {
@@ -1888,6 +1816,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         st.zone_ids = inside_ids;
     }
     groups::set_team_map(map);
+    groups::set_protected(shielded);
 
     if st.groups.last_slow.map(|t| now.duration_since(t) < Duration::from_millis(1000)).unwrap_or(false) {
         return;
@@ -2153,13 +2082,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         refill_mana(manager, id, &mut st.mana_peak);
         if let Some((m, c)) = client {
             refill_mana(m, c, &mut st.mana_peak_c);
-            if !refill_stamina(m, c, &mut st.stamina_peak_c) {
-                if let Some(max) = refill_client_stamina(m, c, st.stamina_peak) {
-                    if max > st.stamina_peak && max < 60_000 {
-                        st.stamina_peak = max;
-                    }
-                }
-            }
+            refill_stamina(m, c, &mut st.stamina_peak_c);
         }
         diagnostics(st, manager, id, client);
     }
@@ -2415,10 +2338,67 @@ fn run_item_stats(cmd: Command) {
 static DEF_CLASS: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
 static DEF_MGR: AtomicUsize = AtomicUsize::new(0);
 
+static DEF_SIMILAR: Mutex<Option<HashMap<(usize, usize), bool>>> = Mutex::new(None);
+const PLAYER_SIMILARITY: f32 = 0.8;
+
 pub fn reset_player_cache() {
     if let Ok(mut g) = DEF_CLASS.lock() {
         *g = None;
     }
+    if let Ok(mut g) = DEF_SIMILAR.lock() {
+        *g = None;
+    }
+}
+
+/// Share of components two entities have in common (intersection over union).
+pub fn component_similarity(a: &[usize], b: &[usize]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let left: HashSet<usize> = a.iter().copied().collect();
+    let right: HashSet<usize> = b.iter().copied().collect();
+    let common = left.intersection(&right).count();
+    let union = left.union(&right).count();
+    if union == 0 {
+        0.0
+    } else {
+        common as f32 / union as f32
+    }
+}
+
+fn component_indices(p: &Placement) -> Option<Vec<usize>> {
+    layout(p).map(|slots| slots.iter().map(|s| s.index).collect())
+}
+
+/// A candidate is accepted only if it is built like the host player (same set of components, give or
+/// take the few that depend on what the character is doing), so creatures that merely carry a stamina
+/// and a player faction are never listed as players.
+fn resembles_host(p: &Placement, id: u32) -> bool {
+    let host_manager = SERVER_MGR.load(Ordering::SeqCst);
+    let host_id = PLAYER_ID.load(Ordering::SeqCst);
+    let Some(host) = find_record(host_manager, host_id).and_then(placement) else { return true };
+    if host.def == p.def {
+        return true;
+    }
+    if let Ok(guard) = DEF_SIMILAR.lock() {
+        if let Some(known) = guard.as_ref().and_then(|m| m.get(&(p.def, host.def))) {
+            return *known;
+        }
+    }
+    let (Some(a), Some(b)) = (component_indices(&host), component_indices(p)) else { return true };
+    let score = component_similarity(&a, &b);
+    let verdict = score >= PLAYER_SIMILARITY;
+    if let Ok(mut guard) = DEF_SIMILAR.lock() {
+        guard.get_or_insert_with(HashMap::new).insert((p.def, host.def), verdict);
+    }
+    log(&format!(
+        "players: entity {id} ({} components) shares {:.0}% of the host player's {} components: {}",
+        b.len(),
+        score * 100.0,
+        a.len(),
+        if verdict { "accepted" } else { "ignored" }
+    ));
+    verdict
 }
 
 pub fn tracked_ids() -> Vec<u32> {
@@ -2489,6 +2469,9 @@ pub fn scan_players_once(manager: usize) -> usize {
             }
         }
         if !def_is_player(manager, id, &p) {
+            continue;
+        }
+        if !resembles_host(&p, id) {
             continue;
         }
         if faction_addresses(manager, id).is_empty() {

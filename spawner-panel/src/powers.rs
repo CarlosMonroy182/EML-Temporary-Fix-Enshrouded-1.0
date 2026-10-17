@@ -22,7 +22,7 @@ pub struct PowersState {
 
 impl Default for PowersState {
     fn default() -> Self {
-        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, unknown_height: false, teleport: [0.0; 3], notice: String::new() }
+        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, unknown_height: true, teleport: [0.0; 3], notice: String::new() }
     }
 }
 
@@ -84,7 +84,7 @@ impl App {
     }
 
     pub fn powers_tab(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "Poderes del jugador", 22.0);
+        heading(ui, "Admin del jugador", 22.0);
         ui.label(RichText::new("Solo afectan a tu personaje (el anfitrión). Se aplican mientras el juego está abierto.").color(MUTED));
         divider(ui);
 
@@ -136,6 +136,7 @@ impl App {
             if let Some(p) = self.player {
                 if button(ui, "Usar mi posición", Vec2::new(170.0, 32.0), true, false) {
                     self.powers.teleport = p;
+                    self.powers.unknown_height = false;
                 }
             }
             if let Some(p) = self.map.selected {

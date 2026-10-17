@@ -38,6 +38,12 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     let (fa, fb) = (read_faction(a), read_faction(b));
+    if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
+        if let Some(line) = groups::protected_report(a as usize, b as usize, fa, fb) {
+            super::spawner::log(&line);
+        }
+        return 0;
+    }
     if LIVE.pvp() && fa == faction::PLAYER && fb == faction::PLAYER {
         if let Some(line) = groups::pair_report(a as usize, b as usize) {
             super::spawner::log(&line);
