@@ -3,8 +3,11 @@ name: Build M182 Admin Pannel
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "panel-v*"
+    branches:
+      - m182-native-layer
+    paths:
+      - "spawner-panel/**"
+      - ".github/workflows/build-admin-panel.yml"
 
 permissions:
   contents: write
@@ -44,15 +47,10 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/panel-v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag dist/M182_AdminPannel.exe dist/M182_AdminPannel.zip dist/SHA256.txt --title "M182 Admin Pannel $tag" --notes "Windows build of the M182 Admin Pannel (work in progress). Built automatically from this repository by GitHub Actions."
-          } else {
-            gh release upload $tag dist/M182_AdminPannel.exe dist/M182_AdminPannel.zip dist/SHA256.txt --clobber
-          }
+          $tag = "admin-pannel-latest"
+          gh release delete $tag --cleanup-tag --yes 2>$null
+          gh release create $tag dist/M182_AdminPannel.exe dist/M182_AdminPannel.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 Admin Pannel (latest build)" --notes "Windows build of the M182 Admin Pannel (work in progress). Built automatically from this repository by GitHub Actions."
