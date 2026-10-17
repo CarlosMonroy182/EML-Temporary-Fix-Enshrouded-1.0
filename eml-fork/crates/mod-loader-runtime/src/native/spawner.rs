@@ -1359,6 +1359,10 @@ struct PowerState {
     last_written: Option<(i64, i64, i64)>,
     gravity: [Option<usize>; 2],
     gravity_saved: [u8; 2],
+    loco: [Option<usize>; 2],
+    net_loco: [Option<usize>; 2],
+    loco_overwritten: [u32; 2],
+    loco_reported: Option<Instant>,
     gravity_off: bool,
     client_logged: bool,
     groups: GroupState,
@@ -2041,6 +2045,109 @@ fn find_gravity(manager: usize, id: u32) -> Option<usize> {
     None
 }
 
+const LOCO_SIZE: usize = 456;
+const LOCO_STATE: usize = 89;
+const LOCO_PREVIOUS: usize = 90;
+const NET_LOCO_SIZE: usize = 64;
+const NET_LOCO_STATE: usize = 36;
+const STATE_FLYING: u8 = 3;
+const STATE_COUNT: u8 = 12;
+
+fn unit_or_zero(b: &[u8], off: usize) -> bool {
+    let (x, y, z) = (f32_at(b, off), f32_at(b, off + 4), f32_at(b, off + 8));
+    let len = (x * x + y * y + z * z).sqrt();
+    len.is_finite() && (len < 0.001 || (0.9..1.1).contains(&len))
+}
+
+fn find_locomotion(manager: usize, id: u32) -> (Option<usize>, Option<usize>) {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return (None, None) };
+    let (mut loco, mut net) = (None, None);
+    for slot in &slots {
+        if slot.stride == LOCO_SIZE && loco.is_none() {
+            if let Some(b) = read_bytes(slot.addr, LOCO_SIZE) {
+                if b.len() == LOCO_SIZE
+                    && b[LOCO_STATE] < STATE_COUNT
+                    && b[LOCO_PREVIOUS] < STATE_COUNT
+                    && b[225] <= 1
+                    && unit_or_zero(&b, 12)
+                {
+                    loco = Some(slot.addr);
+                }
+            }
+        } else if slot.stride == NET_LOCO_SIZE && net.is_none() {
+            if let Some(b) = read_bytes(slot.addr, NET_LOCO_SIZE) {
+                if b.len() == NET_LOCO_SIZE
+                    && b[NET_LOCO_STATE] < STATE_COUNT
+                    && unit_or_zero(&b, 0)
+                    && unit_or_zero(&b, 12)
+                    && unit_or_zero(&b, 24)
+                    && (0.9..1.1).contains(&{
+                        let (x, y, z) = (f32_at(&b, 12), f32_at(&b, 16), f32_at(&b, 20));
+                        (x * x + y * y + z * z).sqrt()
+                    })
+                {
+                    net = Some(slot.addr);
+                }
+            }
+        }
+    }
+    (loco, net)
+}
+
+fn hold_flying_state(st: &mut PowerState) {
+    let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
+    if let Some((m, id)) = client_pair() {
+        pairs.push((1, m, id));
+    }
+    for (kind, manager, id) in pairs {
+        if manager == 0 || id == 0 {
+            continue;
+        }
+        if st.loco[kind].is_none() && st.net_loco[kind].is_none() {
+            let (loco, net) = find_locomotion(manager, id);
+            st.loco[kind] = loco;
+            st.net_loco[kind] = net;
+            if loco.is_some() || net.is_some() {
+                log(&format!(
+                    "fly: locomotion found ({}) state={} network={}",
+                    if kind == 0 { "server" } else { "client" },
+                    loco.is_some(),
+                    net.is_some()
+                ));
+            }
+        }
+        if let Some(addr) = st.loco[kind] {
+            if let Some(b) = read_bytes(addr + LOCO_STATE, 2) {
+                if b.first() != Some(&STATE_FLYING) {
+                    st.loco_overwritten[kind] += 1;
+                    write_bytes(addr + LOCO_STATE, &[STATE_FLYING]);
+                }
+                if b.get(1) != Some(&STATE_FLYING) {
+                    write_bytes(addr + LOCO_PREVIOUS, &[STATE_FLYING]);
+                }
+            }
+        }
+        if let Some(addr) = st.net_loco[kind] {
+            if read_bytes(addr + NET_LOCO_STATE, 1).and_then(|b| b.first().copied()) != Some(STATE_FLYING) {
+                write_bytes(addr + NET_LOCO_STATE, &[STATE_FLYING]);
+            }
+        }
+    }
+    let now = Instant::now();
+    if st.loco_reported.map(|t| now.duration_since(t) >= Duration::from_secs(10)).unwrap_or(true) {
+        if st.loco_reported.is_some() {
+            log(&format!(
+                "fly: game overwrote the locomotion state server={} client={} times in the last 10 s",
+                st.loco_overwritten[0], st.loco_overwritten[1]
+            ));
+        }
+        st.loco_reported = Some(now);
+        st.loco_overwritten = [0, 0];
+        st.loco = [None, None];
+        st.net_loco = [None, None];
+    }
+}
+
 fn set_gravity(st: &mut PowerState, active: bool) {
     let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
     if let Some((m, id)) = client_pair() {
@@ -2247,7 +2354,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
             st.last_fly = None;
             st.last_written = None;
             st.hover = None;
+            st.loco = [None, None];
+            st.net_loco = [None, None];
+            st.loco_reported = None;
         }
+        hold_flying_state(st);
         fly_step(st, manager, id);
     } else if st.gravity_off && st.tp.is_none() {
         st.gravity_off = false;
@@ -2318,6 +2429,10 @@ pub fn new_power_state() -> PowerState {
         last_written: None,
         gravity: [None, None],
         gravity_saved: [1, 1],
+        loco: [None, None],
+        net_loco: [None, None],
+        loco_overwritten: [0, 0],
+        loco_reported: None,
         gravity_off: false,
         client_logged: false,
         groups: GroupState::new(),
