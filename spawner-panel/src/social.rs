@@ -32,6 +32,15 @@ pub struct Online {
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    pub me: bool,
+}
+
+pub fn player_label(p: &Online) -> String {
+    if p.me {
+        format!("Tú (jugador {})", p.number)
+    } else {
+        format!("Jugador {}", p.number)
+    }
 }
 
 pub struct SocialState {
@@ -109,6 +118,7 @@ pub fn parse_online(text: &str) -> Vec<Online> {
                 x: v.get("x")?.as_f64()?,
                 y: v.get("y")?.as_f64()?,
                 z: v.get("z")?.as_f64()?,
+                me: v.get("me").and_then(|m| m.as_bool()).unwrap_or(false),
             })
         })
         .collect();
@@ -284,14 +294,21 @@ impl App {
             ui.label(RichText::new("Sin datos: abre el juego y carga el mundo.").color(MUTED));
         }
         for p in &self.social.online {
-            let host = if p.number == 1 { "  (anfitrión)" } else { "" };
             let team = self.social.teams.iter().find(|t| t.members.contains(&p.number)).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
-            ui.label(format!("Jugador {}{}    X {:.0}  Z {:.0}    {}", p.number, host, p.x, p.z, team));
+            let text = format!("{}    X {:.0}  Z {:.0}    {}", player_label(p), p.x, p.z, team);
+            if p.me {
+                ui.label(RichText::new(text).color(GOLD));
+            } else {
+                ui.label(text);
+            }
         }
-        ui.label(RichText::new("El número de jugador se reinicia cada vez que abres el mundo: el anfitrión es el 1 y los demás van por orden de entrada.").color(MUTED).size(13.0));
+        ui.label(RichText::new("Solo aparecen los jugadores conectados ahora mismo. Para saber quién es quién, compara las coordenadas con las que ves en el juego. Los números se reinician cada vez que abres el mundo.").color(MUTED).size(13.0));
         divider(ui);
 
-        let max_number = self.social.online.iter().map(|p| p.number).chain(self.social.teams.iter().flat_map(|t| t.members.iter().copied())).max().unwrap_or(0).max(4);
+        let online: Vec<Online> = self.social.online.clone();
+        let mut numbers: Vec<u32> = online.iter().map(|p| p.number).chain(self.social.teams.iter().flat_map(|t| t.members.iter().copied())).collect();
+        numbers.sort_unstable();
+        numbers.dedup();
         let mut changed = false;
         let mut remove = None;
         let mut membership: Vec<(usize, u32, bool)> = Vec::new();
@@ -305,11 +322,18 @@ impl App {
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        for n in 1..=max_number {
+                        for n in numbers.iter().copied() {
                             let mut on = team.members.contains(&n);
-                            if ui.checkbox(&mut on, format!("Jugador {n}")).changed() {
+                            let label = match online.iter().find(|p| p.number == n) {
+                                Some(p) => player_label(p),
+                                None => format!("Jugador {n} (desconectado)"),
+                            };
+                            if ui.checkbox(&mut on, label).changed() {
                                 membership.push((i, n, on));
                             }
+                        }
+                        if numbers.is_empty() {
+                            ui.label(RichText::new("No hay jugadores conectados todavía.").color(MUTED));
                         }
                     });
                 });
@@ -382,6 +406,9 @@ mod tests {
         let list = parse_online(r#"[{"n":2,"x":1.5,"y":3.0,"z":-4.0},{"n":1,"x":10.0,"y":0.0,"z":5.0}]"#);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].number, 1);
+        let me = parse_online(r#"[{"n":3,"x":0,"y":0,"z":0,"me":true}]"#);
+        assert!(me[0].me);
+        assert_eq!(player_label(&me[0]), "Tú (jugador 3)");
         assert!(parse_online("[").is_empty());
     }
 

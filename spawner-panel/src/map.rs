@@ -111,6 +111,32 @@ pub fn parse_coordinates(text: &str) -> Option<[f64; 3]> {
     }
 }
 
+pub fn ground_around(cells: &HashMap<(i32, i32), (f32, u32)>, places: &[(f64, f64, f64)], x: f64, z: f64) -> Option<f64> {
+    let (cx, cz) = cell_of(x, z);
+    let span = (600.0 / CELL).ceil() as i32;
+    let mut best: Option<f64> = None;
+    for dx in -span..=span {
+        for dz in -span..=span {
+            if let Some((y, _)) = cells.get(&(cx + dx, cz + dz)) {
+                best = Some(best.map_or(*y as f64, |b| b.max(*y as f64)));
+            }
+        }
+    }
+    for (px, py, pz) in places {
+        if (px - x).abs() < 600.0 && (pz - z).abs() < 600.0 && py.is_finite() {
+            best = Some(best.map_or(*py, |b| b.max(*py)));
+        }
+    }
+    best
+}
+
+impl App {
+    pub fn ground_estimate(&self, x: f64, z: f64) -> Option<f64> {
+        let places: Vec<(f64, f64, f64)> = self.places.iter().map(|p| (p.x, p.y, p.z)).collect();
+        ground_around(&self.map.cells, &places, x, z)
+    }
+}
+
 impl MapState {
     pub fn reload(&mut self, dir: &Path) {
         let path = dir.join("m182_trail.csv");
@@ -467,7 +493,7 @@ impl App {
                 }
                 ui.label(RichText::new(format!("X {:.0}     Y {:.0}     Z {:.0}", sel[0], sel[1], sel[2])).size(17.0));
                 if !self.map.selected_height_known {
-                    ui.label(RichText::new("La altura es la de tu posición actual y puede no ser exacta. Al teletransportarte puedes volar para ajustar.").color(MUTED).size(12.5));
+                    ui.label(RichText::new("Altura desconocida: el juego te baja solo hasta el suelo, sin daño por caída.").color(MUTED).size(12.5));
                 }
             }
             None => {
@@ -504,7 +530,8 @@ impl App {
                 self.map.notice = "Coordenadas copiadas al portapapeles.".to_string();
             }
             if button(ui, "Teletransportarme aquí", Vec2::new(width, 32.0), true, true) {
-                let body = powers::teleport_body(sel, self.map.selected_height_known);
+                let ground = self.ground_estimate(sel[0], sel[2]);
+                let body = powers::teleport_body_with_ground(sel, self.map.selected_height_known, ground);
                 self.map.notice = match powers::command(&self.dir, &body) {
                     Ok(()) => "Pedido de teletransporte enviado.".to_string(),
                     Err(e) => format!("Error: {e}"),

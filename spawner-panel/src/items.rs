@@ -192,6 +192,75 @@ fn num_f(s: &str) -> f32 {
     s.trim().parse::<f32>().unwrap_or(0.0)
 }
 
+pub fn friendly_name(debug: &str) -> String {
+    const DROP: &[&str] = &["armor", "armour", "weapon", "craft", "material", "food", "prop", "decoration", "block", "ammo", "tool", "consumable", "collection", "vanity", "npc", "item"];
+    let mut words: Vec<String> = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
+    let mut leading = true;
+    for token in debug.split(|c: char| c == '_' || c == ' ').filter(|t| !t.is_empty()) {
+        let lower = token.to_lowercase();
+        if leading && DROP.contains(&lower.as_str()) {
+            continue;
+        }
+        leading = false;
+        let tier = lower.strip_prefix('t').map(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()) || r == "x").unwrap_or(false);
+        if tier {
+            tags.push(token.to_uppercase());
+            continue;
+        }
+        if let Some(level) = lower.strip_prefix("lvl") {
+            if !level.is_empty() && level.chars().all(|c| c.is_ascii_digit()) {
+                tags.push(format!("nv.{}", level.trim_start_matches('0')));
+            }
+            continue;
+        }
+        if matches!(lower.as_str(), "1h" | "2h") {
+            words.push(token.to_uppercase());
+            continue;
+        }
+        let mut current = String::new();
+        let chars: Vec<char> = token.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let next = chars.get(i + 1).copied();
+            let boundary = match prev {
+                Some(p) => (p.is_lowercase() && c.is_uppercase()) || (p.is_alphabetic() && c.is_ascii_digit()) || (p.is_ascii_digit() && c.is_alphabetic()) || (p.is_uppercase() && c.is_uppercase() && next.map(|n| n.is_lowercase()).unwrap_or(false)),
+                None => false,
+            };
+            if boundary && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            current.push(*c);
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+    }
+    let words: Vec<String> = words
+        .into_iter()
+        .map(|w| {
+            let lower = w.to_lowercase();
+            let lower = if lower == "legs" { "trousers".to_string() } else { lower };
+            if matches!(lower.as_str(), "of" | "the" | "and" | "de") {
+                lower
+            } else if w.len() <= 3 && w.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()) {
+                w
+            } else {
+                let mut cs = lower.chars();
+                cs.next().map(|f| f.to_uppercase().collect::<String>() + cs.as_str()).unwrap_or_default()
+            }
+        })
+        .collect();
+    let mut out = words.join(" ");
+    if out.is_empty() {
+        out = debug.trim_matches('_').replace('_', " ");
+    }
+    if !tags.is_empty() {
+        out = format!("{out} ({})", tags.join(" "));
+    }
+    out
+}
+
 pub fn parse_items(text: &str) -> Vec<Item> {
     let mut lines = text.lines();
     let Some(header) = lines.next() else { return Vec::new() };
@@ -310,6 +379,9 @@ pub struct ItemsState {
     pub notice: String,
     pub outbox: VecDeque<(Instant, Value)>,
     pub generic_pickup: String,
+    pub names_applied: bool,
+    pub sent: BTreeMap<u32, Edit>,
+    pub dirty: BTreeMap<u32, Instant>,
 }
 
 pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
@@ -533,28 +605,7 @@ impl ItemsState {
         self.saved.contains_key(&item.id)
     }
 
-    pub fn apply_item(&mut self, dir: &Path, item: &Item) -> Result<(), String> {
-        let edit = self.current(item);
-        let previous = self.saved.get(&item.id).cloned();
-        let mut commands = Vec::new();
-        if let Some(new) = edit.dmg {
-            let mut old = vec![hex_of(&item.dmg)];
-            if let Some(p) = previous.as_ref().and_then(|p| p.dmg) {
-                old.push(hex_of(&p));
-            }
-            if new != item.dmg || previous.as_ref().and_then(|p| p.dmg).is_some() {
-                commands.push(live_command(item, "daño", old, hex_of(&new)));
-            }
-        }
-        if let Some(new) = edit.arm {
-            let mut old = vec![hex_of(&item.arm)];
-            if let Some(p) = previous.as_ref().and_then(|p| p.arm) {
-                old.push(hex_of(&p));
-            }
-            if new != item.arm || previous.as_ref().and_then(|p| p.arm).is_some() {
-                commands.push(live_command(item, "armadura", old, hex_of(&new)));
-            }
-        }
+    pub fn set_edit(&mut self, item: &Item, edit: Edit) {
         let stripped = Edit {
             dmg: edit.dmg.filter(|d| *d != item.dmg),
             arm: edit.arm.filter(|a| *a != item.arm),
@@ -565,6 +616,58 @@ impl ItemsState {
             self.saved.insert(item.id, stripped);
         }
         self.working.remove(&item.id);
+        self.dirty.insert(item.id, Instant::now());
+    }
+
+    pub fn stats_request(&self, item: &Item) -> Option<Value> {
+        let edit = self.saved.get(&item.id)?;
+        let mut out = serde_json::Map::new();
+        if let Some(d) = edit.dmg {
+            out.insert("dmg_new".into(), json!(hex_of(&d)));
+            out.insert("dmg_old".into(), json!([hex_of(&item.dmg)]));
+        }
+        if let Some(a) = edit.arm {
+            out.insert("arm_new".into(), json!(hex_of(&a)));
+            out.insert("arm_old".into(), json!([hex_of(&item.arm)]));
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(Value::Object(out))
+        }
+    }
+
+    pub fn apply_item(&mut self, dir: &Path, item: &Item) -> Result<(), String> {
+        self.dirty.remove(&item.id);
+        let current = self.saved.get(&item.id).cloned().unwrap_or_default();
+        let previous = self.sent.get(&item.id).cloned();
+        let mut commands = Vec::new();
+        if let Some(new) = current.dmg.or(previous.as_ref().and(Some(item.dmg))) {
+            let mut old = vec![hex_of(&item.dmg)];
+            if let Some(p) = previous.as_ref().and_then(|p| p.dmg) {
+                old.push(hex_of(&p));
+            }
+            if previous.as_ref().and_then(|p| p.dmg) != current.dmg {
+                commands.push(live_command(item, "daño", old, hex_of(&new)));
+            }
+        }
+        if let Some(new) = current.arm.or(previous.as_ref().and(Some(item.arm))) {
+            let mut old = vec![hex_of(&item.arm)];
+            if let Some(p) = previous.as_ref().and_then(|p| p.arm) {
+                old.push(hex_of(&p));
+            }
+            if previous.as_ref().and_then(|p| p.arm) != current.arm {
+                commands.push(live_command(item, "armadura", old, hex_of(&new)));
+            }
+        }
+        match self.saved.get(&item.id) {
+            Some(e) => {
+                self.sent.insert(item.id, e.clone());
+            }
+            None => {
+                self.sent.remove(&item.id);
+            }
+        }
         self.persist(dir)?;
         let mut at = Instant::now();
         for c in commands {
@@ -591,6 +694,18 @@ impl ItemsState {
 
 impl App {
     pub fn items_pump(&mut self) {
+        let due: Vec<u32> = self.items.dirty.iter().filter(|(_, t)| t.elapsed() >= Duration::from_millis(400)).map(|(id, _)| *id).collect();
+        for id in due {
+            let Some(item) = self.items.rows.iter().find(|r| r.id == id).cloned() else {
+                self.items.dirty.remove(&id);
+                continue;
+            };
+            let dir = self.dir.clone();
+            self.items.notice = match self.items.apply_item(&dir, &item) {
+                Ok(()) => "Guardado automáticamente. Pulsa ENTREGAR para recibir el ítem con estos stats.".to_string(),
+                Err(e) => format!("Error: {e}"),
+            };
+        }
         while let Some((at, _)) = self.items.outbox.front() {
             if *at > Instant::now() {
                 break;
@@ -617,6 +732,10 @@ impl App {
             self.items.amount = 1;
         }
         let rarity_name = RARITIES[item.rarity_index().min(4) as usize];
+        if let Some(entry) = self.item_cat.entries.get(index) {
+            ui.label(RichText::new(entry.label.clone()).font(title_font(20.0)).color(GOLD));
+            ui.label(RichText::new(item.debug.clone()).color(MUTED).size(11.5));
+        }
         ui.label(RichText::new(format!("{}  ·  rareza base {}  ·  niveles {}–{}", item.group, rarity_name, item.level_min, item.level_max)).color(MUTED).size(13.0));
         divider(ui);
         label_title(ui, "NIVEL DEL ÍTEM");
@@ -693,59 +812,27 @@ impl App {
             ui.label(RichText::new("Este ítem no tiene daño ni armadura propios. Sus modificadores son nivel, rareza y cantidad (arriba).").color(MUTED));
         }
         if changed {
-            self.items.working.insert(item.id, edit.clone());
+            self.items.set_edit(&item, edit.clone());
         }
         if show_dmg || show_arm {
             ui.horizontal_wrapped(|ui| {
-                if button(ui, "×2", Vec2::new(54.0, 28.0), true, false) {
-                    let mut e = edit.clone();
-                    if let Some(d) = e.dmg.as_mut() {
-                        d[1] *= 2.0;
+                for (label, factor, width) in [("×2", 2.0_f32, 54.0), ("×5", 5.0, 54.0), ("×10", 10.0, 58.0)] {
+                    if button(ui, label, Vec2::new(width, 28.0), true, false) {
+                        let mut e = edit.clone();
+                        if let Some(d) = e.dmg.as_mut() {
+                            d[1] *= factor;
+                        }
+                        if let Some(a) = e.arm.as_mut() {
+                            a.iter_mut().for_each(|v| *v *= factor);
+                        }
+                        self.items.set_edit(&item, e);
                     }
-                    if let Some(a) = e.arm.as_mut() {
-                        a.iter_mut().for_each(|v| *v *= 2.0);
-                    }
-                    self.items.working.insert(item.id, e);
-                }
-                if button(ui, "×5", Vec2::new(54.0, 28.0), true, false) {
-                    let mut e = edit.clone();
-                    if let Some(d) = e.dmg.as_mut() {
-                        d[1] *= 5.0;
-                    }
-                    if let Some(a) = e.arm.as_mut() {
-                        a.iter_mut().for_each(|v| *v *= 5.0);
-                    }
-                    self.items.working.insert(item.id, e);
-                }
-                if button(ui, "×10", Vec2::new(58.0, 28.0), true, false) {
-                    let mut e = edit.clone();
-                    if let Some(d) = e.dmg.as_mut() {
-                        d[1] *= 10.0;
-                    }
-                    if let Some(a) = e.arm.as_mut() {
-                        a.iter_mut().for_each(|v| *v *= 10.0);
-                    }
-                    self.items.working.insert(item.id, e);
                 }
             });
-            ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura.").color(MUTED).size(12.5));
-            if button(ui, "APLICAR STATS", Vec2::new(ui.available_width(), 38.0), true, true) {
-                let dir = self.dir.clone();
-                let result = self.items.apply_item(&dir, &item);
-                self.items.notice = match result {
-                    Ok(()) => "Guardado. Enviando al juego en vivo…".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                };
-            }
-            if button(ui, "Restaurar valores originales", Vec2::new(ui.available_width(), 30.0), modified || self.items.working.contains_key(&item.id), false) {
-                let dir = self.dir.clone();
-                let base = ItemsState::base_edit(&item);
-                self.items.working.insert(item.id, base);
-                let result = self.items.apply_item(&dir, &item);
-                self.items.notice = match result {
-                    Ok(()) => "Valores originales restaurados.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                };
+            ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura. Todo se guarda solo.").color(MUTED).size(12.5));
+            if button(ui, "Restaurar valores originales", Vec2::new(ui.available_width(), 30.0), modified, false) {
+                self.items.set_edit(&item, ItemsState::base_edit(&item));
+                self.items.notice = "Valores originales restaurados.".to_string();
             }
         }
     }
@@ -882,6 +969,17 @@ mod tests {
     }
 
     #[test]
+    fn friendly_names_are_readable() {
+        assert_eq!(friendly_name("Armor_lvl02_Tinko_Arms"), "Tinko Arms (nv.2)");
+        assert_eq!(friendly_name("Armor_T0_Fur_Legs"), "Fur Trousers (T0)");
+        assert_eq!(friendly_name("Armor_T1_Mage_Wizard_DPS_Chest_Loot"), "Mage Wizard DPS Chest Loot (T1)");
+        assert_eq!(friendly_name("T3_Gem_GemOfOverpowering"), "Gem Gem of Overpowering (T3)");
+        assert_eq!(friendly_name("Weapon_T2_1H_SwordEpic_02"), "1H Sword Epic 02 (T2)");
+        assert_eq!(friendly_name("_Material_TX_Trophy_Wolf_Heavy_head"), "Trophy Wolf Heavy Head (TX)");
+        assert_eq!(friendly_name("Food_T6_raw_mushroom_Shiitake"), "Raw Mushroom Shiitake (T6)");
+    }
+
+    #[test]
     fn hex_roundtrip_layout() {
         assert_eq!(hex_of(&[1.0, 2.5]), "0000803f00002040");
     }
@@ -914,7 +1012,7 @@ mod tests {
         let mut state = ItemsState { rows: items, ..Default::default() };
         let mut edit = ItemsState::base_edit(&sword);
         edit.dmg.as_mut().unwrap()[1] = 9.0;
-        state.working.insert(sword.id, edit);
+        state.set_edit(&sword, edit);
         state.apply_item(&dir, &sword).unwrap();
         assert_eq!(state.outbox.len(), 1);
         let first = &state.outbox[0].1;
@@ -928,15 +1026,16 @@ mod tests {
         assert_eq!(loaded.get(&1234).unwrap().dmg.unwrap()[1], 9.0);
         let mut edit2 = ItemsState::base_edit(&sword);
         edit2.dmg.as_mut().unwrap()[1] = 11.0;
-        state.working.insert(sword.id, edit2);
+        state.set_edit(&sword, edit2);
         state.outbox.clear();
         state.apply_item(&dir, &sword).unwrap();
         let second = &state.outbox[0].1;
         assert_eq!(second["old"].as_array().unwrap().len(), 2);
         let restore = ItemsState::base_edit(&sword);
-        state.working.insert(sword.id, restore);
+        state.set_edit(&sword, restore);
         state.apply_item(&dir, &sword).unwrap();
         assert!(!state.saved.contains_key(&1234));
+        assert_eq!(state.outbox.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

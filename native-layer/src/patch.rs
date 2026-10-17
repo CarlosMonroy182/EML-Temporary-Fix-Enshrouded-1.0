@@ -38,8 +38,13 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     let (fa, fb) = (read_faction(a), read_faction(b));
-    if LIVE.pvp() && fa == faction::PLAYER && fb == faction::PLAYER && groups::same_team(a as usize, b as usize) {
-        return faction::enemy_vanilla(fa, fb) as u8;
+    if LIVE.pvp() && fa == faction::PLAYER && fb == faction::PLAYER {
+        if let Some(line) = groups::pair_report(a as usize, b as usize) {
+            super::spawner::log(&line);
+        }
+        if groups::same_team(a as usize, b as usize) {
+            return faction::enemy_vanilla(fa, fb) as u8;
+        }
     }
     faction::enemy(fa, fb, LIVE.pvp()) as u8
 }

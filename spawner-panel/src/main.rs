@@ -305,28 +305,52 @@ fn index_item(rows: &[items::Item], index: usize) -> Option<&items::Item> {
     rows.get(index)
 }
 
+fn item_labels(rows: &[items::Item], keys: &[Vec<String>], titles: &HashMap<String, String>) -> Vec<String> {
+    let found: Vec<Option<String>> = keys.iter().map(|k| icons::display_name(titles, k)).collect();
+    let mut uses: HashMap<String, usize> = HashMap::new();
+    for t in found.iter().flatten() {
+        *uses.entry(t.clone()).or_insert(0) += 1;
+    }
+    rows.iter()
+        .zip(found)
+        .map(|(it, title)| {
+            let raw = items::friendly_name(&it.debug);
+            match title {
+                Some(t) if uses.get(&t).copied().unwrap_or(0) > 1 => format!("{t} · {raw}"),
+                Some(t) => t,
+                None if it.name == it.debug => raw,
+                None => it.name.clone(),
+            }
+        })
+        .collect()
+}
+
+fn item_entries(rows: &[items::Item], titles: &HashMap<String, String>) -> Vec<Entry> {
+    let keys: Vec<Vec<String>> = rows.iter().map(|it| icons::item_keys(&it.name, &it.debug, &it.category)).collect();
+    let labels = item_labels(rows, &keys, titles);
+    rows.iter()
+        .zip(keys)
+        .zip(labels)
+        .map(|((it, keys), label)| Entry {
+            guid: it.guid.clone(),
+            raw: it.debug.clone(),
+            search: format!("{} {} {} {} {}", label, it.name, it.debug, it.group, it.slot).to_lowercase(),
+            label,
+            alias: None,
+            icon_file: None,
+            group: it.group.clone(),
+            boss: false,
+            kind: item_kind(&it.group),
+            internal: items::is_internal_item(&it.debug, &it.category),
+            icon_keys: keys,
+        })
+        .collect()
+}
+
 fn load_item_catalog(dir: &Path) -> (Catalog, Vec<items::Item>) {
     match items::load_items(dir) {
         Ok(rows) => {
-            let entries: Vec<Entry> = rows
-                .iter()
-                .map(|it| {
-                    let keys = icons::item_keys(&it.name, &it.debug, &it.category);
-                    Entry {
-                        guid: it.guid.clone(),
-                        raw: it.debug.clone(),
-                        label: if it.name == it.debug { pretty(it.debug.trim_start_matches('_')) } else { it.name.clone() },
-                        alias: None,
-                        icon_file: None,
-                        group: it.group.clone(),
-                        boss: false,
-                        search: format!("{} {} {} {}", it.name, it.debug, it.group, it.slot).to_lowercase(),
-                        kind: item_kind(&it.group),
-                        internal: items::is_internal_item(&it.debug, &it.category),
-                        icon_keys: keys,
-                    }
-                })
-                .collect();
+            let entries = item_entries(&rows, &icons::load_titles(dir));
             (Catalog { entries, ..Default::default() }, rows)
         }
         Err(e) => (Catalog { error: Some(e), ..Default::default() }, Vec::new()),
@@ -432,6 +456,7 @@ impl App {
             rows: item_rows,
             balance_base,
             balance,
+            sent: saved_stats.clone(),
             saved: saved_stats,
             level: 0,
             rarity: 0,
@@ -553,6 +578,17 @@ impl App {
             self.status = Status::Error("Elige un lugar guardado.".to_string());
             return;
         }
+        if mode == Mode::Items {
+            if let Some(item) = self.items.rows.get(index).cloned() {
+                if self.items.dirty.contains_key(&item.id) {
+                    let dir = self.dir.clone();
+                    if let Err(e) = self.items.apply_item(&dir, &item) {
+                        self.status = Status::Error(e);
+                        return;
+                    }
+                }
+            }
+        }
         let saved = match mode {
             Mode::Creatures => self.set_config(&[
                 ("spawn_template", json!(guid)),
@@ -584,6 +620,9 @@ impl App {
                     request["item_level"] = json!(self.items.level);
                     request["item_rarity"] = json!(self.items.rarity);
                     request["item_amount"] = json!(self.items.amount);
+                    if let Some(stats) = self.items.stats_request(&item) {
+                        request["stats"] = stats;
+                    }
                 }
             }
             if mode == Mode::Creatures {
@@ -622,6 +661,16 @@ impl App {
                 self.status = Status::NoAnswer;
             }
             ctx.request_repaint_after(Duration::from_millis(150));
+        }
+        if !self.items.names_applied && !self.items.rows.is_empty() {
+            let ready = self.downloader.as_ref().map(|d| d.progress.index_ready.load(std::sync::atomic::Ordering::Relaxed) > 0).unwrap_or(true);
+            if ready {
+                self.items.names_applied = true;
+                let titles = icons::load_titles(&self.dir);
+                if !titles.is_empty() {
+                    self.item_cat.entries = item_entries(&self.items.rows, &titles);
+                }
+            }
         }
         if self.player_checked.elapsed() >= Duration::from_millis(700) {
             self.player_checked = Instant::now();
@@ -1173,6 +1222,64 @@ mod tests {
         state.cells = cells;
         assert!(state.height_near(110.0, 205.0).is_some());
         assert!(state.height_near(5000.0, 5000.0).is_none());
+    }
+
+    #[test]
+    fn teleport_ground_hint() {
+        let cells = map::parse_trail("x,y,z\n100,50,200\n300,420,260\n9000,900,9000\n");
+        let g = map::ground_around(&cells, &[], 120.0, 210.0).unwrap();
+        assert!((g - 420.0).abs() < 0.5);
+        assert!(map::ground_around(&cells, &[], 50000.0, 50000.0).is_none());
+        assert_eq!(map::ground_around(&cells, &[(130.0, 600.0, 210.0)], 120.0, 210.0), Some(600.0));
+        let known = powers::teleport_body_with_ground([1.0, 2.0, 3.0], true, Some(500.0));
+        assert!(known.get("ground").is_none());
+        let unknown = powers::teleport_body_with_ground([1.0, 2.0, 3.0], false, Some(500.0));
+        assert!(unknown["at"][1].is_null());
+        assert_eq!(unknown["ground"], json!(500.0));
+        assert!(powers::teleport_body_with_ground([1.0, 2.0, 3.0], false, None).get("ground").is_none());
+    }
+
+    #[test]
+    fn item_names_come_from_wiki_titles() {
+        let mut titles = HashMap::new();
+        titles.insert(icons::norm("Warrior Helmet"), "Warrior Helmet".to_string());
+        let csv = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut\n1,aaaaaaaa-0000-0000-0000-000000000001,Armor_T2_Warrior_Helmet_Loot,Armor_T2_Warrior_Helmet_Loot,Equipment,Rare,1,Armour_Head,10,10,,,,10,1,1,0\n2,aaaaaaaa-0000-0000-0000-000000000002,Mystery_Thing_Zz,Mystery_Thing_Zz,Equipment,Rare,1,Armour_Head,10,10,,,,10,1,1,0\n";
+        let rows = items::parse_items(csv);
+        let entries = item_entries(&rows, &titles);
+        let by = |raw: &str| entries.iter().find(|e| e.raw == raw).unwrap().label.clone();
+        assert_eq!(by("Armor_T2_Warrior_Helmet_Loot"), "Warrior Helmet");
+        assert_eq!(by("Mystery_Thing_Zz"), "Mystery Thing Zz");
+    }
+
+    #[test]
+    fn item_stats_autosave_and_delivery() {
+        let dir = temp_dir("autosave");
+        let mut st = items::ItemsState::default();
+        let mut item = items::Item::default();
+        item.id = 77;
+        item.guid = "aaaaaaaa-0000-0000-0000-000000000077".into();
+        item.dmg[1] = 10.0;
+        item.dmg_set = true;
+        st.rows.push(item.clone());
+        assert!(st.stats_request(&item).is_none());
+        let mut edit = items::ItemsState::base_edit(&item);
+        edit.dmg.as_mut().unwrap()[1] = 500.0;
+        st.set_edit(&item, edit);
+        assert!(st.dirty.contains_key(&77));
+        let req = st.stats_request(&item).unwrap();
+        assert_eq!(req["dmg_new"].as_str().unwrap().len(), 120);
+        assert_eq!(req["dmg_old"][0].as_str().unwrap(), items::hex_of(&item.dmg));
+        assert!(req.get("arm_new").is_none());
+        st.apply_item(&dir, &item).unwrap();
+        assert!(st.dirty.is_empty());
+        assert_eq!(st.outbox.len(), 1);
+        let saved = std::fs::read_to_string(dir.join(items::STATS_FILE)).unwrap();
+        assert!(saved.contains("77"));
+        st.set_edit(&item, items::ItemsState::base_edit(&item));
+        assert!(st.stats_request(&item).is_none());
+        st.apply_item(&dir, &item).unwrap();
+        assert_eq!(st.outbox.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
