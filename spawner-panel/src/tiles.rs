@@ -13,6 +13,7 @@ pub const ORIGIN: f64 = 32512.0 * 256.0;
 pub const PX_PER_METER: f64 = 2.82253;
 const OFFSET_X: f64 = 19022.26;
 const OFFSET_Y: f64 = 42863.21;
+const CALIBRATION_FILE: &str = "calibration.json";
 pub const MIN_ZOOM: u8 = 8;
 pub const MAX_ZOOM: u8 = 16;
 pub const TILE_URL: &str = "https://tiles.mapgenie.io/games/enshrouded/embervale/default-v7";
@@ -20,12 +21,113 @@ const PAGE_URL: &str = "https://mapgenie.io/enshrouded/maps/embervale";
 const DATA_URL: &str = "https://mapgenie.io/api/v1/maps/581/data";
 const MARKERS_FILE: &str = "markers.json";
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Calibration {
+    pub scale: f64,
+    pub off_x: f64,
+    pub off_y: f64,
+}
+
+pub const DEFAULT_CALIBRATION: Calibration = Calibration { scale: PX_PER_METER, off_x: OFFSET_X, off_y: OFFSET_Y };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Anchor {
+    pub x: f64,
+    pub z: f64,
+    pub px: f64,
+    pub py: f64,
+}
+
+static CALIBRATION: Mutex<Calibration> = Mutex::new(DEFAULT_CALIBRATION);
+
+pub fn calibration() -> Calibration {
+    CALIBRATION.lock().map(|c| *c).unwrap_or(DEFAULT_CALIBRATION)
+}
+
+pub fn set_calibration(c: Calibration) {
+    if let Ok(mut current) = CALIBRATION.lock() {
+        *current = c;
+    }
+}
+
+pub fn map_world_to_px(c: Calibration, x: f64, z: f64) -> (f64, f64) {
+    (ORIGIN + c.scale * x + c.off_x, ORIGIN - c.scale * z + c.off_y)
+}
+
+pub fn map_px_to_world(c: Calibration, px: f64, py: f64) -> (f64, f64) {
+    ((px - ORIGIN - c.off_x) / c.scale, -(py - ORIGIN - c.off_y) / c.scale)
+}
+
 pub fn world_to_px(x: f64, z: f64) -> (f64, f64) {
-    (ORIGIN + PX_PER_METER * x + OFFSET_X, ORIGIN - PX_PER_METER * z + OFFSET_Y)
+    map_world_to_px(calibration(), x, z)
 }
 
 pub fn px_to_world(px: f64, py: f64) -> (f64, f64) {
-    ((px - ORIGIN - OFFSET_X) / PX_PER_METER, -(py - ORIGIN - OFFSET_Y) / PX_PER_METER)
+    map_px_to_world(calibration(), px, py)
+}
+
+pub fn fit_calibration(anchors: &[Anchor]) -> Calibration {
+    let Some(last) = anchors.last() else { return DEFAULT_CALIBRATION };
+    let single = Calibration {
+        scale: PX_PER_METER,
+        off_x: last.px - ORIGIN - PX_PER_METER * last.x,
+        off_y: last.py - ORIGIN + PX_PER_METER * last.z,
+    };
+    if anchors.len() < 2 {
+        return single;
+    }
+    let n = anchors.len() as f64;
+    let (mut sx, mut sz) = (0.0, 0.0);
+    for a in anchors {
+        sx += a.x;
+        sz += a.z;
+    }
+    let (mx, mz) = (sx / n, sz / n);
+    let (mut spx, mut spy) = (0.0, 0.0);
+    for a in anchors {
+        spx += a.px - ORIGIN;
+        spy += a.py - ORIGIN;
+    }
+    let (mpx, mpy) = (spx / n, spy / n);
+    let (mut num, mut den) = (0.0, 0.0);
+    for a in anchors {
+        let (dx, dz) = (a.x - mx, a.z - mz);
+        num += dx * (a.px - ORIGIN - mpx) - dz * (a.py - ORIGIN - mpy);
+        den += dx * dx + dz * dz;
+    }
+    if den < 400.0 * n {
+        return single;
+    }
+    let scale = (num / den).clamp(2.0, 4.0);
+    Calibration { scale, off_x: mpx - scale * mx, off_y: mpy + scale * mz }
+}
+
+pub fn calibration_path(dir: &Path) -> PathBuf {
+    icons_dir(dir).join("map").join(CALIBRATION_FILE)
+}
+
+pub fn load_anchors(dir: &Path) -> Vec<Anchor> {
+    let Some(v) = std::fs::read_to_string(calibration_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return Vec::new() };
+    let Some(list) = v.get("anchors").and_then(|a| a.as_array()) else { return Vec::new() };
+    list.iter()
+        .filter_map(|a| {
+            let a = a.as_array()?;
+            Some(Anchor { x: a.first()?.as_f64()?, z: a.get(1)?.as_f64()?, px: a.get(2)?.as_f64()?, py: a.get(3)?.as_f64()? })
+        })
+        .collect()
+}
+
+pub fn save_anchors(dir: &Path, anchors: &[Anchor]) -> Result<(), String> {
+    let path = calibration_path(dir);
+    if anchors.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let list: Vec<Value> = anchors.iter().map(|a| serde_json::json!([a.x, a.z, a.px, a.py])).collect();
+    std::fs::write(path, serde_json::json!({ "anchors": list }).to_string()).map_err(|e| e.to_string())
 }
 
 pub fn latlng_to_px(lat: f64, lng: f64) -> (f64, f64) {
@@ -231,7 +333,7 @@ pub fn build_markers(page: &str, data: &Value) -> Option<Value> {
     for l in data.get("locations")?.as_array()? {
         let (Some(lat), Some(lng)) = (as_f64(l.get("latitude")), as_f64(l.get("longitude"))) else { continue };
         let (px, py) = latlng_to_px(lat, lng);
-        let (x, z) = px_to_world(px / 1.0, py / 1.0);
+        let (x, z) = map_px_to_world(DEFAULT_CALIBRATION, px, py);
         let category = l.get("category_id").and_then(|c| c.as_u64()).unwrap_or(0);
         let title = l.get("title").and_then(|t| t.as_str()).unwrap_or("");
         locs.push(serde_json::json!([category, title, (x * 10.0).round() / 10.0, (z * 10.0).round() / 10.0]));
@@ -282,6 +384,46 @@ mod tests {
         let (x, z) = px_to_world(px, py);
         assert!((x - 5870.0).abs() < 1e-6 && (z - 2638.0).abs() < 1e-6);
         assert_eq!(((px / 256.0).floor() as u32, (py / 256.0).floor() as u32), (32651, 32650));
+    }
+
+    #[test]
+    fn one_anchor_shifts_the_map_and_keeps_the_scale() {
+        let truth = Calibration { scale: PX_PER_METER, off_x: OFFSET_X + 120.0, off_y: OFFSET_Y - 80.0 };
+        let (px, py) = map_world_to_px(truth, 3508.0, 1982.0);
+        let fitted = fit_calibration(&[Anchor { x: 3508.0, z: 1982.0, px, py }]);
+        let (qx, qy) = map_world_to_px(fitted, 3508.0, 1982.0);
+        assert!((qx - px).abs() < 1e-6 && (qy - py).abs() < 1e-6);
+        assert_eq!(fitted.scale, PX_PER_METER);
+        let (wx, wz) = map_px_to_world(fitted, px, py);
+        assert!((wx - 3508.0).abs() < 1e-6 && (wz - 1982.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn two_far_anchors_recover_scale_and_offset() {
+        let truth = Calibration { scale: 3.1, off_x: 18000.0, off_y: 41000.0 };
+        let points = [(3508.0, 1982.0), (5870.0, 2638.0), (900.0, 6000.0)];
+        let anchors: Vec<Anchor> = points.iter().map(|(x, z)| {
+            let (px, py) = map_world_to_px(truth, *x, *z);
+            Anchor { x: *x, z: *z, px, py }
+        }).collect();
+        let fitted = fit_calibration(&anchors);
+        assert!((fitted.scale - 3.1).abs() < 1e-6, "{fitted:?}");
+        assert!((fitted.off_x - 18000.0).abs() < 1e-3 && (fitted.off_y - 41000.0).abs() < 1e-3);
+        let near = [anchors[0], Anchor { x: 3510.0, z: 1985.0, ..anchors[0] }];
+        assert_eq!(fit_calibration(&near).scale, PX_PER_METER, "anchors that are too close keep the default scale");
+        assert_eq!(fit_calibration(&[]), DEFAULT_CALIBRATION);
+    }
+
+    #[test]
+    fn anchors_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("m182_cal_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let anchors = vec![Anchor { x: 1.0, z: 2.0, px: 3.0, py: 4.0 }];
+        save_anchors(&dir, &anchors).unwrap();
+        assert_eq!(load_anchors(&dir), anchors);
+        save_anchors(&dir, &[]).unwrap();
+        assert!(load_anchors(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

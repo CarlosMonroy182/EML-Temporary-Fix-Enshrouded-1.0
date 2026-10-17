@@ -234,6 +234,31 @@ end)
 -- English names of items come from the localisation table
 local translations = {}
 
+local function each(arr)
+    local items = {}
+    if arr == nil then return items end
+    pcall(function()
+        for _, v in ipairs(arr) do items[#items + 1] = v end
+    end)
+    if #items > 0 then return items end
+    local n = try(function() return #arr end)
+    if type(n) ~= "number" then n = try(function() return arr:size() end) end
+    if type(n) ~= "number" then n = try(function() return arr.size end) end
+    if type(n) ~= "number" then n = try(function() return arr.length end) end
+    if type(n) == "number" and n > 0 then
+        for i = 1, n do
+            local v = try(function() return arr[i] end)
+            if v == nil then v = try(function() return arr[i - 1] end) end
+            if v ~= nil then items[#items + 1] = v end
+        end
+    end
+    if #items > 0 then return items end
+    pcall(function()
+        for _, v in pairs(arr) do items[#items + 1] = v end
+    end)
+    return items
+end
+
 local function content_buffer(ref)
     local hash = try(function() return ref.hash end)
     if hash == nil then return nil, "no hash" end
@@ -273,16 +298,16 @@ local function read_loca(ref, label)
             local added = 0
             local tags = try(function() return collection.tags end)
             if tags ~= nil then
-                pcall(function()
-                    for _, tag in ipairs(tags) do
-                        local h = hash_of(try(function() return tag.id end))
-                        local text = try(function() return tag.text end)
-                        if h ~= nil and text ~= nil and translations[h] == nil then
-                            translations[h] = tostring(text)
-                            added = added + 1
-                        end
+                local list = each(tags)
+                dlog("loca " .. label .. ": tags " .. type(tags) .. ", " .. #list .. " entries")
+                for _, tag in ipairs(list) do
+                    local h = hash_of(try(function() return tag.id end))
+                    local text = try(function() return tag.text end)
+                    if h ~= nil and text ~= nil and translations[h] == nil then
+                        translations[h] = tostring(text)
+                        added = added + 1
                     end
-                end)
+                end
             end
             dlog("loca " .. label .. ": " .. added .. " texts (" .. str(how) .. ")")
             return added
@@ -295,18 +320,20 @@ end
 
 pcall(function()
     local locaResources = game.assets.get_resources_by_type("keen::LocaTagCollectionResource")
-    if type(locaResources) ~= "table" or #locaResources == 0 then
+    local resList = each(locaResources)
+    if #resList == 0 then
         dlog("loca: collection not found")
         return
     end
-    dlog("loca: " .. #locaResources .. " collections")
-    for ci, res in ipairs(locaResources) do
+    dlog("loca: " .. #resList .. " collections")
+    for ci, res in ipairs(resList) do
         local d = try(function() return res.data end)
         if d ~= nil then
             local eng = try(function() return d.keenglishData end)
             if eng ~= nil then read_loca(eng, ci .. "/keenglish") end
-            local langs = try(function() return d.languages end)
-            if type(langs) == "table" then
+            local langs = each(try(function() return d.languages end))
+            dlog("loca: " .. #langs .. " language entries")
+            do
                 for li, entry in ipairs(langs) do
                     local name = str(try(function() return entry.language end))
                     if li <= 3 then dlog("loca: language entry " .. name) end

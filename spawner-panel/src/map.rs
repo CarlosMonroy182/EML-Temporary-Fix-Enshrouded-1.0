@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::theme::*;
-use crate::tiles::{self, Markers, Slot, TileCache};
+use crate::tiles::{self, Anchor, Marker, Markers, Slot, TileCache};
 use crate::{powers, App, Place};
 
 pub const CELL: f64 = 12.0;
@@ -49,6 +49,14 @@ pub struct MapState {
     pub show_trail: bool,
     pub show_places: bool,
     pub show_markers: bool,
+    pub anchors: Vec<Anchor>,
+    pub calibrating: bool,
+    pub cal_loaded: bool,
+}
+
+pub fn marker_pos(m: &Marker) -> (f64, f64) {
+    let (px, py) = tiles::map_world_to_px(tiles::DEFAULT_CALIBRATION, m.x, m.z);
+    tiles::px_to_world(px, py)
 }
 
 impl Default for MapState {
@@ -78,6 +86,9 @@ impl Default for MapState {
             show_trail: false,
             show_places: true,
             show_markers: true,
+            anchors: Vec::new(),
+            calibrating: false,
+            cal_loaded: false,
         }
     }
 }
@@ -204,9 +215,15 @@ impl View {
         self.to_screen(px, py)
     }
 
+    fn to_px(&self, p: Pos2) -> (f64, f64) {
+        (
+            self.center[0] + ((p.x - self.rect.center().x) as f64) / self.scale,
+            self.center[1] + ((p.y - self.rect.center().y) as f64) / self.scale,
+        )
+    }
+
     fn to_world(&self, p: Pos2) -> (f64, f64) {
-        let px = self.center[0] + ((p.x - self.rect.center().x) as f64) / self.scale;
-        let py = self.center[1] + ((p.y - self.rect.center().y) as f64) / self.scale;
+        let (px, py) = self.to_px(p);
         tiles::px_to_world(px, py)
     }
 }
@@ -236,7 +253,8 @@ impl App {
             if !self.map.visible_cats.contains(&m.category) {
                 continue;
             }
-            let p = view.world_to_screen(m.x, m.z);
+            let (mx, mz) = marker_pos(m);
+            let p = view.world_to_screen(mx, mz);
             let d = p.distance(pos);
             if d <= 10.0 && best.map(|b| d < b.0).unwrap_or(true) {
                 best = Some((d, i));
@@ -251,6 +269,12 @@ impl App {
         }
         if self.map.marker_state == MarkerLoad::Idle {
             self.start_markers();
+        }
+        if !self.map.cal_loaded {
+            self.map.anchors = tiles::load_anchors(&self.dir);
+            tiles::set_calibration(tiles::fit_calibration(&self.map.anchors));
+            self.map.cal_loaded = true;
+            self.map.center = world_center();
         }
         if let Some(rx) = &self.map.marker_rx {
             if let Ok(ok) = rx.try_recv() {
@@ -312,13 +336,25 @@ impl App {
             }
             let hover = response.hover_pos();
             let hovered_marker = if self.map.show_markers { hover.and_then(|p| self.marker_at(&view, p)) } else { None };
-            if response.clicked() {
+            if response.clicked() && self.map.calibrating {
+                if let (Some(pos), Some(p)) = (response.interact_pointer_pos(), self.player) {
+                    let (px, py) = view.to_px(pos);
+                    self.map.anchors.push(Anchor { x: p[0], z: p[2], px, py });
+                    tiles::set_calibration(tiles::fit_calibration(&self.map.anchors));
+                    self.map.calibrating = false;
+                    self.map.notice = match tiles::save_anchors(&self.dir, &self.map.anchors) {
+                        Ok(()) => format!("Mapa calibrado con {} punto(s). Si sigue desfasado, camina lejos de aquí y calibra otra vez.", self.map.anchors.len()),
+                        Err(e) => format!("Error: {e}"),
+                    };
+                }
+            } else if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(i) = hovered_marker.or_else(|| if self.map.show_markers { self.marker_at(&view, pos) } else { None }) {
                         let m = self.map.markers.markers[i].clone();
-                        let height = self.map.height_near(m.x, m.z);
+                        let (mx, mz) = marker_pos(&m);
+                        let height = self.map.height_near(mx, mz);
                         let y = height.map(|h| h as f64).unwrap_or_else(|| self.player.map(|p| p[1]).unwrap_or(0.0));
-                        self.map.selected = Some([m.x.round(), y.round(), m.z.round()]);
+                        self.map.selected = Some([mx.round(), y.round(), mz.round()]);
                         self.map.selected_height_known = height.is_some();
                         self.map.selected_label = m.title.clone();
                         self.map.name = m.title;
@@ -362,7 +398,8 @@ impl App {
                     if !query.is_empty() && !m.title.to_lowercase().contains(&query) {
                         continue;
                     }
-                    let p = view.world_to_screen(m.x, m.z);
+                    let (mx, mz) = marker_pos(m);
+                    let p = view.world_to_screen(mx, mz);
                     if !rect.expand(10.0).contains(p) {
                         continue;
                     }
@@ -407,6 +444,12 @@ impl App {
                 let galley = painter.layout_no_wrap(text, egui::FontId::proportional(15.0), Color32::WHITE);
                 let at = rect.right_top() + Vec2::new(-galley.size().x - 16.0, 10.0);
                 painter.rect_filled(Rect::from_min_size(at - Vec2::new(6.0, 3.0), galley.size() + Vec2::new(12.0, 6.0)), 4.0, Color32::from_black_alpha(190));
+                painter.galley(at, galley, Color32::WHITE);
+            }
+            if self.map.calibrating {
+                let galley = painter.layout_no_wrap("Calibrando: haz clic en el mapa donde está tu personaje".to_string(), egui::FontId::proportional(16.0), Color32::WHITE);
+                let at = rect.center_top() + Vec2::new(-galley.size().x / 2.0, 14.0);
+                painter.rect_filled(Rect::from_min_size(at - Vec2::new(8.0, 4.0), galley.size() + Vec2::new(16.0, 8.0)), 4.0, Color32::from_rgba_unmultiplied(120, 70, 10, 230));
                 painter.galley(at, galley, Color32::WHITE);
             }
             let (pending, got) = self
@@ -522,6 +565,26 @@ impl App {
                 }
             }
         });
+        ui.add_space(8.0);
+        let frame = egui::Frame::none().fill(CARD).stroke(Stroke::new(1.5_f32, GOLD_DIM)).rounding(5.0).inner_margin(egui::Margin::same(10.0));
+        frame.show(ui, |ui| {
+            label_title(ui, "CALIBRAR EL MAPA");
+            ui.label(RichText::new("Si tu punto verde no coincide con donde estás, párate en un lugar reconocible del juego, pulsa el botón y haz clic en el mapa donde estás. Repite en otro lugar lejano para ajustar también la escala.").color(MUTED).size(12.5));
+            let label = if self.map.calibrating { "Haz clic en el mapa donde estás…" } else { "Calibrar con mi posición" };
+            if button(ui, label, Vec2::new(ui.available_width(), 34.0), self.player.is_some(), self.map.calibrating) {
+                self.map.calibrating = !self.map.calibrating;
+            }
+            ui.label(RichText::new(format!("Puntos de calibración: {}", self.map.anchors.len())).color(MUTED).size(12.5));
+            if button(ui, "Quitar calibración", Vec2::new(ui.available_width(), 30.0), !self.map.anchors.is_empty(), false) {
+                self.map.anchors.clear();
+                self.map.calibrating = false;
+                tiles::set_calibration(tiles::DEFAULT_CALIBRATION);
+                self.map.notice = match tiles::save_anchors(&self.dir, &self.map.anchors) {
+                    Ok(()) => "Calibración quitada.".to_string(),
+                    Err(e) => format!("Error: {e}"),
+                };
+            }
+        });
         if !self.map.notice.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(self.map.notice.clone()).color(GOOD));
@@ -530,5 +593,5 @@ impl App {
 }
 
 fn tiles_cell_px(view: &View) -> f32 {
-    (CELL * tiles::PX_PER_METER * view.scale) as f32
+    (CELL * tiles::calibration().scale * view.scale) as f32
 }

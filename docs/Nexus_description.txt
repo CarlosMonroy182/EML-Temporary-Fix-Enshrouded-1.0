@@ -26,9 +26,9 @@ Safe zones
 M182 Admin Pannel (separate .exe, downloaded from GitHub, see Installation)
 - Creatures tab: pick any enemy or boss by its in-game name, choose level, health and damage, and spawn it at your position or at a saved place. Persistent spawners with respawn timers keep a creature in a spot.
 - Items tab: browse every item with its in-game name, edit weapon damage and armor values, and deliver the item straight into your inventory. Skill-tree abilities are hidden. Edits are saved automatically.
-- Map tab: world map with your position, saved places and click-to-teleport. Known issue: the map overlay is currently offset from the real world; I am working on it.
+- Map tab: world map with your position, saved places and click-to-teleport. The map overlay can still be offset; use the CALIBRATE THE MAP card (click known spots to align it).
 - Places tab: save and name coordinates.
-- Admin tab (host only): god mode, infinite stamina and mana, fly (Space up / Left Ctrl down, adjustable speed), heal, and teleport with protected landing (it only lowers you to the ground when the height is unknown).
+- Admin tab (host only): god mode, infinite stamina and mana (also clears harmful status effects), fly (Space up / Left Ctrl down, adjustable speed), heal, and teleport with protected landing (it only lowers you to the ground when the height is unknown).
 - PvP, Safe zones and Teams tabs: control the features above.
 - Settings tab: global balance values (durability, base health, level caps, ...). They affect the whole world and need a game restart. "Restore everything to game values" resets all item and global edits.
 
@@ -52,7 +52,7 @@ m182_native.json
 - spawner (true): enables the creature spawner used by the panel.
 
 Notes
-- Known issues: the map overlay is offset; the loot dropped by spawned creatures may not be collectable after restarting the world; infinite stamina can still flicker while a status effect (cold, poison...) is acting. All are on my list.
+- Known issues: the map overlay is offset; the loot dropped by spawned creatures may not be collectable after restarting the world; the new status-effect immunity and safe-zone aura are still being verified in game. All are on my list.
 - Item stat edits change that item type for every copy of it; global balance values affect every weapon and player of the world.
 - Summons and companions do not attack other players yet.
 - If the game updates, the native part stays inactive until the mod is updated (it checks the game code first).
@@ -61,7 +61,7 @@ Notes
 
 Planned
 - English translation of the panel.
-- Fixed map, safe-zone message/aura, immunity to status effects with infinite stamina.
+- Better default map alignment.
 - Summons that fight for their owner, chest protection for teammates, more spawner options.
 
 Credits
