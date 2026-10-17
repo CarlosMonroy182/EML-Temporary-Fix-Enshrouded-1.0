@@ -1,0 +1,177 @@
+//! Rust equivalents of the game's faction relation functions.
+//!
+//! Every function here is a straight re-statement of the game's own logic (verified
+//! against the original machine code, see the tests) plus one optional rule:
+//! with `pvp` enabled two entities of the `Player` faction are hostile to each other.
+
+pub const PLAYER: u8 = 7;
+
+#[inline]
+fn player_group(x: u8) -> bool {
+    // Player, AutomatedPlayer, PlayerAlly
+    matches!(x, 7 | 8 | 11)
+}
+
+#[inline]
+fn player_pair(a: u8, b: u8) -> bool {
+    a == PLAYER && b == PLAYER
+}
+
+/// `isEnemy(a, b)` exactly as the game computes it.
+pub fn enemy_vanilla(a: u8, b: u8) -> bool {
+    if a == 0 {
+        return false;
+    }
+    if player_group(a) && player_group(b) {
+        return false;
+    }
+    if a == 1 {
+        return true;
+    }
+    if a == b {
+        return false;
+    }
+    match a {
+        3 => b != 6,
+        6 => !matches!(b, 3 | 10 | 13 | 14),
+        10 => !matches!(b, 6 | 2),
+        2 => b != 10,
+        13 => !matches!(b, 5 | 6),
+        5 => b != 13,
+        14 => b != 6,
+        _ => true,
+    }
+}
+
+/// `isFriend(a, b)` exactly as the game computes it.
+pub fn friend_vanilla(a: u8, b: u8) -> bool {
+    a == b || (player_group(a) && player_group(b))
+}
+
+/// `isFriend(a, b, options)` exactly as the game computes it.
+/// `flag` is the byte at `options + 1` (false when `options` is null).
+pub fn friend_opts_vanilla(a: u8, b: u8, flag: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if player_group(a) {
+        return player_group(b);
+    }
+    matches!(b, 7 | 8) && flag
+}
+
+pub fn enemy(a: u8, b: u8, pvp: bool) -> bool {
+    if pvp && player_pair(a, b) {
+        return true;
+    }
+    enemy_vanilla(a, b)
+}
+
+pub fn friend(a: u8, b: u8, pvp: bool) -> bool {
+    if pvp && player_pair(a, b) {
+        return false;
+    }
+    friend_vanilla(a, b)
+}
+
+pub fn friend_opts(a: u8, b: u8, flag: bool, pvp: bool) -> bool {
+    if pvp && player_pair(a, b) {
+        return false;
+    }
+    friend_opts_vanilla(a, b, flag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Truth tables produced by running the game's original machine code in an emulator
+    // for every input pair.
+    static F1: &[u8] = include_bytes!("../../tests/golden/golden_f1.bin");
+    static F2: &[u8] = include_bytes!("../../tests/golden/golden_f2.bin");
+    static F2_NULL: &[u8] = include_bytes!("../../tests/golden/golden_f2null.bin");
+    static F3: &[u8] = include_bytes!("../../tests/golden/golden_f3.bin");
+    static F3_NULL: &[u8] = include_bytes!("../../tests/golden/golden_f3null.bin");
+    static F4: &[u8] = include_bytes!("../../tests/golden/golden_f4.bin");
+
+    fn ptr_value(null: bool, v: u8) -> u8 {
+        if null { 0 } else { v }
+    }
+
+    #[test]
+    fn enemy_matches_game_for_all_inputs() {
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                let i = a as usize * 256 + b as usize;
+                assert_eq!(enemy_vanilla(a, b) as u8, F1[i], "F1 a={a} b={b}");
+                assert_eq!(enemy_vanilla(a, b) as u8, F2[i], "F2 a={a} b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn enemy_pointer_variant_null_handling() {
+        assert_eq!(enemy_vanilla(0, 0) as u8, F2_NULL[0]);
+        for b in 0..=255u8 {
+            assert_eq!(enemy_vanilla(ptr_value(true, 0), b) as u8, F2_NULL[1 + b as usize]);
+        }
+        for a in 0..=255u8 {
+            assert_eq!(enemy_vanilla(a, 0) as u8, F2_NULL[257 + a as usize]);
+        }
+    }
+
+    #[test]
+    fn friend_values_matches_game() {
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                assert_eq!(friend_vanilla(a, b) as u8, F4[a as usize * 256 + b as usize], "a={a} b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn friend_opts_matches_game() {
+        for opt in 0..3usize {
+            let flag = opt == 2;
+            for a in 0..=255u8 {
+                for b in 0..=255u8 {
+                    let i = (opt * 256 + a as usize) * 256 + b as usize;
+                    assert_eq!(friend_opts_vanilla(a, b, flag) as u8, F3[i], "opt={opt} a={a} b={b}");
+                }
+            }
+            let base = opt * 513;
+            for b in 0..=255u8 {
+                assert_eq!(friend_opts_vanilla(0, b, flag) as u8, F3_NULL[base + b as usize]);
+            }
+            for a in 0..=255u8 {
+                assert_eq!(friend_opts_vanilla(a, 0, flag) as u8, F3_NULL[base + 256 + a as usize]);
+            }
+            assert_eq!(friend_opts_vanilla(0, 0, flag) as u8, F3_NULL[base + 512]);
+        }
+    }
+
+    #[test]
+    fn pvp_only_changes_player_vs_player() {
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                let special = a == PLAYER && b == PLAYER;
+                if !special {
+                    assert_eq!(enemy(a, b, true), enemy_vanilla(a, b));
+                    assert_eq!(friend(a, b, true), friend_vanilla(a, b));
+                    assert_eq!(friend_opts(a, b, true, true), friend_opts_vanilla(a, b, true));
+                }
+                assert_eq!(enemy(a, b, false), enemy_vanilla(a, b));
+                assert_eq!(friend(a, b, false), friend_vanilla(a, b));
+            }
+        }
+        assert!(enemy(PLAYER, PLAYER, true));
+        assert!(!friend(PLAYER, PLAYER, true));
+        assert!(!enemy(PLAYER, PLAYER, false));
+        // companions and automated players stay friendly with players
+        assert!(!enemy(11, PLAYER, true));
+        assert!(!enemy(PLAYER, 11, true));
+        assert!(!enemy(8, PLAYER, true));
+        // monsters still hostile to players
+        assert!(enemy(4, PLAYER, true));
+    }
+}

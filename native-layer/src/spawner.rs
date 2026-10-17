@@ -1,0 +1,2787 @@
+use std::ffi::c_void;
+use std::fs::File;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
+use serde::Deserialize;
+use std::time::{Duration, Instant};
+
+use super::config::{SpawnSettings, LIVE, SPAWN};
+use super::groups;
+use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetAsyncKeyState(vk: i32) -> i16;
+    fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+}
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentProcessId() -> u32;
+    fn GetCurrentProcess() -> *mut c_void;
+    fn WriteProcessMemory(process: *mut c_void, addr: *mut c_void, buf: *const c_void, size: usize, written: *mut usize) -> i32;
+    fn VirtualQuery(addr: *const c_void, info: *mut MemInfo, size: usize) -> usize;
+    fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct MemInfo {
+    base: usize,
+    alloc_base: usize,
+    alloc_protect: u32,
+    pad1: u32,
+    size: usize,
+    state: u32,
+    protect: u32,
+    kind: u32,
+    pad2: u32,
+}
+
+const GUID_PLAYER: [u8; 16] = [0xd6, 0x66, 0xdb, 0xc3, 0xa5, 0x89, 0x6c, 0x4a, 0xa8, 0xe3, 0xd9, 0xa1, 0xf6, 0x00, 0x98, 0x12];
+
+const HASH_CURRENT_TRANSFORM: u32 = 0x027a_c564;
+const HASH_OVERRIDE_LEVEL: u32 = 0xa21e_7ee7;
+const HASH_PICKUP_ITEM: u32 = 0x0877_5a90;
+const PICKUP_ITEM_SIZE: usize = 28;
+
+const TRANSFORM_SIZE: usize = 56;
+const COMPONENT_SLOTS: usize = 640;
+const METERS: f64 = 4_294_967_296.0;
+const MAX_CALIBRATION_TRIES: u32 = 400;
+const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
+const DAMAGE_SIGNATURE: u32 = 0xb866_36b9;
+const STAMINA_SIGNATURE: u32 = 0x04b6_aa8b;
+const MANA_SIGNATURE: u32 = 0x6aa2_574e;
+const SUSCEPTIBILITY_SIGNATURE: u32 = 2_415_994_894;
+const SUSCEPTIBILITY_SIZE: usize = 84;
+const FALL_DAMAGE_SIZE: usize = 24;
+const FALL_SEQUENCE: [u8; 16] = [0x53, 0xb0, 0xb6, 0x2d, 0x90, 0x4e, 0x82, 0x47, 0xab, 0x37, 0xf7, 0xff, 0xe8, 0x83, 0x50, 0x63];
+const FALL_UNLIMITED: f32 = 1.0e9;
+const BODY_HEAT_SIGNATURE: u32 = 3_350_114_077;
+const ITEM_LEVEL_OFFSET: usize = 1652;
+const ITEM_DAMAGE_OFFSET: usize = 1660;
+const ITEM_ARMOR_OFFSET: usize = 1724;
+const ITEM_INFO_SPAN: usize = 2100;
+const POWERS_FILE: &str = "m182_powers.json";
+const COMMAND_FILE: &str = "m182_command.request";
+const TRAIL_FILE: &str = "m182_trail.csv";
+const VK_SPACE: i32 = 0x20;
+const VK_LCONTROL: i32 = 0xA2;
+
+static STARTED: AtomicBool = AtomicBool::new(false);
+static SERVER_MGR: AtomicUsize = AtomicUsize::new(0);
+static PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+static CLIENT_MGR: AtomicUsize = AtomicUsize::new(0);
+static CLIENT_PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+static WATCHING: AtomicBool = AtomicBool::new(false);
+static TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
+static CALIBRATION_TRIES: AtomicU32 = AtomicU32::new(0);
+static CALIBRATION_DUMPS: AtomicU32 = AtomicU32::new(0);
+static PENDING: AtomicU32 = AtomicU32::new(0);
+static BUSY: AtomicBool = AtomicBool::new(false);
+static LOG: Mutex<Option<File>> = Mutex::new(None);
+static CLOCK: OnceLock<Instant> = OnceLock::new();
+
+pub fn log(message: &str) {
+    let ms = CLOCK.get_or_init(Instant::now).elapsed().as_millis();
+    let Ok(mut guard) = LOG.lock() else { return };
+    if guard.is_none() {
+        if let Ok(dir) = std::env::current_dir() {
+            if let Ok(mut f) = File::create(dir.join("m182_spawner.log")) {
+                let _ = writeln!(f, "# m182 spawner log");
+                *guard = Some(f);
+            }
+        }
+    }
+    if let Some(f) = guard.as_mut() {
+        let _ = writeln!(f, "[{ms}ms] {message}");
+        let _ = f.flush();
+    }
+}
+
+pub fn start() {
+    if !LIVE.spawner() || STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = CLOCK.get_or_init(Instant::now);
+    log("spawner enabled");
+    if let Err(e) = std::thread::Builder::new().name("m182-spawner-keys".into()).spawn(key_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start hotkey thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-powers".into()).spawn(powers_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start powers thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-keeper".into()).spawn(keeper_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start keeper thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
+    }
+}
+
+fn game_has_focus() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        pid == GetCurrentProcessId()
+    }
+}
+
+fn key_loop() {
+    let mut was_down = [false; 5];
+    let mut ticks = 0u32;
+    let mut last_report = Instant::now();
+    let mut last_pos: Option<(i64, i64, i64)> = None;
+    let mut file_pos: Option<(i64, i64, i64)> = None;
+    let mut last_file = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(25));
+        if !LIVE.spawner() {
+            was_down = [false; 5];
+            continue;
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks % 8 == 0 {
+            poll_request();
+        }
+        let keys = match SPAWN.lock() {
+            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key, s.watch_key, 0x73],
+            Err(_) => continue,
+        };
+        let focus = game_has_focus();
+        let mut down = [false; 5];
+        for i in 0..5 {
+            down[i] = unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0 && focus;
+        }
+        if down[0] && !was_down[0] {
+            PENDING.store(1, Ordering::SeqCst);
+            log("spawn requested");
+        }
+        if down[1] && !was_down[1] {
+            dump_entity("player (server)", SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst));
+            dump_entity("player (client)", CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst));
+        }
+        if down[2] && !was_down[2] {
+            dump_entity("last spawned", SERVER_MGR.load(Ordering::SeqCst), LAST_SPAWNED.load(Ordering::SeqCst));
+        }
+        if down[3] && !was_down[3] {
+            census();
+        }
+        if down[4] && !was_down[4] {
+            toggle_watch();
+        }
+        was_down = down;
+
+        if last_file.elapsed() >= Duration::from_secs(1) {
+            last_file = Instant::now();
+            if let Some(t) = player_transform() {
+                let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+                if file_pos != Some(pos) {
+                    if let Some(prev) = file_pos {
+                        facing_update(prev, pos, &t);
+                    }
+                    file_pos = Some(pos);
+                    write_position(pos);
+                    record_trail(pos);
+                }
+            }
+        }
+        if last_report.elapsed() >= Duration::from_secs(4) {
+            last_report = Instant::now();
+            if let Some(t) = player_transform() {
+                let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+                if last_pos != Some(pos) {
+                    last_pos = Some(pos);
+                    log(&format!(
+                        "player position x={:.2} y={:.2} z={:.2}",
+                        pos.0 as f64 / METERS,
+                        pos.1 as f64 / METERS,
+                        pos.2 as f64 / METERS
+                    ));
+                }
+            }
+        }
+    }
+}
+
+static DUMP_COUNTER: AtomicU32 = AtomicU32::new(0);
+static LAST_SPAWNED: AtomicU32 = AtomicU32::new(0);
+
+struct Slot {
+    index: usize,
+    addr: usize,
+    stride: usize,
+}
+
+fn layout(p: &Placement) -> Option<Vec<Slot>> {
+    let tables = read_bytes(p.def, 0xf90)?;
+    if tables.len() < 0xf90 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for index in 0..COMPONENT_SLOTS {
+        let word = u64_at(&tables, (index >> 6) * 8);
+        if (word >> (index & 63)) & 1 == 0 {
+            continue;
+        }
+        let offset = u16::from_le_bytes([tables[0x84 + index * 2], tables[0x85 + index * 2]]) as usize;
+        let stride = u16::from_le_bytes([tables[0xa84 + index * 2], tables[0xa85 + index * 2]]) as usize;
+        if stride == 0 {
+            continue;
+        }
+        out.push(Slot { index, addr: p.chunk + offset + stride * p.slot, stride });
+    }
+    Some(out)
+}
+
+fn entity_layout(manager: usize, id: u32) -> Option<(usize, Placement, Vec<Slot>)> {
+    if manager == 0 || id == 0 {
+        return None;
+    }
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let slots = layout(&p)?;
+    Some((record, p, slots))
+}
+
+pub fn dump_entity(label: &str, manager: usize, id: u32) {
+    let n = DUMP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+    let Some((record, p, slots)) = entity_layout(manager, id) else {
+        log(&format!("dump #{n} {label}: entity {id} not available"));
+        return;
+    };
+    log(&format!("dump #{n} {label} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+    for slot in &slots {
+        let bytes = read_bytes(slot.addr, slot.stride.min(1024)).unwrap_or_default();
+        log(&format!("dump #{n} idx={} size={} data={}", slot.index, slot.stride, hex(&bytes)));
+    }
+    log(&format!("dump #{n} end"));
+}
+
+fn snapshot(manager: usize, id: u32) -> Option<Vec<Option<Vec<u8>>>> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    let mut out: Vec<Option<Vec<u8>>> = vec![None; COMPONENT_SLOTS];
+    for slot in &slots {
+        out[slot.index] = read_bytes(slot.addr, slot.stride.min(1024));
+    }
+    Some(out)
+}
+
+fn toggle_watch() {
+    if WATCHING.swap(false, Ordering::SeqCst) {
+        log("watch stopped");
+        return;
+    }
+    WATCHING.store(true, Ordering::SeqCst);
+    if let Err(e) = std::thread::Builder::new().name("m182-spawner-watch".into()).spawn(watch_loop) {
+        WATCHING.store(false, Ordering::SeqCst);
+        log(&format!("watch could not start: {e}"));
+    }
+}
+
+fn watch_loop() {
+    let targets = || {
+        [
+            ("server", SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst)),
+            ("client", CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst)),
+        ]
+    };
+    log("watch started: measuring which components change on their own (3 seconds), then reporting the rest");
+
+    let mut noisy: Vec<Vec<u32>> = vec![vec![0; COMPONENT_SLOTS]; 2];
+    let mut previous: Vec<Option<Vec<Option<Vec<u8>>>>> = vec![None, None];
+    for _ in 0..150 {
+        if !WATCHING.load(Ordering::SeqCst) {
+            return;
+        }
+        for (t, (_, mgr, id)) in targets().iter().enumerate() {
+            let now = snapshot(*mgr, *id);
+            if let (Some(prev), Some(cur)) = (previous[t].as_ref(), now.as_ref()) {
+                for i in 0..COMPONENT_SLOTS {
+                    if prev[i] != cur[i] {
+                        noisy[t][i] += 1;
+                    }
+                }
+            }
+            previous[t] = now;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let skipped: usize = noisy.iter().map(|v| v.iter().filter(|c| **c >= 3).count()).sum();
+    log(&format!("watch ready: {skipped} constantly changing components ignored. Do your action now."));
+
+    let mut reported = 0u32;
+    while WATCHING.load(Ordering::SeqCst) && reported < 4000 {
+        for (t, (label, mgr, id)) in targets().iter().enumerate() {
+            let Some(cur) = snapshot(*mgr, *id) else { continue };
+            if let Some(prev) = previous[t].as_ref() {
+                for i in 0..COMPONENT_SLOTS {
+                    if noisy[t][i] >= 3 || prev[i] == cur[i] {
+                        continue;
+                    }
+                    let old = prev[i].as_ref().map(|b| hex(b)).unwrap_or_default();
+                    let new = cur[i].as_ref().map(|b| hex(b)).unwrap_or_default();
+                    log(&format!("watch {label} idx={i} old={old} new={new}"));
+                    reported += 1;
+                }
+            }
+            previous[t] = Some(cur);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    WATCHING.store(false, Ordering::SeqCst);
+    log("watch ended");
+}
+
+pub fn write_bytes(addr: usize, data: &[u8]) -> bool {
+    let mut written = 0usize;
+    let ok = unsafe { WriteProcessMemory(GetCurrentProcess(), addr as *mut c_void, data.as_ptr().cast(), data.len(), &mut written) };
+    ok != 0 && written == data.len()
+}
+
+fn f32_at(b: &[u8], off: usize) -> f32 {
+    f32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+struct Keep {
+    manager: usize,
+    id: u32,
+    health: u32,
+    damage: f32,
+    orig: Option<[f32; 2]>,
+    born: Instant,
+    ready: bool,
+    missing: u8,
+    rewrites: u32,
+}
+
+static KEEPS: Mutex<Vec<Keep>> = Mutex::new(Vec::new());
+const KEEP_LIMIT: usize = 400;
+
+/// Brings one spawned creature to the wanted health and damage. Only the maximum health is compared:
+/// when the game resets it (it recomputes it from the level whenever the creature is activated), the
+/// whole health is set again; otherwise the damage the creature has taken is left alone.
+fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Option<[f32; 2]>, rewrites: &mut u32) -> bool {
+    let want_damage = (damage - 1.0).abs() >= 1e-6;
+    if health == 0 && !want_damage {
+        return true;
+    }
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    let mut health_done = health == 0;
+    let mut damage_done = !want_damage;
+    for slot in &slots {
+        let Some(mut b) = read_bytes(slot.addr, slot.stride) else { continue };
+        if b.len() < slot.stride {
+            continue;
+        }
+        if slot.stride == 40 && health > 0 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+            let current = u32_at(&b, 8);
+            if current == 0 {
+                // dead (or not initialised yet): never bring it back
+                health_done = true;
+                continue;
+            }
+            let maximum = u32_at(&b, 36);
+            if maximum != health {
+                for off in [8usize, 16, 36] {
+                    b[off..off + 4].copy_from_slice(&health.to_le_bytes());
+                }
+                let ok = write_bytes(slot.addr, &b);
+                *rewrites += 1;
+                log(&format!("stats: entity {id} health {current}/{maximum} -> {health} (written={ok}, times={})", *rewrites));
+            } else if current > health {
+                b[8..12].copy_from_slice(&health.to_le_bytes());
+                write_bytes(slot.addr, &b);
+            }
+            health_done = true;
+        } else if slot.stride == 24 && want_damage && u32_at(&b, 0) == DAMAGE_SIGNATURE && f32_at(&b, 8) > 0.0 {
+            let base = *orig.get_or_insert([f32_at(&b, 8), f32_at(&b, 12)]);
+            let target = [base[0] * damage, base[1] * damage];
+            if f32_at(&b, 8) != target[0] || f32_at(&b, 12) != target[1] {
+                b[8..12].copy_from_slice(&target[0].to_le_bytes());
+                b[12..16].copy_from_slice(&target[1].to_le_bytes());
+                let ok = write_bytes(slot.addr, &b);
+                log(&format!("stats: entity {id} damage {} -> {} (x{damage}, written={ok})", base[0], target[0]));
+            }
+            damage_done = true;
+        }
+    }
+    health_done && damage_done
+}
+
+pub fn apply_stats(manager: usize, id: u32, health: u32, damage: f32) -> bool {
+    let mut orig = None;
+    let mut rewrites = 0;
+    try_apply(manager, id, health, damage, &mut orig, &mut rewrites)
+}
+
+/// One pass over every creature that has custom stats. Runs forever in its own thread, so the
+/// values survive however late the game decides to reset them.
+pub fn keeper_pass() {
+    let current = SERVER_MGR.load(Ordering::SeqCst);
+    let Ok(mut list) = KEEPS.lock() else { return };
+    list.retain(|k| k.manager == current);
+    for k in list.iter_mut() {
+        if entity_layout(k.manager, k.id).is_none() {
+            k.missing = k.missing.saturating_add(1);
+            continue;
+        }
+        k.missing = 0;
+        let done = try_apply(k.manager, k.id, k.health, k.damage, &mut k.orig, &mut k.rewrites);
+        if done && !k.ready {
+            k.ready = true;
+            log(&format!("stats: entity {} ready after {} ms", k.id, k.born.elapsed().as_millis()));
+        }
+    }
+    list.retain(|k| k.missing < 40);
+}
+
+fn keeper_loop() {
+    loop {
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::panic::catch_unwind(keeper_pass);
+    }
+}
+
+pub fn start_stats(manager: usize, id: u32, health: u32, damage: f32) {
+    if health == 0 && (damage - 1.0).abs() < 1e-6 {
+        return;
+    }
+    let Ok(mut list) = KEEPS.lock() else { return };
+    list.retain(|k| !(k.manager == manager && k.id == id));
+    list.push(Keep { manager, id, health, damage, orig: None, born: Instant::now(), ready: false, missing: 0, rewrites: 0 });
+    if list.len() > KEEP_LIMIT {
+        let extra = list.len() - KEEP_LIMIT;
+        list.drain(0..extra);
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct StatsPatch {
+    dmg_new: String,
+    dmg_old: Vec<String>,
+    arm_new: String,
+    arm_old: Vec<String>,
+    lvl_new: String,
+    lvl_old: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Request {
+    template: String,
+    level: Option<u32>,
+    count: Option<u32>,
+    distance: Option<f32>,
+    health: Option<u32>,
+    damage: Option<f32>,
+    at: Option<[f64; 3]>,
+    object: Option<bool>,
+    forward: Option<bool>,
+    item: Option<u32>,
+    item_level: Option<u32>,
+    item_rarity: Option<u32>,
+    item_amount: Option<u32>,
+    item_guid: Option<String>,
+    stats: Option<StatsPatch>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GiveSpec {
+    pub item: u32,
+    pub level: u32,
+    pub rarity: u32,
+    pub amount: u32,
+    pub guid: [u8; 16],
+}
+
+static REQUEST_GIVE: Mutex<Option<GiveSpec>> = Mutex::new(None);
+static REQUEST_AT: Mutex<Option<[f64; 3]>> = Mutex::new(None);
+static REQUEST_OBJECT: AtomicBool = AtomicBool::new(false);
+static REQUEST_FORWARD: AtomicBool = AtomicBool::new(false);
+static FACE_SCORES: Mutex<[f64; 4]> = Mutex::new([0.0; 4]);
+static FACE_SAMPLES: AtomicU32 = AtomicU32::new(0);
+static FACE_CHOSEN: AtomicU32 = AtomicU32::new(0);
+static REQUEST: Mutex<Option<SpawnSettings>> = Mutex::new(None);
+static SPAWN_TAG: Mutex<Option<String>> = Mutex::new(None);
+static CREATED: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+const REQUEST_FILE: &str = "m182_spawn.request";
+
+pub fn poll_request() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(REQUEST_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let Ok(req) = serde_json::from_str::<Request>(&text) else {
+        log("panel request ignored: invalid file");
+        return;
+    };
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = None;
+    }
+    let mut s = match SPAWN.lock() {
+        Ok(s) => s.clone(),
+        Err(_) => return,
+    };
+    if !req.template.trim().is_empty() {
+        s.template = req.template.trim().to_string();
+    }
+    if let Some(v) = req.level {
+        s.level = v.min(1000);
+    }
+    if let Some(v) = req.count {
+        s.count = v.clamp(1, 20);
+    }
+    if let Some(v) = req.distance {
+        s.distance = v.clamp(1.0, 60.0);
+    }
+    if let Some(v) = req.health {
+        s.health = v.min(2_000_000_000);
+    }
+    if let Some(v) = req.damage {
+        s.damage = v.clamp(0.0, 1000.0);
+    }
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(s);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = req.item.filter(|i| *i != 0).map(|item| GiveSpec {
+            item,
+            level: req.item_level.unwrap_or(1).clamp(1, 255),
+            rarity: req.item_rarity.unwrap_or(0).min(4),
+            amount: req.item_amount.unwrap_or(1).clamp(1, 65535),
+            guid: req.item_guid.as_deref().and_then(super::config::parse_guid).unwrap_or([0u8; 16]),
+        });
+    }
+    REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
+    REQUEST_FORWARD.store(req.forward.unwrap_or(false), Ordering::SeqCst);
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = req.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
+    }
+    let give = REQUEST_GIVE.lock().ok().and_then(|g| *g);
+    match (req.stats, give) {
+        (Some(stats), Some(spec)) if spec.guid != [0u8; 16] => {
+            let started = std::thread::Builder::new().name("m182-item-patch".into()).spawn(move || {
+                apply_stats_patch(spec.item, &spec.guid, &stats);
+                PENDING.store(1, Ordering::SeqCst);
+                log("spawn requested from the panel");
+            });
+            if started.is_err() {
+                PENDING.store(1, Ordering::SeqCst);
+                log("spawn requested from the panel");
+            }
+        }
+        _ => {
+            PENDING.store(1, Ordering::SeqCst);
+            log("spawn requested from the panel");
+        }
+    }
+}
+
+static PATCHED: Mutex<Option<HashMap<u32, Vec<(usize, Vec<u8>)>>>> = Mutex::new(None);
+
+fn patched_still_holds(item: u32, wanted: &[Vec<u8>]) -> bool {
+    let Ok(guard) = PATCHED.lock() else { return false };
+    let Some(map) = guard.as_ref() else { return false };
+    let Some(list) = map.get(&item) else { return false };
+    if list.is_empty() {
+        return false;
+    }
+    let same = wanted.iter().all(|w| list.iter().any(|(_, bytes)| bytes == w));
+    same && list.iter().all(|(addr, bytes)| matches!(read_bytes(*addr, bytes.len()), Some(b) if &b == bytes))
+}
+
+pub fn patch_item_struct(
+    guid: &[u8; 16],
+    item_id: u32,
+    blocks: &[(usize, Vec<u8>, Vec<Vec<u8>>)],
+    regions: &[(usize, usize)],
+) -> (Vec<(usize, Vec<u8>)>, String) {
+    let hits = scan_regions(regions, guid, 256);
+    let mut done: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut notes = format!("{} guid hits", hits.len());
+    let mut seen: HashSet<usize> = HashSet::new();
+    for h in hits {
+        if h < 0x10000 {
+            continue;
+        }
+        let base = h - 4;
+        let Some(head) = read_bytes(base, 4) else { continue };
+        if head.len() < 4 || u32_at(&head, 0) != item_id {
+            continue;
+        }
+        let span = read_window(base, ITEM_INFO_SPAN);
+        for (offset, new, olds) in blocks {
+            if new.is_empty() || span.len() < offset + new.len() {
+                notes.push_str("; struct too short");
+                continue;
+            }
+            let current = &span[*offset..*offset + new.len()];
+            let mut target: Option<usize> = None;
+            if current == &new[..] || olds.iter().any(|o| o.len() == new.len() && o == current) {
+                target = Some(base + offset);
+            } else {
+                for old in olds {
+                    if old.len() != new.len() || old.len() < 16 || old.iter().all(|b| *b == 0) {
+                        continue;
+                    }
+                    let mut found: Vec<usize> = Vec::new();
+                    let mut i = 0usize;
+                    while i + old.len() <= span.len() {
+                        if span[i..i + old.len()] == old[..] {
+                            found.push(i);
+                        }
+                        i += 4;
+                    }
+                    if found.len() == 1 {
+                        notes.push_str(&format!("; block found at +{} instead of +{}", found[0], offset));
+                        target = Some(base + found[0]);
+                        break;
+                    }
+                }
+            }
+            match target {
+                Some(addr) => {
+                    if !seen.insert(addr) {
+                        continue;
+                    }
+                    let ok = read_bytes(addr, new.len()).map(|b| b == *new).unwrap_or(false) || (write_anywhere(addr, new) && read_bytes(addr, new.len()).map(|b| b == *new).unwrap_or(false));
+                    if ok {
+                        done.push((addr, new.clone()));
+                    } else {
+                        notes.push_str("; write refused");
+                    }
+                }
+                None => notes.push_str(&format!("; layout differs at +{} (found {})", offset, hex(&current[..current.len().min(16)]))),
+            }
+        }
+    }
+    (done, notes)
+}
+
+fn apply_stats_patch(item: u32, guid: &[u8; 16], stats: &StatsPatch) {
+    let mut blocks: Vec<(usize, Vec<u8>, Vec<Vec<u8>>)> = Vec::new();
+    let dmg_new = hex_to_bytes(&stats.dmg_new);
+    if dmg_new.len() == 60 {
+        blocks.push((ITEM_DAMAGE_OFFSET, dmg_new, stats.dmg_old.iter().map(|s| hex_to_bytes(s)).filter(|v| v.len() == 60).collect()));
+    }
+    let arm_new = hex_to_bytes(&stats.arm_new);
+    if arm_new.len() == 36 {
+        blocks.push((ITEM_ARMOR_OFFSET, arm_new, stats.arm_old.iter().map(|s| hex_to_bytes(s)).filter(|v| v.len() == 36).collect()));
+    }
+    let lvl_new = hex_to_bytes(&stats.lvl_new);
+    if lvl_new.len() == 8 {
+        blocks.push((ITEM_LEVEL_OFFSET, lvl_new, stats.lvl_old.iter().map(|s| hex_to_bytes(s)).filter(|v| v.len() == 8).collect()));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+    let wanted: Vec<Vec<u8>> = blocks.iter().map(|b| b.1.clone()).collect();
+    if patched_still_holds(item, &wanted) {
+        log(&format!("item stats {}: already applied", item));
+        return;
+    }
+    let started = Instant::now();
+    let regions = readable_regions();
+    let (done, notes) = patch_item_struct(guid, item, &blocks, &regions);
+    log(&format!(
+        "item stats {}: patched {} block(s) ({notes}) in {} ms over {} regions",
+        item,
+        done.len(),
+        started.elapsed().as_millis(),
+        regions.len()
+    ));
+    if !done.is_empty() {
+        if let Ok(mut guard) = PATCHED.lock() {
+            let list = guard.get_or_insert_with(HashMap::new).entry(item).or_default();
+            for (addr, bytes) in done {
+                match list.iter_mut().find(|(a, _)| *a == addr) {
+                    Some(slot) => slot.1 = bytes,
+                    None => list.push((addr, bytes)),
+                }
+            }
+        }
+    }
+}
+
+const FACE_AXES: [[f64; 3]; 4] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]];
+const FACE_NAMES: [&str; 4] = ["+Z", "-Z", "+X", "-X"];
+
+fn rotate(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+    let u = [q[0], q[1], q[2]];
+    let t = [
+        2.0 * (u[1] * v[2] - u[2] * v[1]),
+        2.0 * (u[2] * v[0] - u[0] * v[2]),
+        2.0 * (u[0] * v[1] - u[1] * v[0]),
+    ];
+    let c = [u[1] * t[2] - u[2] * t[1], u[2] * t[0] - u[0] * t[2], u[0] * t[1] - u[1] * t[0]];
+    [v[0] + q[3] * t[0] + c[0], v[1] + q[3] * t[1] + c[1], v[2] + q[3] * t[2] + c[2]]
+}
+
+fn quat_of(t: &[u8]) -> [f64; 4] {
+    let f = |o: usize| f32::from_le_bytes([t[o], t[o + 1], t[o + 2], t[o + 3]]) as f64;
+    [f(24), f(28), f(32), f(36)]
+}
+
+fn horizontal(v: [f64; 3]) -> Option<(f64, f64)> {
+    let len = (v[0] * v[0] + v[2] * v[2]).sqrt();
+    if len < 1.0e-3 || !len.is_finite() {
+        None
+    } else {
+        Some((v[0] / len, v[2] / len))
+    }
+}
+
+pub fn facing_update(prev: (i64, i64, i64), cur: (i64, i64, i64), transform: &[u8]) {
+    if transform.len() < TRANSFORM_SIZE {
+        return;
+    }
+    let dx = (cur.0 - prev.0) as f64 / METERS;
+    let dz = (cur.2 - prev.2) as f64 / METERS;
+    let dist = (dx * dx + dz * dz).sqrt();
+    if !(2.0..=40.0).contains(&dist) {
+        return;
+    }
+    let movement = (dx / dist, dz / dist);
+    let q = quat_of(transform);
+    let Ok(mut scores) = FACE_SCORES.lock() else { return };
+    for (i, axis) in FACE_AXES.iter().enumerate() {
+        if let Some(d) = horizontal(rotate(q, *axis)) {
+            scores[i] += d.0 * movement.0 + d.1 * movement.1;
+        }
+    }
+    let samples = FACE_SAMPLES.fetch_add(1, Ordering::SeqCst) + 1;
+    let best = (0..4).max_by(|a, b| scores[*a].partial_cmp(&scores[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
+    if samples >= 3 && FACE_CHOSEN.swap(best as u32, Ordering::SeqCst) != best as u32 {
+        log(&format!("facing axis {} (samples={samples})", FACE_NAMES[best]));
+    }
+}
+
+pub fn facing_direction(transform: &[u8]) -> (f64, f64) {
+    if transform.len() < TRANSFORM_SIZE {
+        return (0.0, 1.0);
+    }
+    let axis = FACE_AXES[(FACE_CHOSEN.load(Ordering::SeqCst) as usize).min(3)];
+    horizontal(rotate(quat_of(transform), axis)).unwrap_or((0.0, 1.0))
+}
+
+pub fn write_position(pos: (i64, i64, i64)) {
+    let Ok(dir) = std::env::current_dir() else { return };
+    let text = format!(
+        "{{\"x\":{:.2},\"y\":{:.2},\"z\":{:.2}}}",
+        pos.0 as f64 / METERS,
+        pos.1 as f64 / METERS,
+        pos.2 as f64 / METERS
+    );
+    let tmp = dir.join("m182_player.json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("m182_player.json"));
+    }
+}
+
+fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
+    if manager == 0 {
+        return None;
+    }
+    let head = read_bytes(manager + 0x148, 0x58)?;
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return None;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let bitmap = read_bytes(u64_at(&head, 8) as usize, words * 8)?;
+    let keys = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4)?;
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 {
+        return None;
+    }
+    let mut out = HashSet::new();
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 1 {
+            out.insert(u32_at(&keys, slot * 4));
+        }
+    }
+    Some(out)
+}
+
+static CENSUS: Mutex<Option<(HashSet<u32>, HashSet<u32>)>> = Mutex::new(None);
+
+pub fn census() {
+    let server = SERVER_MGR.load(Ordering::SeqCst);
+    let client = CLIENT_MGR.load(Ordering::SeqCst);
+    let now = (entity_ids(server).unwrap_or_default(), entity_ids(client).unwrap_or_default());
+    let Ok(mut saved) = CENSUS.lock() else { return };
+    let Some(before) = saved.take() else {
+        log(&format!("census saved: {} server and {} client entities. Do your action, then press the key again.", now.0.len(), now.1.len()));
+        *saved = Some(now);
+        return;
+    };
+    drop(saved);
+    for (label, manager, old, new) in [("server", server, &before.0, &now.0), ("client", client, &before.1, &now.1)] {
+        let mut added: Vec<u32> = new.difference(old).copied().collect();
+        let mut removed: Vec<u32> = old.difference(new).copied().collect();
+        added.sort_unstable();
+        removed.sort_unstable();
+        log(&format!("census {label}: {} new, {} removed", added.len(), removed.len()));
+        log(&format!("census {label} removed ids: {:?}", &removed[..removed.len().min(40)]));
+        log(&format!("census {label} new ids: {:?}", &added[..added.len().min(40)]));
+        for id in added.iter().take(12) {
+            dump_entity(&format!("census new {label}"), manager, *id);
+        }
+    }
+}
+
+fn le_i64(b: &[u8], off: usize) -> i64 {
+    u64_at(b, off) as i64
+}
+
+fn is_server(manager: usize) -> bool {
+    matches!(read_bytes(manager + 8, 1), Some(b) if b[0] == 0)
+}
+
+fn bit_set(def: usize, index: usize) -> bool {
+    match read_bytes(def + (index >> 6) * 8, 8) {
+        Some(b) => (u64_at(&b, 0) >> (index & 63)) & 1 == 1,
+        None => false,
+    }
+}
+
+fn hash_slot(id: u32, capacity: u64) -> u64 {
+    let mut a = (id >> 16) ^ id;
+    a = a.wrapping_mul(0x045d_9f3b);
+    let mut b = (a >> 16) ^ a;
+    b = b.wrapping_mul(0x045d_9f3b);
+    ((b as u64 >> 16) ^ b as u64) & capacity.wrapping_sub(1)
+}
+
+fn find_record(manager: usize, id: u32) -> Option<usize> {
+    let map = manager + 0x148;
+    let head = read_bytes(map, 0x58)?;
+    let capacity = u64_at(&head, 0x10);
+    let count = u32_at(&head, 0x54);
+    if count == 0 || capacity == 0 || capacity > (1 << 26) || capacity & (capacity - 1) != 0 {
+        return None;
+    }
+    let bitmap = u64_at(&head, 8) as usize;
+    let keys = u64_at(&head, 0x28) as usize;
+    let values = u64_at(&head, 0x40) as usize;
+
+    let mut slot = hash_slot(id, capacity);
+    for _ in 0..capacity.min(4096) {
+        let word = read_bytes(bitmap + (slot as usize >> 6) * 8, 8)?;
+        if (u64_at(&word, 0) >> (slot & 63)) & 1 == 0 {
+            return None;
+        }
+        let key = read_bytes(keys + slot as usize * 4, 4)?;
+        if u32_at(&key, 0) == id {
+            let value = read_bytes(values + slot as usize * 8, 8)?;
+            let record = u64_at(&value, 0) as usize;
+            if record == 0 {
+                return None;
+            }
+            let check = read_bytes(record + 0x10, 4)?;
+            return if u32_at(&check, 0) == id { Some(record) } else { None };
+        }
+        slot = if slot + 1 < capacity { slot + 1 } else { 0 };
+    }
+    None
+}
+
+struct Placement {
+    def: usize,
+    chunk: usize,
+    slot: usize,
+}
+
+fn placement(record: usize) -> Option<Placement> {
+    let b = read_bytes(record, 0x38)?;
+    let def = u64_at(&b, 0x18) as usize;
+    let chunk = u64_at(&b, 0x20) as usize;
+    let slot = u32_at(&b, 0x30) as usize;
+    if def < 0x10000 || chunk < 0x10000 {
+        return None;
+    }
+    Some(Placement { def, chunk, slot })
+}
+
+fn component_address(p: &Placement, index: usize) -> Option<(usize, usize)> {
+    if index >= COMPONENT_SLOTS || !bit_set(p.def, index) {
+        return None;
+    }
+    let offset = read_bytes(p.def + 0x84 + index * 2, 2)?;
+    let stride = read_bytes(p.def + 0xa84 + index * 2, 2)?;
+    let offset = u16::from_le_bytes([offset[0], offset[1]]) as usize;
+    let stride = u16::from_le_bytes([stride[0], stride[1]]) as usize;
+    Some((p.chunk + offset + stride * p.slot, stride))
+}
+
+fn calibrate(manager: usize, id: u32, expected: &[u8]) -> bool {
+    let Some(record) = find_record(manager, id) else {
+        dump_failure(manager, id, None, "record lookup failed");
+        return false;
+    };
+    let Some(p) = placement(record) else {
+        dump_failure(manager, id, Some(record), "record fields unreadable");
+        return false;
+    };
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != TRANSFORM_SIZE {
+            continue;
+        }
+        if let Some(b) = read_bytes(addr, 24) {
+            if b == expected {
+                TRANSFORM_INDEX.store(index as i32, Ordering::SeqCst);
+                log(&format!("transform component found: index={index} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+                return true;
+            }
+        }
+    }
+    dump_failure(manager, id, Some(record), "no 56-byte component matched");
+    false
+}
+
+fn dump_failure(manager: usize, id: u32, record: Option<usize>, why: &str) {
+    if CALIBRATION_DUMPS.fetch_add(1, Ordering::Relaxed) >= 3 {
+        return;
+    }
+    let mut text = format!("calibration failed ({why}) id={id} mgr={manager:#x}");
+    if let Some(r) = record {
+        if let Some(b) = read_bytes(r, 0x60) {
+            text.push_str(&format!(" record={r:#x} bytes={}", hex(&b)));
+            let def = u64_at(&b, 0x18) as usize;
+            if let Some(d) = read_bytes(def, 0x90) {
+                text.push_str(&format!(" def={def:#x} defbytes={}", hex(&d)));
+            }
+        }
+    }
+    log(&text);
+}
+
+fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
+    let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    if index < 0 || id == 0 || manager == 0 {
+        return None;
+    }
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let (addr, stride) = component_address(&p, index as usize)?;
+    if stride != TRANSFORM_SIZE {
+        return None;
+    }
+    read_bytes(addr, TRANSFORM_SIZE)
+}
+
+fn player_transform() -> Option<Vec<u8>> {
+    transform_of(SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))
+}
+
+fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Option<Vec<u8>> {
+    for i in 0..count {
+        if u32_at(entries, i * 24) == hash {
+            let data = u64_at(entries, i * 24 + 8) as usize;
+            let len = u64_at(entries, i * 24 + 16) as usize;
+            if len >= size {
+                return read_bytes(data, size);
+            }
+        }
+    }
+    None
+}
+
+pub fn before(manager: usize, edx: u32) {
+    if PENDING.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
+        return;
+    }
+    if PENDING.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return;
+    }
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    spawn_now(manager);
+    BUSY.store(false, Ordering::SeqCst);
+}
+
+fn calibration_done() -> bool {
+    TRANSFORM_INDEX.load(Ordering::Relaxed) >= 0 || CALIBRATION_TRIES.load(Ordering::Relaxed) >= MAX_CALIBRATION_TRIES
+}
+
+pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
+    if ret == 0 {
+        return;
+    }
+    let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
+    if settled && edx != 1 {
+        return;
+    }
+    let server = is_server(manager);
+
+    let Some(head) = read_bytes(desc, 0x30) else { return };
+    if head.len() < 0x30 {
+        return;
+    }
+    if !server {
+        if edx == 1 && head[4..20] == GUID_PLAYER {
+            CLIENT_MGR.store(manager, Ordering::SeqCst);
+            CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
+            log(&format!("client player entity id={ret} mgr={manager:#x}"));
+        }
+        return;
+    }
+    if head[4..20] == GUID_PLAYER && edx == 1 {
+        let current = PLAYER_ID.load(Ordering::SeqCst);
+        let previous_manager = SERVER_MGR.load(Ordering::SeqCst);
+        let primary = current == 0
+            || current == ret
+            || previous_manager != manager
+            || find_record(manager, current).is_none();
+        if primary {
+            PLAYER_ID.store(ret, Ordering::SeqCst);
+            SERVER_MGR.store(manager, Ordering::SeqCst);
+        }
+        track_player(manager, ret);
+        log(&format!("player entity id={ret} mgr={manager:#x} primary={primary}"));
+    }
+    if settled {
+        return;
+    }
+
+    let _ = SERVER_MGR.compare_exchange(0, manager, Ordering::SeqCst, Ordering::SeqCst);
+    if TRANSFORM_INDEX.load(Ordering::Relaxed) >= 0 || edx >= 0x8000_0000 || SERVER_MGR.load(Ordering::SeqCst) != manager {
+        return;
+    }
+    if CALIBRATION_TRIES.fetch_add(1, Ordering::Relaxed) >= MAX_CALIBRATION_TRIES {
+        return;
+    }
+    let array = u64_at(&head, 0x18) as usize;
+    let count = (u64_at(&head, 0x20) as usize).min(96);
+    let Some(entries) = read_bytes(array, count * 24) else { return };
+    let count = entries.len() / 24;
+    if let Some(expected) = component_data(&entries, count, HASH_CURRENT_TRANSFORM, TRANSFORM_SIZE) {
+        if let Some(first) = expected.get(..24) {
+            calibrate(manager, ret, first);
+        }
+    }
+}
+
+pub fn resolve_template(text: &str) -> Option<[u8; 16]> {
+    if let Some(guid) = super::config::parse_guid(text) {
+        return Some(guid);
+    }
+    let path = std::env::current_dir().ok()?.join("export").join("m182_enemies.csv");
+    let content = std::fs::read_to_string(path).ok()?;
+    let wanted = text.trim();
+    for line in content.lines().skip(1) {
+        let mut parts = line.split(',');
+        let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
+        if name.eq_ignore_ascii_case(wanted) {
+            return super::config::parse_guid(guid);
+        }
+    }
+    None
+}
+
+#[repr(C, align(16))]
+struct Block([u8; 0x100]);
+
+fn write_u32(b: &mut [u8], off: usize, v: u32) {
+    b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+fn write_u64(b: &mut [u8], off: usize, v: u64) {
+    b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+fn spawn_now(manager: usize) {
+    let tag = SPAWN_TAG.lock().ok().and_then(|mut t| t.take());
+    let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
+    let settings = match requested {
+        Some(s) => s,
+        None => match SPAWN.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => return,
+        },
+    };
+    let Some(template) = resolve_template(&settings.template) else {
+        log(&format!("spawn skipped: \"{}\" is not a known template name or id", settings.template));
+        return;
+    };
+    let Some(t) = player_transform() else {
+        log(&format!(
+            "spawn skipped: player position not available (player id={}, transform index={}, tries={})",
+            PLAYER_ID.load(Ordering::Relaxed),
+            TRANSFORM_INDEX.load(Ordering::Relaxed),
+            CALIBRATION_TRIES.load(Ordering::Relaxed)
+        ));
+        return;
+    };
+    let at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
+    let mut base = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+    if let Some(p) = at {
+        base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
+    }
+    let give = REQUEST_GIVE.lock().ok().and_then(|mut g| g.take());
+    let delivery = give.is_some();
+    let mut settings = settings;
+    if delivery {
+        settings.count = 1;
+    }
+    let object = REQUEST_OBJECT.swap(false, Ordering::SeqCst) || delivery;
+    let forward = REQUEST_FORWARD.swap(false, Ordering::SeqCst) && at.is_none() && !delivery;
+    let mut radius = if (at.is_some() || delivery) && settings.count == 1 { 0.0 } else { settings.distance as f64 };
+    if forward {
+        let (fx, fz) = facing_direction(&t);
+        base.0 = base.0.wrapping_add((fx * settings.distance as f64 * METERS) as i64);
+        base.2 = base.2.wrapping_add((fz * settings.distance as f64 * METERS) as i64);
+        radius = if settings.count == 1 { 0.0 } else { (settings.distance as f64).min(4.0) };
+    }
+    log(&format!(
+        "spawning {} ({}) x{} level {} near x={:.2} y={:.2} z={:.2}",
+        settings.template,
+        hex(&template),
+        settings.count,
+        settings.level,
+        base.0 as f64 / METERS,
+        base.1 as f64 / METERS,
+        base.2 as f64 / METERS
+    ));
+
+    for k in 0..settings.count {
+        let angle = std::f64::consts::TAU * k as f64 / settings.count as f64;
+        let dx = (radius * angle.cos() * METERS) as i64;
+        let dz = (radius * angle.sin() * METERS) as i64;
+        let dy = (0.5 * METERS) as i64;
+
+        let mut transform = [0u8; TRANSFORM_SIZE];
+        write_u64(&mut transform, 0, base.0.wrapping_add(dx) as u64);
+        write_u64(&mut transform, 8, base.1.wrapping_add(dy) as u64);
+        write_u64(&mut transform, 16, base.2.wrapping_add(dz) as u64);
+        transform[36..40].copy_from_slice(&1.0f32.to_le_bytes());
+        transform[40..44].copy_from_slice(&1.0f32.to_le_bytes());
+        transform[44..48].copy_from_slice(&1.0f32.to_le_bytes());
+        transform[48..52].copy_from_slice(&1.0f32.to_le_bytes());
+        let level = settings.level.to_le_bytes();
+
+        let mut entries = Block([0u8; 0x100]);
+        write_u32(&mut entries.0, 0, HASH_CURRENT_TRANSFORM);
+        write_u64(&mut entries.0, 8, transform.as_ptr() as u64);
+        write_u64(&mut entries.0, 16, TRANSFORM_SIZE as u64);
+        if !object {
+            write_u32(&mut entries.0, 24, HASH_OVERRIDE_LEVEL);
+            write_u64(&mut entries.0, 32, level.as_ptr() as u64);
+            write_u64(&mut entries.0, 40, 4);
+        }
+
+        let mut pickup = [0u8; PICKUP_ITEM_SIZE];
+        if let Some(g) = &give {
+            pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
+            pickup[4..20].copy_from_slice(&g.guid);
+            pickup[20..24].copy_from_slice(&g.level.to_le_bytes());
+            pickup[24] = g.rarity as u8;
+            pickup[26..28].copy_from_slice(&(g.amount as u16).to_le_bytes());
+            write_u32(&mut entries.0, 24, HASH_PICKUP_ITEM);
+            write_u64(&mut entries.0, 32, pickup.as_ptr() as u64);
+            write_u64(&mut entries.0, 40, PICKUP_ITEM_SIZE as u64);
+        }
+
+        let mut desc = Block([0u8; 0x100]);
+        desc.0[4..20].copy_from_slice(&template);
+        write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
+        write_u64(&mut desc.0, 0x20, if delivery { 2 } else if object { 1 } else { 2 });
+
+        let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
+        LAST_SPAWNED.store(id, Ordering::SeqCst);
+        log(&format!("create returned entity id={id}"));
+        if let Some(g) = give {
+            if id != 0 {
+                verify_pickup(manager, id, &g);
+            }
+        }
+        if id != 0 && !object {
+            start_stats(manager, id, settings.health, settings.damage);
+            if let Some(tag) = &tag {
+                if let Ok(mut created) = CREATED.lock() {
+                    created.push((tag.clone(), id));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct Powers {
+    god: bool,
+    stamina: bool,
+    fly: bool,
+    fly_speed: Option<f32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Command {
+    cmd: String,
+    at: Option<[Option<f64>; 3]>,
+    label: Option<String>,
+    guid: Option<String>,
+    item_id: Option<u32>,
+    stats: Option<StatsPatch>,
+    ground: Option<f64>,
+}
+
+#[derive(Clone, Default)]
+struct Saved {
+    susceptibility: Vec<u8>,
+    fall: Option<[u8; 8]>,
+    retries: u32,
+    seen: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TpStage {
+    Hold,
+    Fall,
+}
+
+struct Tp {
+    stage: TpStage,
+    x: i64,
+    y: i64,
+    z: i64,
+    until: Instant,
+    since: Instant,
+    last_y: i64,
+    last_change: Instant,
+    last_sample: Instant,
+}
+
+struct PowerState {
+    powers: Powers,
+    mtime: Option<std::time::SystemTime>,
+    hover: Option<i64>,
+    protect_until: Option<Instant>,
+    stamina_peak: u32,
+    mana_peak: u32,
+    heal_once: bool,
+    stamina_peak_c: u32,
+    mana_peak_c: u32,
+    last_fly: Option<Instant>,
+    last_written: Option<(i64, i64, i64)>,
+    gravity: [Option<usize>; 2],
+    gravity_saved: [u8; 2],
+    gravity_off: bool,
+    client_logged: bool,
+    groups: GroupState,
+    saved: HashMap<(usize, u32), Saved>,
+    zone_ids: Vec<u32>,
+    tp: Option<Tp>,
+    diag_left: u32,
+    diag_last: Option<Instant>,
+    spawners: SpawnerSet,
+}
+
+static RES_INDEX: [[AtomicI32; 6]; 2] = [
+    [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)],
+    [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)],
+];
+static FALL_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+static FALL_TRIES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+fn kind_of(manager: usize) -> usize {
+    let c = CLIENT_MGR.load(Ordering::Relaxed);
+    if c != 0 && manager == c { 1 } else { 0 }
+}
+
+fn resource(manager: usize, id: u32, which: usize, signature: u32) -> Option<(usize, Vec<u8>)> {
+    resource_sized(manager, id, which, signature, 40)
+}
+
+fn resource_sized(manager: usize, id: u32, which: usize, signature: u32, size: usize) -> Option<(usize, Vec<u8>)> {
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let kind = kind_of(manager);
+    let cached = RES_INDEX[kind][which].load(Ordering::Relaxed);
+    if cached >= 0 {
+        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+            if stride == size {
+                if let Some(b) = read_bytes(addr, size) {
+                    if b.len() >= size && u32_at(&b, 0) == signature {
+                        return Some((addr, b));
+                    }
+                }
+            }
+        }
+    }
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != size {
+            continue;
+        }
+        if let Some(b) = read_bytes(addr, size) {
+            if b.len() >= size && u32_at(&b, 0) == signature {
+                RES_INDEX[kind][which].store(index as i32, Ordering::Relaxed);
+                log(&format!("powers: resource {which} found at component {index} ({})", if kind == 1 { "client" } else { "server" }));
+                return Some((addr, b));
+            }
+        }
+    }
+    None
+}
+
+fn put_u32(addr: usize, value: u32) -> bool {
+    write_bytes(addr, &value.to_le_bytes())
+}
+
+pub fn refill_health(manager: usize, id: u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 0, HEALTH_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    let maximum = u32_at(&b, 36);
+    if maximum > 0 && current < maximum {
+        return put_u32(addr + 8, maximum);
+    }
+    true
+}
+
+pub fn refill_stamina(manager: usize, id: u32, peak: &mut u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 1, STAMINA_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    if current > *peak && current < 1_000_000 {
+        *peak = current;
+    }
+    let target = *peak;
+    if target > 0 && (current != target || u32_at(&b, 16) != target) {
+        put_u32(addr + 8, target);
+        put_u32(addr + 16, target);
+    }
+    // the bar on screen reads the replicated copy: keep it full too, and learn the real maximum from it
+    if let Some((net, cur, max)) = net_stamina(manager, id, current.max(target)) {
+        if max as u32 > *peak && max < 60_000 {
+            *peak = max as u32;
+        }
+        if cur != max && max > 0 {
+            write_bytes(net, &max.to_le_bytes());
+        }
+    }
+    true
+}
+
+pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
+    let Some((addr, b)) = resource(manager, id, 2, MANA_SIGNATURE) else { return false };
+    let current = u32_at(&b, 8);
+    let limit = u32_at(&b, 32);
+    if current > *peak && current < 1_000_000 {
+        *peak = current;
+    }
+    let target = (*peak).max(limit);
+    if target > 0 && current < target {
+        put_u32(addr + 8, target);
+        put_u32(addr + 12, target);
+    }
+    true
+}
+
+static NET_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+static NET_TRIES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+fn net_plausible(b: &[u8]) -> Option<(u16, u16)> {
+    if b.len() < 4 {
+        return None;
+    }
+    let cur = u16::from_le_bytes([b[0], b[1]]);
+    let max = u16::from_le_bytes([b[2], b[3]]);
+    if max >= 100 && cur <= max {
+        Some((cur, max))
+    } else {
+        None
+    }
+}
+
+/// Finds the replicated `NetworkStamina {stamina, staminaMax}` (two u16) of an entity: the 4-byte
+/// component whose first value follows the known stamina. Returns its address and both values.
+fn net_stamina(manager: usize, id: u32, known: u32) -> Option<(usize, u16, u16)> {
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let kind = kind_of(manager);
+    let cached = NET_INDEX[kind].load(Ordering::Relaxed);
+    if cached >= 0 {
+        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+            if stride == 4 {
+                if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
+                    return Some((addr, cur, max));
+                }
+            }
+        }
+    }
+    if NET_TRIES[kind].load(Ordering::Relaxed) >= 40 {
+        return None;
+    }
+    NET_TRIES[kind].fetch_add(1, Ordering::Relaxed);
+    let tolerance = (known / 10).max(40);
+    let mut found: Vec<(usize, usize, u16, u16)> = Vec::new();
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != 4 {
+            continue;
+        }
+        if let Some((cur, max)) = read_bytes(addr, 4).and_then(|b| net_plausible(&b)) {
+            if (cur as i64 - known as i64).unsigned_abs() as u32 <= tolerance && max as u32 + tolerance >= known {
+                found.push((index, addr, cur, max));
+            }
+        }
+    }
+    let &(index, addr, cur, max) = found.first()?;
+    NET_INDEX[kind].store(index as i32, Ordering::Relaxed);
+    log(&format!(
+        "stamina: NetworkStamina found at component {index} ({}) = {cur}/{max} ({} candidate(s))",
+        if kind == 1 { "client" } else { "server" },
+        found.len()
+    ));
+    Some((addr, cur, max))
+}
+
+/// Keeps the on-screen stamina of the client copy of the player full.
+fn refill_client_stamina(manager: usize, id: u32, known: u32) -> Option<u32> {
+    let (net, cur, max) = net_stamina(manager, id, known)?;
+    if cur != max && max > 0 {
+        write_bytes(net, &max.to_le_bytes());
+    }
+    Some(max as u32)
+}
+
+fn find_fall(manager: usize, id: u32) -> Option<usize> {
+    let kind = kind_of(manager);
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    let cached = FALL_INDEX[kind].load(Ordering::Relaxed);
+    let matches = |addr: usize| -> bool {
+        matches!(read_bytes(addr, FALL_DAMAGE_SIZE), Some(b) if b.len() >= FALL_DAMAGE_SIZE && b[8..24] == FALL_SEQUENCE)
+    };
+    if cached >= 0 {
+        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+            if stride == FALL_DAMAGE_SIZE && matches(addr) {
+                return Some(addr);
+            }
+        }
+    }
+    if FALL_TRIES[kind].load(Ordering::Relaxed) >= 6 {
+        return None;
+    }
+    FALL_TRIES[kind].fetch_add(1, Ordering::Relaxed);
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride == FALL_DAMAGE_SIZE && matches(addr) {
+            FALL_INDEX[kind].store(index as i32, Ordering::Relaxed);
+            log(&format!("shield: fall damage found at component {index} ({})", if kind == 1 { "client" } else { "server" }));
+            return Some(addr);
+        }
+    }
+    None
+}
+
+static LAST_GOOD_SUSCEPTIBILITY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+const SHIELD_RETRIES: u32 = 600;
+
+/// Zeroes the damage susceptibility (and lifts the fall damage limit) of one entity.
+/// The original values are stored exactly once, the first time they are seen, and are never
+/// overwritten afterwards: whatever the game writes in between must not become the "original".
+fn shield_on(st: &mut PowerState, manager: usize, id: u32) {
+    let key = (manager, id);
+    if let Some((addr, b)) = resource_sized(manager, id, 3, SUSCEPTIBILITY_SIGNATURE, SUSCEPTIBILITY_SIZE) {
+        let data = &b[8..SUSCEPTIBILITY_SIZE];
+        let zero = data.iter().all(|v| *v == 0);
+        let known = st.saved.get(&key).map(|e| e.seen).unwrap_or(false);
+        if !known {
+            if !zero {
+                if let Ok(mut last) = LAST_GOOD_SUSCEPTIBILITY.lock() {
+                    *last = data.to_vec();
+                }
+                log(&format!("shield: entity {id} original susceptibility {}", hex(data)));
+                let entry = st.saved.entry(key).or_default();
+                entry.susceptibility = data.to_vec();
+                entry.seen = true;
+            } else {
+                // already zero and never seen otherwise: borrow the last healthy values for the way back
+                let guess = LAST_GOOD_SUSCEPTIBILITY.lock().map(|l| l.clone()).unwrap_or_default();
+                log(&format!("shield: entity {id} susceptibility was already zero (fallback {} bytes)", guess.len()));
+                let entry = st.saved.entry(key).or_default();
+                entry.susceptibility = guess;
+                entry.seen = true;
+            }
+        }
+        if !zero {
+            write_bytes(addr + 8, &[0u8; SUSCEPTIBILITY_SIZE - 8]);
+        }
+        st.saved.entry(key).or_default();
+    }
+    if let Some(addr) = find_fall(manager, id) {
+        if let Some(b) = read_bytes(addr, 8) {
+            if b.len() >= 8 {
+                let start = f32_at(&b, 0);
+                let entry = st.saved.entry(key).or_default();
+                if start < FALL_UNLIMITED * 0.5 {
+                    if entry.fall.is_none() {
+                        entry.fall = Some([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                    }
+                    let mut huge = [0u8; 8];
+                    huge[0..4].copy_from_slice(&FALL_UNLIMITED.to_le_bytes());
+                    huge[4..8].copy_from_slice(&FALL_UNLIMITED.to_le_bytes());
+                    write_bytes(addr, &huge);
+                }
+            }
+        }
+    }
+}
+
+/// Gives the saved originals back, value by value, and checks the result. The entry is only dropped
+/// once everything is verified (or after many tries), so a failed write is retried on the next tick.
+fn shield_off(st: &mut PowerState, manager: usize, id: u32) {
+    let key = (manager, id);
+    let Some(saved) = st.saved.get(&key).cloned() else { return };
+    let mut done = true;
+    if !saved.susceptibility.is_empty() {
+        match resource_sized(manager, id, 3, SUSCEPTIBILITY_SIGNATURE, SUSCEPTIBILITY_SIZE) {
+            Some((addr, b)) => {
+                if b[8..SUSCEPTIBILITY_SIZE] != saved.susceptibility[..] {
+                    write_bytes(addr + 8, &saved.susceptibility);
+                    let ok = read_bytes(addr + 8, saved.susceptibility.len()).map(|r| r == saved.susceptibility).unwrap_or(false);
+                    done &= ok;
+                }
+            }
+            None => done = false,
+        }
+    }
+    if let Some(original) = saved.fall {
+        match find_fall(manager, id) {
+            Some(addr) => {
+                if let Some(b) = read_bytes(addr, 8) {
+                    if b.len() >= 8 && b[..8] != original {
+                        write_bytes(addr, &original);
+                        done &= read_bytes(addr, 8).map(|r| r[..8] == original).unwrap_or(false);
+                    }
+                }
+            }
+            None => done = false,
+        }
+    }
+    if done {
+        st.saved.remove(&key);
+        log(&format!("shield: entity {id} restored"));
+    } else if let Some(entry) = st.saved.get_mut(&key) {
+        entry.retries += 1;
+        if entry.retries >= SHIELD_RETRIES {
+            st.saved.remove(&key);
+            log(&format!("shield: entity {id} could not be restored, giving up"));
+        }
+    }
+}
+
+fn shield_tick(st: &mut PowerState, want: &[(usize, u32)]) {
+    for &(manager, id) in want {
+        shield_on(st, manager, id);
+        refill_health(manager, id);
+    }
+    let stale: Vec<(usize, u32)> = st.saved.keys().filter(|k| !want.contains(k)).cloned().collect();
+    for (manager, id) in stale {
+        shield_off(st, manager, id);
+    }
+}
+
+fn transform_slots(manager: usize, id: u32, old: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some((_, p, slots)) = entity_layout(manager, id) else { return out };
+    let _ = p;
+    for slot in &slots {
+        if slot.stride >= TRANSFORM_SIZE && slot.stride <= 128 {
+            if let Some(b) = read_bytes(slot.addr, 24) {
+                if b.len() >= 24 && b[..24] == old[..24] {
+                    out.push(slot.addr);
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn set_player_position(manager: usize, id: u32, pos: [Option<i64>; 3]) -> bool {
+    if manager == 0 || id == 0 {
+        return false;
+    }
+    let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    if index < 0 {
+        return false;
+    }
+    let Some(record) = find_record(manager, id) else { return false };
+    let Some(p) = placement(record) else { return false };
+    let Some((main, stride)) = component_address(&p, index as usize) else { return false };
+    if stride != TRANSFORM_SIZE {
+        return false;
+    }
+    let Some(old) = read_bytes(main, TRANSFORM_SIZE) else { return false };
+    if old.len() < TRANSFORM_SIZE {
+        return false;
+    }
+    let addrs = transform_slots(manager, id, &old);
+    let mut ok = false;
+    for addr in addrs {
+        for (axis, value) in pos.iter().enumerate() {
+            if let Some(v) = value {
+                ok |= write_bytes(addr + axis * 8, &v.to_le_bytes());
+            }
+        }
+    }
+    ok
+}
+
+fn metres(v: f64) -> i64 {
+    (v * METERS) as i64
+}
+
+fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
+    let path = dir.join(POWERS_FILE);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if mtime == st.mtime {
+        return;
+    }
+    st.mtime = mtime;
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    match serde_json::from_str::<Powers>(&text) {
+        Ok(p) => {
+            if st.powers.fly && !p.fly {
+                st.protect_until = Some(Instant::now() + Duration::from_secs(8));
+                st.hover = None;
+            }
+            log(&format!(
+                "powers: god={} stamina={} fly={}",
+                p.god, p.stamina, p.fly
+            ));
+            st.powers = p;
+        }
+        Err(e) => log(&format!("powers: invalid file ({e})")),
+    }
+}
+
+fn run_command(st: &mut PowerState, dir: &std::path::Path) {
+    let path = dir.join(COMMAND_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let Ok(cmd) = serde_json::from_str::<Command>(&text) else {
+        log("command ignored: invalid file");
+        return;
+    };
+    let name = cmd.cmd.clone();
+    match name.as_str() {
+        "heal" => {
+            st.heal_once = true;
+            log("command: heal");
+        }
+        "teleport" => {
+            let manager = SERVER_MGR.load(Ordering::SeqCst);
+            let id = PLAYER_ID.load(Ordering::SeqCst);
+            let Some(at) = cmd.at else {
+                log("command teleport: missing destination");
+                return;
+            };
+            let finite = |v: Option<f64>| v.filter(|x| x.is_finite() && x.abs() < 1.0e6);
+            let (Some(x), Some(z)) = (finite(at[0]), finite(at[2])) else {
+                log("command teleport: invalid destination");
+                return;
+            };
+            let current_y = player_transform().map(|t| le_i64(&t, 8)).unwrap_or(0);
+            let known = finite(at[1]);
+            let hint = finite(cmd.ground);
+            let y = match known {
+                Some(y) => metres(y + 1.0),
+                None => {
+                    let base = current_y.saturating_add(metres(150.0));
+                    match hint {
+                        Some(g) => base.max(metres(g + 120.0)),
+                        None => base,
+                    }
+                }
+            };
+            let ok = set_player_position(manager, id, [Some(metres(x)), Some(y), Some(metres(z))]);
+            if let Some(t) = player_transform() {
+                set_client_position(&t, [Some(metres(x)), Some(y), Some(metres(z))]);
+            }
+            log(&format!(
+                "command: teleport to x={x:.1} y={:.1} z={z:.1} (written={ok}, height_known={})",
+                y as f64 / METERS,
+                known.is_some()
+            ));
+            st.hover = None;
+            st.last_written = None;
+            let now = Instant::now();
+            if known.is_none() && !st.powers.fly {
+                set_gravity(st, false);
+                st.gravity_off = true;
+                st.tp = Some(Tp {
+                    stage: TpStage::Hold,
+                    x: metres(x),
+                    y,
+                    z: metres(z),
+                    until: now + Duration::from_secs(4),
+                    since: now,
+                    last_y: y,
+                    last_change: now,
+                    last_sample: now,
+                });
+            } else {
+                st.tp = None;
+            }
+            st.protect_until = Some(now + Duration::from_secs(8));
+            let verify = std::thread::Builder::new().name("m182-teleport-check".into()).spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                if let Some(t) = player_transform() {
+                    log(&format!(
+                        "teleport check: player now at x={:.1} y={:.1} z={:.1}",
+                        le_i64(&t, 0) as f64 / METERS,
+                        le_i64(&t, 8) as f64 / METERS,
+                        le_i64(&t, 16) as f64 / METERS
+                    ));
+                }
+            });
+            let _ = verify;
+        }
+        "item_stats" => {
+            if let Err(e) = std::thread::Builder::new().name("m182-item-stats".into()).spawn(move || run_item_stats(cmd)) {
+                log(&format!("item stats: could not start worker: {e}"));
+            }
+        }
+        other => log(&format!("command ignored: unknown command \"{other}\"")),
+    }
+}
+
+struct Tracked {
+    id: u32,
+    number: u32,
+    misses: u8,
+}
+
+static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
+static TRACKED_MGR: AtomicUsize = AtomicUsize::new(0);
+static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
+
+fn track_player(manager: usize, id: u32) {
+    let Ok(mut list) = TRACKED.lock() else { return };
+    if TRACKED_MGR.swap(manager, Ordering::SeqCst) != manager {
+        list.clear();
+        NEXT_NUMBER.store(1, Ordering::SeqCst);
+    }
+    if list.iter().any(|p| p.id == id) {
+        return;
+    }
+    let number = NEXT_NUMBER.fetch_add(1, Ordering::SeqCst);
+    list.push(Tracked { id, number, misses: 0 });
+    log(&format!("players: entity {id} is player {number}"));
+}
+
+struct GroupState {
+    zones: Vec<groups::Zone>,
+    teams: Vec<Vec<u32>>,
+    zones_mtime: Option<std::time::SystemTime>,
+    teams_mtime: Option<std::time::SystemTime>,
+    last_fast: Option<Instant>,
+    last_slow: Option<Instant>,
+}
+
+impl GroupState {
+    fn new() -> Self {
+        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, last_fast: None, last_slow: None }
+    }
+}
+
+fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return out };
+    for slot in &slots {
+        if slot.stride != 1 {
+            continue;
+        }
+        if let Some(b) = read_bytes(slot.addr, 1) {
+            if b.first() == Some(&super::faction::PLAYER) {
+                out.push(slot.addr);
+            }
+        }
+    }
+    out
+}
+
+fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
+    let now = Instant::now();
+    if st.groups.last_fast.map(|t| now.duration_since(t) < Duration::from_millis(200)).unwrap_or(false) {
+        return;
+    }
+    st.groups.last_fast = Some(now);
+
+    let zones_path = dir.join(groups::ZONES_FILE);
+    let zones_mtime = std::fs::metadata(&zones_path).and_then(|m| m.modified()).ok();
+    if zones_mtime != st.groups.zones_mtime {
+        st.groups.zones_mtime = zones_mtime;
+        st.groups.zones = std::fs::read_to_string(&zones_path).map(|t| groups::parse_zones(&t)).unwrap_or_default();
+        log(&format!("zones: {} active", st.groups.zones.len()));
+    }
+    let teams_path = dir.join(groups::TEAMS_FILE);
+    let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
+    if teams_mtime != st.groups.teams_mtime {
+        st.groups.teams_mtime = teams_mtime;
+        st.groups.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_teams(&t)).unwrap_or_default();
+        log(&format!("teams: {} defined", st.groups.teams.len()));
+    }
+
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    if manager == 0 {
+        st.zone_ids.clear();
+        return;
+    }
+    let players: Vec<(u32, u32)> = match TRACKED.lock() {
+        Ok(list) => list.iter().map(|p| (p.id, p.number)).collect(),
+        Err(_) => return,
+    };
+    let me = PLAYER_ID.load(Ordering::SeqCst);
+
+    let mut rows = Vec::new();
+    let mut map: Vec<(usize, u8)> = Vec::new();
+    let mut dead: Vec<u32> = Vec::new();
+    let mut inside_ids: Vec<u32> = Vec::new();
+    for (id, number) in &players {
+        match transform_of(manager, *id) {
+            Some(t) => {
+                let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
+                rows.push(format!("{{\"n\":{},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1},\"me\":{}}}", number, x, y, z, *id == me));
+                if !st.groups.zones.is_empty() && groups::inside(&st.groups.zones, x, z) {
+                    inside_ids.push(*id);
+                }
+                let team = groups::team_of_player(&st.groups.teams, *number);
+                if team != 0 {
+                    for addr in faction_addresses(manager, *id) {
+                        map.push((addr, team));
+                    }
+                }
+            }
+            None => {
+                if find_record(manager, *id).is_none() {
+                    dead.push(*id);
+                }
+            }
+        }
+    }
+    if st.zone_ids != inside_ids {
+        log(&format!("zones: {} player(s) inside", inside_ids.len()));
+        st.zone_ids = inside_ids;
+    }
+    groups::set_team_map(map);
+
+    if st.groups.last_slow.map(|t| now.duration_since(t) < Duration::from_millis(1000)).unwrap_or(false) {
+        return;
+    }
+    st.groups.last_slow = Some(now);
+    let _ = std::fs::write(dir.join(groups::PLAYERS_FILE), format!("[{}]", rows.join(",")));
+    if let Ok(mut list) = TRACKED.lock() {
+        for p in list.iter_mut() {
+            if dead.contains(&p.id) {
+                p.misses = p.misses.saturating_add(1);
+            } else {
+                p.misses = 0;
+            }
+        }
+        list.retain(|p| p.misses < 5);
+    }
+}
+
+fn record_trail(pos: (i64, i64, i64)) {
+    static LAST: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+    let x = pos.0 as f64 / METERS;
+    let z = pos.2 as f64 / METERS;
+    let Ok(mut last) = LAST.lock() else { return };
+    if let Some((lx, lz)) = *last {
+        if ((x - lx).powi(2) + (z - lz).powi(2)).sqrt() < 6.0 {
+            return;
+        }
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(TRAIL_FILE);
+    if std::fs::metadata(&path).map(|m| m.len() > 8_000_000).unwrap_or(false) {
+        return;
+    }
+    let fresh = !path.exists();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if fresh {
+            let _ = writeln!(f, "x,y,z");
+        }
+        let _ = writeln!(f, "{:.0},{:.0},{:.0}", x, pos.1 as f64 / METERS, z);
+        *last = Some((x, z));
+    }
+}
+
+fn key_down(vk: i32) -> bool {
+    let state = unsafe { GetAsyncKeyState(vk) };
+    state as u16 & 0x8000 != 0
+}
+
+fn client_pair() -> Option<(usize, u32)> {
+    let m = CLIENT_MGR.load(Ordering::SeqCst);
+    let id = CLIENT_PLAYER_ID.load(Ordering::SeqCst);
+    if m == 0 || id == 0 || m == SERVER_MGR.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some((m, id))
+    }
+}
+
+fn find_gravity(manager: usize, id: u32) -> Option<usize> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    for slot in &slots {
+        if slot.stride != 20 {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, 20) else { continue };
+        if b.len() < 20 {
+            continue;
+        }
+        let (dx, dy, dz, value) = (f32_at(&b, 0), f32_at(&b, 4), f32_at(&b, 8), f32_at(&b, 12));
+        if dy < -0.5 && dx.abs() < 0.3 && dz.abs() < 0.3 && value > 0.5 && value < 400.0 && b[16] <= 1 {
+            return Some(slot.addr);
+        }
+    }
+    None
+}
+
+fn set_gravity(st: &mut PowerState, active: bool) {
+    let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
+    if let Some((m, id)) = client_pair() {
+        pairs.push((1, m, id));
+    }
+    for (kind, manager, id) in pairs {
+        if manager == 0 || id == 0 {
+            continue;
+        }
+        if st.gravity[kind].is_none() {
+            st.gravity[kind] = find_gravity(manager, id);
+            if st.gravity[kind].is_none() {
+                continue;
+            }
+        }
+        let Some(addr) = st.gravity[kind] else { continue };
+        if active {
+            write_bytes(addr + 16, &[st.gravity_saved[kind]]);
+        } else {
+            if let Some(b) = read_bytes(addr + 16, 1) {
+                if b.first() == Some(&1) {
+                    st.gravity_saved[kind] = 1;
+                }
+            }
+            write_bytes(addr + 16, &[0]);
+        }
+    }
+    if !active {
+        log("fly: gravity switched off");
+    }
+}
+
+fn near(a: &[u8], b: &[u8], tolerance: i64) -> bool {
+    (0..3).all(|i| (le_i64(a, i * 8) - le_i64(b, i * 8)).abs() < tolerance)
+}
+
+fn set_client_position(old: &[u8], pos: [Option<i64>; 3]) -> usize {
+    let Some((manager, id)) = client_pair() else { return 0 };
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return 0 };
+    let mut count = 0;
+    for slot in &slots {
+        if slot.stride < TRANSFORM_SIZE || slot.stride > 128 {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, 24) else { continue };
+        if b.len() >= 24 && near(&b, old, metres(3.0)) {
+            for (axis, value) in pos.iter().enumerate() {
+                if let Some(v) = value {
+                    write_bytes(slot.addr + axis * 8, &v.to_le_bytes());
+                }
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
+fn diagnostics(st: &mut PowerState, manager: usize, id: u32, client: Option<(usize, u32)>) {
+    if st.diag_left == 0 {
+        return;
+    }
+    let now = Instant::now();
+    if st.diag_last.map(|t| now.duration_since(t) < Duration::from_secs(20)).unwrap_or(false) {
+        return;
+    }
+    st.diag_last = Some(now);
+    st.diag_left -= 1;
+    for (label, m, i) in [("server", manager, id)].into_iter().chain(client.map(|(m, i)| ("client", m, i))) {
+        let stamina = resource(m, i, 1, STAMINA_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
+        let heat = resource(m, i, 4, BODY_HEAT_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
+        log(&format!("diag {label}: stamina={stamina} heat={heat}"));
+        if let Some(p) = find_record(m, i).and_then(placement) {
+            let mut small = Vec::new();
+            for index in 0..COMPONENT_SLOTS {
+                if let Some((addr, 4)) = component_address(&p, index) {
+                    if let Some(b) = read_bytes(addr, 4) {
+                        small.push(format!("{index}:{}", hex(&b)));
+                    }
+                }
+            }
+            log(&format!("diag {label}: 4-byte components {}", small.join(" ")));
+        }
+    }
+}
+
+fn tp_step(st: &mut PowerState, manager: usize, id: u32) {
+    let Some(mut tp) = st.tp.take() else { return };
+    if st.powers.fly {
+        st.protect_until = Some(Instant::now() + Duration::from_secs(4));
+        return;
+    }
+    let now = Instant::now();
+    match tp.stage {
+        TpStage::Hold => {
+            if let Some(t) = player_transform() {
+                let pos = [Some(tp.x), Some(tp.y), Some(tp.z)];
+                set_player_position(manager, id, pos);
+                set_client_position(&t, pos);
+            }
+            if now >= tp.until {
+                set_gravity(st, true);
+                st.gravity_off = false;
+                tp.stage = TpStage::Fall;
+                tp.since = now;
+                tp.last_change = now;
+                tp.last_sample = now;
+                if let Some(t) = player_transform() {
+                    tp.last_y = le_i64(&t, 8);
+                }
+                log("teleport: terrain loaded, descending");
+            }
+            st.tp = Some(tp);
+        }
+        TpStage::Fall => {
+            if now.duration_since(tp.last_sample) >= Duration::from_millis(100) {
+                tp.last_sample = now;
+                if let Some(t) = player_transform() {
+                    let y = le_i64(&t, 8);
+                    if (y - tp.last_y).abs() > metres(0.15) {
+                        tp.last_y = y;
+                        tp.last_change = now;
+                    }
+                }
+            }
+            let landed = now.duration_since(tp.last_change) > Duration::from_millis(1200) && now.duration_since(tp.since) > Duration::from_millis(1500);
+            if landed || now.duration_since(tp.since) > Duration::from_secs(40) {
+                st.protect_until = Some(now + Duration::from_secs(4));
+                log(&format!("teleport: landed at y={:.1}", tp.last_y as f64 / METERS));
+            } else {
+                st.tp = Some(tp);
+            }
+        }
+    }
+}
+
+pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
+    if tick % 10 == 0 {
+        refresh_powers(st, dir);
+        run_command(st, dir);
+    }
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    let id = PLAYER_ID.load(Ordering::SeqCst);
+    if manager == 0 || id == 0 {
+        return;
+    }
+    if tick % 4 == 0 {
+        groups_tick(st, dir);
+    }
+    if tick % 16 == 0 {
+        spawners_tick(&mut st.spawners, dir);
+    }
+    let client = client_pair();
+    let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
+    let mut want: Vec<(usize, u32)> = Vec::new();
+    if st.powers.god || protected || st.tp.is_some() {
+        want.push((manager, id));
+        if let Some(pair) = client {
+            want.push(pair);
+        }
+    }
+    for zone_id in st.zone_ids.clone() {
+        if !want.contains(&(manager, zone_id)) {
+            want.push((manager, zone_id));
+            if zone_id == id {
+                if let Some(pair) = client {
+                    want.push(pair);
+                }
+            }
+        }
+    }
+    shield_tick(st, &want);
+    if st.heal_once {
+        refill_health(manager, id);
+        if let Some((m, c)) = client {
+            refill_health(m, c);
+        }
+        st.heal_once = false;
+        refill_stamina(manager, id, &mut st.stamina_peak);
+        refill_mana(manager, id, &mut st.mana_peak);
+        if let Some((m, c)) = client {
+            refill_stamina(m, c, &mut st.stamina_peak_c);
+            refill_mana(m, c, &mut st.mana_peak_c);
+        }
+    }
+    if st.powers.stamina {
+        refill_stamina(manager, id, &mut st.stamina_peak);
+        refill_mana(manager, id, &mut st.mana_peak);
+        if let Some((m, c)) = client {
+            refill_mana(m, c, &mut st.mana_peak_c);
+            if !refill_stamina(m, c, &mut st.stamina_peak_c) {
+                if let Some(max) = refill_client_stamina(m, c, st.stamina_peak) {
+                    if max > st.stamina_peak && max < 60_000 {
+                        st.stamina_peak = max;
+                    }
+                }
+            }
+        }
+        diagnostics(st, manager, id, client);
+    }
+    if st.tp.is_some() {
+        tp_step(st, manager, id);
+    }
+    if st.powers.fly {
+        if !st.gravity_off {
+            st.gravity_off = true;
+            set_gravity(st, false);
+            st.last_fly = None;
+            st.last_written = None;
+            st.hover = None;
+        }
+        fly_step(st, manager, id);
+    } else if st.gravity_off && st.tp.is_none() {
+        st.gravity_off = false;
+        set_gravity(st, true);
+        st.last_written = None;
+        log("fly: gravity restored");
+    }
+}
+
+pub fn fly_step(st: &mut PowerState, manager: usize, id: u32) {
+    let Some(t) = player_transform() else { return };
+    let now = Instant::now();
+    let dt = st.last_fly.map(|p| now.duration_since(p).as_secs_f64()).unwrap_or(0.001).clamp(0.0005, 0.05);
+    st.last_fly = Some(now);
+    let (x, y, z) = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
+    let speed = st.powers.fly_speed.unwrap_or(12.0).clamp(1.0, 80.0) as f64;
+    let focus = game_has_focus();
+    let mut target = st.hover.unwrap_or(y);
+    if y > target + metres(0.5) {
+        target = y;
+    }
+    let vertical = metres(speed.min(40.0) * dt);
+    if focus && key_down(VK_SPACE) {
+        target = target.saturating_add(vertical);
+    }
+    if focus && key_down(VK_LCONTROL) {
+        target = target.saturating_sub(vertical);
+    }
+    st.hover = Some(target);
+
+    let (mut nx, mut nz) = (x, z);
+    if let Some((lx, _, lz)) = st.last_written {
+        let dx = (x - lx) as f64 / METERS;
+        let dz = (z - lz) as f64 / METERS;
+        let d = (dx * dx + dz * dz).sqrt();
+        let k = (speed / 7.0 - 1.0).clamp(0.0, 12.0);
+        if focus && k > 0.0 && d > 0.0 && d < 2.0 {
+            nx = x.saturating_add((dx * k * METERS) as i64);
+            nz = z.saturating_add((dz * k * METERS) as i64);
+        }
+    }
+    if nx != x || nz != z || target != y {
+        let pos = [Some(nx), Some(target), Some(nz)];
+        set_player_position(manager, id, pos);
+        let copies = set_client_position(&t, pos);
+        if !st.client_logged {
+            st.client_logged = true;
+            log(&format!("fly: client position copies updated = {copies}"));
+        }
+        st.last_written = Some((nx, target, nz));
+    } else {
+        st.last_written = Some((x, y, z));
+    }
+}
+
+pub fn new_power_state() -> PowerState {
+    PowerState {
+        powers: Powers::default(),
+        mtime: None,
+        hover: None,
+        protect_until: None,
+        stamina_peak: 0,
+        mana_peak: 0,
+        heal_once: false,
+        stamina_peak_c: 0,
+        mana_peak_c: 0,
+        last_fly: None,
+        last_written: None,
+        gravity: [None, None],
+        gravity_saved: [1, 1],
+        gravity_off: false,
+        client_logged: false,
+        groups: GroupState::new(),
+        saved: HashMap::new(),
+        zone_ids: Vec::new(),
+        tp: None,
+        diag_left: 12,
+        diag_last: None,
+        spawners: SpawnerSet::default(),
+    }
+}
+
+
+fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
+    let Some((_, _, slots)) = entity_layout(manager, id) else {
+        log(&format!("delivery: entity {id} not readable"));
+        return;
+    };
+    for slot in &slots {
+        if slot.stride != PICKUP_ITEM_SIZE {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, slot.stride) else { continue };
+        if b.len() >= PICKUP_ITEM_SIZE && u32_at(&b, 0) == g.item {
+            log(&format!(
+                "delivery: item {} placed (level {} rarity {} amount {})",
+                g.item,
+                u32_at(&b, 20),
+                b[24],
+                u16::from_le_bytes([b[26], b[27]])
+            ));
+            return;
+        }
+    }
+    log(&format!("delivery: item {} requested; the pickup entity {id} was created", g.item));
+}
+
+pub fn readable_regions() -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut addr = 0x10000usize;
+    for _ in 0..400_000 {
+        let mut info = MemInfo::default();
+        let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
+        if n == 0 {
+            break;
+        }
+        let end = info.base.saturating_add(info.size);
+        let low = info.protect & 0xff;
+        let readable = matches!(low, 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80);
+        if info.state == 0x1000 && readable && info.protect & 0x700 == 0 && info.size > 0 {
+            out.push((info.base, end));
+        }
+        if end <= addr || end >= 0x7fff_ffff_0000 {
+            break;
+        }
+        addr = end;
+    }
+    out
+}
+
+pub fn scan_regions(regions: &[(usize, usize)], pattern: &[u8], max_hits: usize) -> Vec<usize> {
+    let mut hits = Vec::new();
+    if pattern.len() < 4 {
+        return hits;
+    }
+    let first = [pattern[0], pattern[1], pattern[2], pattern[3]];
+    const CHUNK: usize = 4 << 20;
+    for &(start, end) in regions {
+        let mut at = start;
+        while at < end {
+            let len = (end - at).min(CHUNK + pattern.len());
+            let Some(b) = read_bytes(at, len) else {
+                at += CHUNK;
+                continue;
+            };
+            let mut i = 0usize;
+            while i + pattern.len() <= b.len() {
+                if b[i..i + 4] == first && &b[i..i + pattern.len()] == pattern {
+                    hits.push(at + i);
+                    if hits.len() >= max_hits {
+                        return hits;
+                    }
+                }
+                i += 4;
+            }
+            at += CHUNK;
+        }
+    }
+    hits
+}
+
+fn write_anywhere(addr: usize, data: &[u8]) -> bool {
+    if write_bytes(addr, data) {
+        return true;
+    }
+    let mut old = 0u32;
+    unsafe {
+        if VirtualProtect(addr as *mut c_void, data.len(), 0x04, &mut old) == 0 {
+            return false;
+        }
+    }
+    let ok = write_bytes(addr, data);
+    let mut tmp = 0u32;
+    unsafe {
+        VirtualProtect(addr as *mut c_void, data.len(), old, &mut tmp);
+    }
+    ok
+}
+
+pub fn read_window(base: usize, len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let step = 0x1000usize;
+    let mut at = 0usize;
+    while at < len {
+        match read_bytes(base + at, step) {
+            Some(b) if !b.is_empty() => {
+                let n = b.len();
+                out.extend_from_slice(&b);
+                if n < step {
+                    break;
+                }
+            }
+            _ => break,
+        }
+        at += step;
+    }
+    out
+}
+
+fn hex_to_bytes(text: &str) -> Vec<u8> {
+    let t = text.trim();
+    let mut out = Vec::with_capacity(t.len() / 2);
+    let b = t.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        match (char::from(b[i]).to_digit(16), char::from(b[i + 1]).to_digit(16)) {
+            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+            _ => return Vec::new(),
+        }
+        i += 2;
+    }
+    out
+}
+
+fn run_item_stats(cmd: Command) {
+    let label = cmd.label.clone().unwrap_or_default();
+    let Some(guid) = cmd.guid.as_deref().and_then(super::config::parse_guid) else {
+        log(&format!("item stats {label}: invalid guid"));
+        return;
+    };
+    let item_id = cmd.item_id.unwrap_or(0);
+    let Some(stats) = cmd.stats else {
+        log(&format!("item stats {label}: missing data"));
+        return;
+    };
+    if item_id == 0 {
+        log(&format!("item stats {label}: missing item id"));
+        return;
+    }
+    apply_stats_patch(item_id, &guid, &stats);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Players: every player entity of the world is found by looking at the entity table, not only the
+// ones whose creation was seen by the hook (friends join through other paths).
+// ---------------------------------------------------------------------------------------------
+
+static DEF_CLASS: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
+static DEF_MGR: AtomicUsize = AtomicUsize::new(0);
+
+pub fn reset_player_cache() {
+    if let Ok(mut g) = DEF_CLASS.lock() {
+        *g = None;
+    }
+}
+
+pub fn tracked_ids() -> Vec<u32> {
+    TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default()
+}
+
+fn def_is_player(manager: usize, id: u32, p: &Placement) -> bool {
+    if let Ok(guard) = DEF_CLASS.lock() {
+        if let Some(known) = guard.as_ref().and_then(|m| m.get(&p.def)) {
+            return *known;
+        }
+    }
+    let verdict = match layout(p) {
+        Some(slots) => slots.iter().any(|slot| {
+            slot.stride == 40 && matches!(read_bytes(slot.addr, 4), Some(b) if b.len() >= 4 && u32_at(&b, 0) == STAMINA_SIGNATURE)
+        }),
+        None => return false,
+    };
+    if let Ok(mut guard) = DEF_CLASS.lock() {
+        guard.get_or_insert_with(HashMap::new).insert(p.def, verdict);
+    }
+    if verdict {
+        log(&format!("players: entity definition {:#x} (first seen on entity {id}) looks like a player", p.def));
+    }
+    let _ = manager;
+    verdict
+}
+
+/// Looks through the whole entity table once and tracks every player-like entity. Returns how many
+/// new players were found.
+pub fn scan_players_once(manager: usize) -> usize {
+    if manager == 0 {
+        return 0;
+    }
+    if DEF_MGR.swap(manager, Ordering::SeqCst) != manager {
+        reset_player_cache();
+    }
+    let Some(head) = read_bytes(manager + 0x148, 0x58) else { return 0 };
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return 0;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let Some(bitmap) = read_bytes(u64_at(&head, 8) as usize, words * 8) else { return 0 };
+    let Some(keys) = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4) else { return 0 };
+    let Some(values) = read_bytes(u64_at(&head, 0x40) as usize, capacity as usize * 8) else { return 0 };
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 || values.len() < capacity as usize * 8 {
+        return 0;
+    }
+    let known: HashSet<u32> = TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default();
+    let mut found = 0;
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 0 {
+            continue;
+        }
+        let id = u32_at(&keys, slot * 4);
+        if id == 0 || known.contains(&id) {
+            continue;
+        }
+        let record = u64_at(&values, slot * 8) as usize;
+        if record < 0x10000 {
+            continue;
+        }
+        let Some(p) = placement(record) else { continue };
+        if let Ok(guard) = DEF_CLASS.lock() {
+            if guard.as_ref().and_then(|m| m.get(&p.def)) == Some(&false) {
+                continue;
+            }
+        }
+        if !def_is_player(manager, id, &p) {
+            continue;
+        }
+        if faction_addresses(manager, id).is_empty() {
+            continue;
+        }
+        track_player(manager, id);
+        found += 1;
+    }
+    found
+}
+
+fn players_loop() {
+    loop {
+        std::thread::sleep(Duration::from_millis(2500));
+        let manager = SERVER_MGR.load(Ordering::SeqCst);
+        if manager == 0 || PLAYER_ID.load(Ordering::SeqCst) == 0 {
+            continue;
+        }
+        let _ = std::panic::catch_unwind(|| scan_players_once(manager));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spawners: creatures bound to a place that come back after they die (or after a restart).
+// ---------------------------------------------------------------------------------------------
+
+pub const SPAWNERS_FILE: &str = "m182_spawners.json";
+pub const SPAWNER_STATUS_FILE: &str = "m182_spawner_status.json";
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+struct SpawnerDef {
+    id: String,
+    name: String,
+    template: String,
+    level: u32,
+    count: u32,
+    health: u32,
+    damage: f32,
+    at: Option<[f64; 3]>,
+    radius: f32,
+    respawn: u32,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SpawnersFile {
+    spawners: Vec<SpawnerDef>,
+}
+
+struct SpawnerRt {
+    def: SpawnerDef,
+    ids: Vec<u32>,
+    missing: HashMap<u32, u8>,
+    respawn_at: Option<Instant>,
+    spawned: u32,
+    manager: usize,
+    state: &'static str,
+}
+
+#[derive(Default)]
+pub struct SpawnerSet {
+    list: Vec<SpawnerRt>,
+    mtime: Option<std::time::SystemTime>,
+    last: Option<Instant>,
+    pending: Option<(String, Instant)>,
+    status: String,
+    status_at: Option<Instant>,
+}
+
+fn health_now(manager: usize, id: u32) -> Option<u32> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    for slot in &slots {
+        if slot.stride == 40 {
+            if let Some(b) = read_bytes(slot.addr, 12) {
+                if b.len() >= 12 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+                    return Some(u32_at(&b, 8));
+                }
+            }
+        }
+    }
+    Some(u32::MAX)
+}
+
+/// A creature counts as gone only after it was missing, or at zero health, on three checks in a row
+/// (a few seconds): right after creation or while the world streams, one bad reading is not a death.
+fn creature_alive(manager: usize, id: u32, missing: &mut HashMap<u32, u8>) -> bool {
+    let bad = matches!(health_now(manager, id), None | Some(0));
+    if bad {
+        let n = missing.entry(id).or_insert(0);
+        *n += 1;
+        *n < 3
+    } else {
+        missing.remove(&id);
+        true
+    }
+}
+
+fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
+    let path = dir.join(SPAWNERS_FILE);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    if mtime == set.mtime {
+        return;
+    }
+    set.mtime = mtime;
+    let defs: Vec<SpawnerDef> = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<SpawnersFile>(&text) {
+            Ok(f) => f.spawners.into_iter().filter(|d| !d.id.is_empty() && !d.template.trim().is_empty() && d.enabled.unwrap_or(true)).collect(),
+            Err(e) => {
+                log(&format!("spawners: invalid file ({e})"));
+                return;
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+    let mut next: Vec<SpawnerRt> = Vec::new();
+    for def in defs {
+        match set.list.iter().position(|r| r.def.id == def.id) {
+            Some(i) => {
+                let mut rt = set.list.swap_remove(i);
+                rt.def = def;
+                next.push(rt);
+            }
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando" }),
+        }
+    }
+    set.list = next;
+    log(&format!("spawners: {} active", set.list.len()));
+}
+
+fn issue_spawn(rt: &SpawnerRt, need: u32) {
+    let d = &rt.def;
+    let settings = SpawnSettings {
+        template: d.template.trim().to_string(),
+        level: d.level.clamp(1, 1000),
+        count: need.clamp(1, 20),
+        distance: if d.radius > 0.0 { d.radius.clamp(0.5, 60.0) } else { 3.0 },
+        health: d.health.min(2_000_000_000),
+        damage: d.damage.clamp(0.0, 1000.0).max(if d.damage == 0.0 { 1.0 } else { 0.0 }),
+        key: 0,
+        dump_player_key: 0,
+        dump_spawned_key: 0,
+        watch_key: 0,
+    };
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(settings);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = None;
+    }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = d.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
+    }
+    REQUEST_OBJECT.store(false, Ordering::SeqCst);
+    REQUEST_FORWARD.store(false, Ordering::SeqCst);
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = Some(d.id.clone());
+    }
+    PENDING.store(1, Ordering::SeqCst);
+}
+
+fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
+    let now = Instant::now();
+    if set.last.map(|t| now.duration_since(t) < Duration::from_secs(1)).unwrap_or(false) {
+        return;
+    }
+    set.last = Some(now);
+    load_spawners(set, dir);
+
+    let created: Vec<(String, u32)> = CREATED.lock().map(|mut c| c.drain(..).collect()).unwrap_or_default();
+    for (tag, id) in created {
+        if let Some(rt) = set.list.iter_mut().find(|r| r.def.id == tag) {
+            rt.ids.push(id);
+            rt.spawned += 1;
+        }
+    }
+    if let Some((tag, since)) = set.pending.clone() {
+        let finished = PENDING.load(Ordering::SeqCst) == 0 && SPAWN_TAG.lock().map(|t| t.is_none()).unwrap_or(true);
+        if finished {
+            set.pending = None;
+        } else if since.elapsed() > Duration::from_secs(12) {
+            PENDING.store(0, Ordering::SeqCst);
+            if let Ok(mut r) = REQUEST.lock() {
+                *r = None;
+            }
+            if let Ok(mut r) = REQUEST_AT.lock() {
+                *r = None;
+            }
+            if let Ok(mut t) = SPAWN_TAG.lock() {
+                *t = None;
+            }
+            log(&format!("spawners: {tag} could not be created in time, will retry"));
+            set.pending = None;
+        }
+    }
+
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    let ready_world = manager != 0 && player_transform().is_some();
+    let busy = set.pending.is_some() || PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true);
+    let mut issued: Option<(String, u32)> = None;
+    for rt in set.list.iter_mut() {
+        if manager == 0 {
+            rt.state = "esperando el mundo";
+            continue;
+        }
+        if rt.manager != manager {
+            if rt.manager != 0 {
+                rt.respawn_at = Some(now + Duration::from_secs(10));
+                log(&format!("spawners: world changed, {} will be created again", rt.def.id));
+            }
+            rt.manager = manager;
+            rt.ids.clear();
+            rt.missing.clear();
+        }
+        let before = rt.ids.len();
+        let mut missing = std::mem::take(&mut rt.missing);
+        rt.ids.retain(|id| creature_alive(manager, *id, &mut missing));
+        rt.missing = missing;
+        let respawn = Duration::from_secs(rt.def.respawn.clamp(1, 86_400) as u64);
+        if rt.ids.len() < before && rt.respawn_at.is_none() {
+            rt.respawn_at = Some(now + respawn);
+            log(&format!("spawners: {} lost a creature, it comes back in {} s", rt.def.id, respawn.as_secs()));
+        }
+        let want = rt.def.count.clamp(1, 20) as usize;
+        if rt.ids.len() >= want {
+            rt.respawn_at = None;
+            rt.state = "vivo";
+            continue;
+        }
+        let due = *rt.respawn_at.get_or_insert(now);
+        if now < due {
+            rt.state = "esperando para reaparecer";
+            continue;
+        }
+        rt.state = "creando";
+        if busy || issued.is_some() || !ready_world {
+            continue;
+        }
+        let need = (want - rt.ids.len()) as u32;
+        issue_spawn(rt, need);
+        rt.respawn_at = Some(now + Duration::from_secs(30));
+        issued = Some((rt.def.id.clone(), need));
+    }
+    if let Some((tag, need)) = issued {
+        set.pending = Some((tag.clone(), now));
+        log(&format!("spawners: creating {need} for {tag}"));
+    }
+
+    // status for the panel
+    let rows: Vec<String> = set
+        .list
+        .iter()
+        .map(|rt| {
+            let next = rt.respawn_at.map(|t| t.saturating_duration_since(now).as_secs().to_string()).unwrap_or_else(|| "null".to_string());
+            format!(
+                "{{\"id\":{},\"alive\":{},\"want\":{},\"state\":\"{}\",\"next\":{},\"spawned\":{}}}",
+                serde_json::to_string(&rt.def.id).unwrap_or_else(|_| "\"\"".into()),
+                rt.ids.len(),
+                rt.def.count.clamp(1, 20),
+                rt.state,
+                if rt.ids.len() >= rt.def.count.clamp(1, 20) as usize { "null".to_string() } else { next },
+                rt.spawned
+            )
+        })
+        .collect();
+    let text = format!("{{\"spawners\":[{}]}}", rows.join(","));
+    if text != set.status && set.status_at.map(|t| now.duration_since(t) >= Duration::from_secs(2)).unwrap_or(true) {
+        set.status = text.clone();
+        set.status_at = Some(now);
+        let _ = std::fs::write(dir.join(SPAWNER_STATUS_FILE), text);
+    }
+}
+
+fn powers_loop() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    unsafe {
+        timeBeginPeriod(1);
+    }
+    let mut st = new_power_state();
+    let mut tick = 0u32;
+    loop {
+        let busy = st.powers.god
+            || st.powers.stamina
+            || st.powers.fly
+            || st.heal_once
+            || st.tp.is_some()
+            || !st.saved.is_empty()
+            || !st.zone_ids.is_empty()
+            || !st.groups.zones.is_empty()
+            || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
+        std::thread::sleep(Duration::from_millis(if busy { 1 } else { 25 }));
+        tick = tick.wrapping_add(1);
+        power_tick(&mut st, &dir, tick);
+    }
+}
