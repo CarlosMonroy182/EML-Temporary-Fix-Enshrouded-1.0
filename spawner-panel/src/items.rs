@@ -1010,6 +1010,14 @@ mod tests {
     }
 
     #[test]
+    fn dump_empty_lua_when_asked() {
+        let Ok(path) = std::env::var("M182_DUMP_EMPTY_LUA") else { return };
+        std::fs::write(&path, lua_source(&BTreeMap::new(), &BTreeMap::new())).unwrap();
+        let json = serde_json::to_string_pretty(&stats_json(&BTreeMap::new(), &BTreeMap::new())).unwrap();
+        std::fs::write(format!("{path}.json"), json).unwrap();
+    }
+
+    #[test]
     fn dump_lua_when_asked() {
         let Ok(path) = std::env::var("M182_DUMP_LUA") else { return };
         let items = parse_items(&sample());
