@@ -70,9 +70,9 @@ pub fn init(config: Config) {
         Err(e) => {
             error!(
                 error = %e,
-                "Error running mod loader"
+                "Error running mod loader, continuing without data patches"
             );
-            panic!("Error running mod loader: {e}");
+            Default::default()
         }
     };
 
