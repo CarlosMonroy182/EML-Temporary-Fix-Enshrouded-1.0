@@ -380,6 +380,7 @@ if type(items) == "table" then
             if id == nil or id == 0 or seenItemIds[id] then return end
             seenItemIds[id] = true
             local debugName = safe(try(function() return data.debugName end))
+            if string.find(debugName, "@M182_", 1, true) then return end
             local category = str(try(function() return data.category end))
             local english = loca_text(data.name)
             local displayName = english or debugName

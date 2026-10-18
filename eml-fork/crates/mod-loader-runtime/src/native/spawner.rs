@@ -515,6 +515,7 @@ pub struct GiveSpec {
 
 static REQUEST_GIVE: Mutex<Option<GiveSpec>> = Mutex::new(None);
 static REQUEST_AT: Mutex<Option<[f64; 3]>> = Mutex::new(None);
+static REQUEST_SENDER: AtomicU32 = AtomicU32::new(0);
 static REQUEST_OBJECT: AtomicBool = AtomicBool::new(false);
 static REQUEST_FORWARD: AtomicBool = AtomicBool::new(false);
 static FACE_SCORES: Mutex<[f64; 4]> = Mutex::new([0.0; 4]);
@@ -537,6 +538,7 @@ pub fn poll_request() {
     if let Ok(mut t) = SPAWN_TAG.lock() {
         *t = None;
     }
+    REQUEST_SENDER.store(super::chat::REQUESTER.swap(0, Ordering::SeqCst), Ordering::SeqCst);
     let mut s = match SPAWN.lock() {
         Ok(s) => s.clone(),
         Err(_) => return,
@@ -616,9 +618,8 @@ pub fn patch_item_struct(
     regions: &[(usize, usize)],
 ) -> (Vec<(usize, Vec<u8>)>, String) {
     let hits = scan_regions(regions, guid, 256);
-    let mut done: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut notes = format!("{} guid hits", hits.len());
-    let mut seen: HashSet<usize> = HashSet::new();
+    let mut bases: Vec<usize> = Vec::new();
     for h in hits {
         if h < 0x10000 {
             continue;
@@ -628,6 +629,31 @@ pub fn patch_item_struct(
         if head.len() < 4 || u32_at(&head, 0) != item_id {
             continue;
         }
+        bases.push(base);
+    }
+    let done = patch_item_bases(&bases, blocks, &mut notes);
+    (done, notes)
+}
+
+/// Same patch for item copies: a copy has its own item id but the identifiers kept inside its
+/// definition are not guaranteed to match the copy's resource guid, so it is found by its id and
+/// accepted only when the damage block it holds is exactly the one expected.
+pub fn patch_item_struct_by_id(
+    item_id: u32,
+    blocks: &[(usize, Vec<u8>, Vec<Vec<u8>>)],
+    regions: &[(usize, usize)],
+) -> (Vec<(usize, Vec<u8>)>, String) {
+    let hits = scan_regions(regions, &item_id.to_le_bytes(), 8192);
+    let mut notes = format!("{} id hits", hits.len());
+    let bases: Vec<usize> = hits.into_iter().filter(|h| h % 4 == 0 && *h >= 0x10000).collect();
+    let done = patch_item_bases(&bases, blocks, &mut notes);
+    (done, notes)
+}
+
+fn patch_item_bases(bases: &[usize], blocks: &[(usize, Vec<u8>, Vec<Vec<u8>>)], notes: &mut String) -> Vec<(usize, Vec<u8>)> {
+    let mut done: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut seen: HashSet<usize> = HashSet::new();
+    for &base in bases {
         let span = read_window(base, ITEM_INFO_SPAN);
         for (offset, new, olds) in blocks {
             if new.is_empty() || span.len() < offset + new.len() {
@@ -674,7 +700,7 @@ pub fn patch_item_struct(
             }
         }
     }
-    (done, notes)
+    done
 }
 
 fn apply_stats_patch(item: u32, guid: &[u8; 16], stats: &StatsPatch) {
@@ -701,7 +727,12 @@ fn apply_stats_patch(item: u32, guid: &[u8; 16], stats: &StatsPatch) {
     }
     let started = Instant::now();
     let regions = readable_regions();
-    let (done, notes) = patch_item_struct(guid, item, &blocks, &regions);
+    let (mut done, mut notes) = patch_item_struct(guid, item, &blocks, &regions);
+    if done.is_empty() {
+        let (by_id, more) = patch_item_struct_by_id(item, &blocks, &regions);
+        notes.push_str(&format!("; {more}"));
+        done = by_id;
+    }
     log(&format!(
         "item stats {}: patched {} block(s) ({notes}) in {} ms over {} regions",
         item,
@@ -1185,6 +1216,27 @@ fn write_u64(b: &mut [u8], off: usize, v: u64) {
     b[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
+/// Chat clients are numbered like the players of the world: client 64 is the first player
+/// (entity 1), 65 the second (entity 2). The spawn is placed next to whoever asked for it when
+/// that entity is a known player, otherwise next to the primary player.
+fn requester_transform(manager: usize) -> Option<Vec<u8>> {
+    let sender = REQUEST_SENDER.swap(0, Ordering::SeqCst);
+    if sender == 0 {
+        return None;
+    }
+    let client = sender - 1;
+    let id = (client & 0x3f) + 1;
+    if !tracked_ids().contains(&id) {
+        log(&format!("spawn: chat client {client} is not a known player (entity {id}), using the primary player"));
+        return None;
+    }
+    let transform = transform_of(manager, id);
+    if transform.is_some() {
+        log(&format!("spawn: placed next to chat client {client} (entity {id})"));
+    }
+    transform
+}
+
 fn spawn_now(manager: usize) {
     let tag = SPAWN_TAG.lock().ok().and_then(|mut t| t.take());
     let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
@@ -1199,7 +1251,7 @@ fn spawn_now(manager: usize) {
         log(&format!("spawn skipped: \"{}\" is not a known template name or id", settings.template));
         return;
     };
-    let Some(t) = player_transform() else {
+    let Some(t) = requester_transform(manager).or_else(player_transform) else {
         log(&format!(
             "spawn skipped: player position not available (player id={}, transform index={}, tries={})",
             PLAYER_ID.load(Ordering::Relaxed),
@@ -1372,6 +1424,13 @@ pub struct Command {
     item_id: Option<u32>,
     stats: Option<StatsPatch>,
     ground: Option<f64>,
+    base: Option<u32>,
+    slot: Option<u32>,
+    slots: Option<u32>,
+    dmg: Option<String>,
+    arm: Option<String>,
+    lvl: Option<[u32; 2]>,
+    bases: Option<Vec<u32>>,
 }
 
 #[derive(Clone, Default)]
@@ -1815,6 +1874,7 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
         return;
     };
     let name = cmd.cmd.clone();
+    super::chat::REQUESTER.store(0, Ordering::SeqCst);
     match name.as_str() {
         "heal" => {
             st.heal_once = true;
@@ -1891,6 +1951,43 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
         "item_stats" => {
             if let Err(e) = std::thread::Builder::new().name("m182-item-stats".into()).spawn(move || run_item_stats(cmd)) {
                 log(&format!("item stats: could not start worker: {e}"));
+            }
+        }
+        "item_pool" => {
+            let (base, slots) = (cmd.base.unwrap_or(0), cmd.slots.unwrap_or(0));
+            match super::custom::set_pool(dir, base, slots) {
+                Ok(()) => log(&format!("item copies: {slots} spare copies saved for item {base} (available after the next start)")),
+                Err(e) => log(&format!("item copies: pool for item {base} refused: {e}")),
+            }
+        }
+        "item_pools" => {
+            let bases = cmd.bases.clone().unwrap_or_default();
+            match super::custom::set_pools(dir, &bases, cmd.slots.unwrap_or(0)) {
+                Ok(changed) => log(&format!("item copies: spare copies saved for {changed} more items (available after the next start)")),
+                Err(e) => log(&format!("item copies: pools refused: {e}")),
+            }
+        }
+        "item_copy" => {
+            let (base, slot) = (cmd.base.unwrap_or(0), cmd.slot.unwrap_or(0));
+            let lvl = cmd.lvl.map(|l| (l[0], l[1])).unwrap_or((0, 0));
+            match super::custom::set_copy(dir, base, slot, cmd.dmg.as_deref(), cmd.arm.as_deref(), lvl) {
+                Ok(()) => log(&format!("item copies: copy {slot} of item {base} saved")),
+                Err(e) => {
+                    log(&format!("item copies: copy {slot} of item {base} refused: {e}"));
+                    return;
+                }
+            }
+            if cmd.stats.is_some() {
+                if let Err(e) = std::thread::Builder::new().name("m182-item-copy".into()).spawn(move || run_item_stats(cmd)) {
+                    log(&format!("item copies: could not start worker: {e}"));
+                }
+            }
+        }
+        "item_copy_drop" => {
+            let (base, slot) = (cmd.base.unwrap_or(0), cmd.slot.unwrap_or(0));
+            match super::custom::drop_copy(dir, base, slot) {
+                Ok(()) => log(&format!("item copies: copy {slot} of item {base} released")),
+                Err(e) => log(&format!("item copies: could not release copy {slot} of item {base}: {e}")),
             }
         }
         other => log(&format!("command ignored: unknown command \"{other}\"")),

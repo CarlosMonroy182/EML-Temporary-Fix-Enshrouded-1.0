@@ -8,9 +8,13 @@
 
 pub mod chat;
 pub mod config;
+pub mod custom;
 pub mod faction;
 pub mod groups;
 mod signatures;
+
+#[cfg(windows)]
+mod panel_host;
 
 #[cfg(windows)]
 mod patch;
@@ -52,6 +56,10 @@ pub fn attach() {
     }
 
     config::LIVE.apply(&cfg);
+
+    if cfg.panel {
+        panel_host::start(dir.clone());
+    }
 
     if patch::install() != patch::Outcome::Retry {
         spawn_watcher(path);

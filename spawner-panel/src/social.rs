@@ -99,7 +99,19 @@ pub fn player_label(p: &Online) -> String {
     }
 }
 
+pub const MANUAL_PLAYERS: u32 = 8;
+
+pub fn manual_players() -> Vec<Seen> {
+    (1..=MANUAL_PLAYERS)
+        .map(|n| Seen {
+            member: Member { slot: n, name: format!("Jugador {n}"), platform: "slot".to_string(), id: n.to_string() },
+            online: Some(Online { number: n, x: 0.0, y: 0.0, z: 0.0, me: false }),
+        })
+        .collect()
+}
+
 pub struct SocialState {
+    pub manual: bool,
     pub zones: Vec<Zone>,
     pub teams: Vec<Team>,
     pub online: Vec<Online>,
@@ -116,6 +128,7 @@ pub struct SocialState {
 impl Default for SocialState {
     fn default() -> Self {
         Self {
+            manual: false,
             zones: Vec::new(),
             teams: Vec::new(),
             online: Vec::new(),
@@ -232,6 +245,10 @@ impl SocialState {
         self.online = std::fs::read_to_string(dir.join(PLAYERS_FILE)).map(|t| parse_online(&t)).unwrap_or_default();
         self.watch.refresh(dir);
         self.seen = pair_players(&self.watch.members, &self.online);
+        self.manual = crate::remote::active() && self.seen.is_empty();
+        if self.manual {
+            self.seen = manual_players();
+        }
     }
 
     pub fn save_zones(&mut self, dir: &Path) {
@@ -386,7 +403,11 @@ impl App {
         if self.social.seen.is_empty() {
             ui.label(RichText::new("Nadie conectado todavía: abre el juego y carga el mundo.").color(MUTED));
         }
-        for s in &self.social.seen {
+        if self.social.manual {
+            ui.label(RichText::new("Servidor dedicado: el panel no ve la lista de jugadores. Marca el número de cada jugador en su equipo (el número que aparece en m182_players.json del servidor).").color(MUTED));
+        }
+        let manual = self.social.manual;
+        for s in self.social.seen.iter().filter(|_| !manual) {
             let team = self.social.teams.iter().find(|t| t.members.iter().any(|m| m.key == s.member.key())).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
             let place = match &s.online {
                 Some(o) => format!("X {:.0}  Z {:.0}", o.x, o.z),
@@ -543,6 +564,14 @@ mod tests {
         assert_eq!(fallback.len(), 2);
         assert_eq!(fallback[0].member.name, "Tú (jugador 1)");
     }
+    #[test]
+    fn manual_players_give_team_numbers_without_a_player_list() {
+        let seen = manual_players();
+        assert_eq!(seen.len(), MANUAL_PLAYERS as usize);
+        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[2].person()] }];
+        assert_eq!(team_numbers(&teams, &seen), vec![vec![1, 3]]);
+    }
+
     #[test]
     fn online_players_file() {
         let list = parse_online(r#"[{"n":2,"x":1.5,"y":3.0,"z":-4.0},{"n":1,"x":10.0,"y":0.0,"z":5.0}]"#);
