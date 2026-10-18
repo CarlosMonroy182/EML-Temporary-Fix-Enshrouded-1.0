@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::{config::LIVE, faction, groups, signatures};
 
@@ -16,12 +16,14 @@ unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetCurrentProcess() -> *mut c_void;
     fn VirtualProtect(addr: *mut c_void, size: usize, new: u32, old: *mut u32) -> i32;
+    fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn FlushInstructionCache(process: *mut c_void, addr: *const c_void, size: usize) -> i32;
 }
 
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const JUMP_LEN: usize = 14;
+const MEM_COMMIT_RESERVE: u32 = 0x3000;
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -117,6 +119,129 @@ stub!(stub_enemy_ptrs, enemy_ptrs);
 stub!(stub_friend_values, friend_values);
 stub!(stub_friend_opts, friend_opts);
 
+
+// ---------------------------------------------------------------- chat commands
+
+pub(super) static CHAT_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
+    let key = LIVE.chat_key();
+    if key.is_empty() {
+        return 0;
+    }
+    let Some(head) = super::spawn_probe::read_bytes(text, 16) else { return 0 };
+    let (pointer, length) = (super::spawn_probe::u64_at(&head, 0) as usize, super::spawn_probe::u64_at(&head, 8) as usize);
+    if length == 0 || length > 0x400 {
+        return 0;
+    }
+    let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
+    let message = String::from_utf8_lossy(&bytes);
+    if !super::chat::has_prefix(&message) {
+        return 0;
+    }
+    let Ok(dir) = std::env::current_dir() else { return 0 };
+    match super::chat::handle(&message, &key, client as u32, &dir) {
+        super::chat::Verdict::Pass => 0,
+        super::chat::Verdict::Swallowed(line) => {
+            super::spawner::log(&line);
+            1
+        }
+    }
+}
+
+// Entry of the game's "enqueue chat message". When the message is one of ours it is
+// dropped and the caller gets the same "ok" result a delivered message would give.
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_chat() {
+    core::arch::naked_asm!(
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rax",
+        "sub rsp, 0x90",
+        "movups [rsp + 0x30], xmm0",
+        "movups [rsp + 0x40], xmm1",
+        "movups [rsp + 0x50], xmm2",
+        "movups [rsp + 0x60], xmm3",
+        "movups [rsp + 0x70], xmm4",
+        "movups [rsp + 0x80], xmm5",
+        "mov eax, dword ptr [rsp + 0x100]",
+        "mov dword ptr [rsp + 0x20], eax",
+        "call {f}",
+        "movzx eax, al",
+        "mov dword ptr [rsp + 0x28], eax",
+        "movups xmm0, [rsp + 0x30]",
+        "movups xmm1, [rsp + 0x40]",
+        "movups xmm2, [rsp + 0x50]",
+        "movups xmm3, [rsp + 0x60]",
+        "movups xmm4, [rsp + 0x70]",
+        "movups xmm5, [rsp + 0x80]",
+        "mov eax, dword ptr [rsp + 0x28]",
+        "test eax, eax",
+        "lea rsp, [rsp + 0x90]",
+        "pop rax",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
+        "jnz 2f",
+        "jmp qword ptr [rip + {t}]",
+        "2:",
+        "mov byte ptr [rcx], 0",
+        "mov dword ptr [rcx + 4], 0",
+        "mov rax, rcx",
+        "ret",
+        f = sym hook_chat,
+        t = sym CHAT_TRAMPOLINE,
+    );
+}
+
+fn install_chat(sections: &[&'static [u8]]) {
+    if LIVE.chat_key().is_empty() {
+        return;
+    }
+    let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {
+        Ok(addr) => addr,
+        Err(count) => {
+            tracing::warn!(target: "m182::native", matches = count, "chat function signature not found exactly once; chat commands off");
+            super::spawner::log(&format!("chat commands off: chat function signature matched {count} times"));
+            return;
+        }
+    };
+
+    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+    if page.is_null() {
+        tracing::warn!(target: "m182::native", "chat trampoline allocation failed; chat commands off");
+        return;
+    }
+    let displaced = signatures::CHAT_DISPLACED;
+    unsafe {
+        std::ptr::copy_nonoverlapping(target, page, displaced);
+        let tail = page.add(displaced);
+        tail.write(0xFF);
+        tail.add(1).write(0x25);
+        tail.add(2).cast::<u32>().write_unaligned(0);
+        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+    }
+    CHAT_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
+
+    match unsafe { write_jump(target, stub_chat as usize) } {
+        Ok(()) => {
+            tracing::info!(target: "m182::native", address = format_args!("{:#x}", target as usize), "chat commands hooked");
+            super::spawner::log("chat commands ready");
+        }
+        Err(code) => {
+            CHAT_TRAMPOLINE.store(0, Ordering::SeqCst);
+            tracing::error!(target: "m182::native", code, "VirtualProtect failed; chat commands off");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- patching
 
 struct Target {
@@ -137,6 +262,8 @@ pub fn install() -> Outcome {
     if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() {
         super::spawn_probe::install(&sections);
     }
+
+    install_chat(&sections);
 
     let targets = [
         Target { name: "isEnemy(values)", signature: &signatures::IS_ENEMY_VALUES, hook: stub_enemy_values },
