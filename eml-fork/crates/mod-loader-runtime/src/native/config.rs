@@ -32,6 +32,8 @@ pub struct NativeConfig {
     pub watch_key: String,
     /// Secret for the chat command channel (`/m182 <key> ...`). Empty = channel off.
     pub chat_key: String,
+    /// Load `M182_Panel.dll` (the in-game panel, Insert) when it is next to the game.
+    pub panel: bool,
 }
 
 impl Default for NativeConfig {
@@ -53,6 +55,7 @@ impl Default for NativeConfig {
             dump_spawned_key: "F6".to_string(),
             watch_key: "F5".to_string(),
             chat_key: String::new(),
+            panel: true,
         }
     }
 }

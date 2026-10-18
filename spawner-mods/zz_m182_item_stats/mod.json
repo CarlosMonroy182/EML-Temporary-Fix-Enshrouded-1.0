@@ -1,0 +1,11 @@
+{
+    "id": "zz_m182_item_stats",
+    "name": "M182 Item Stats",
+    "description": "Applies the item stat and balance values chosen in the M182 Admin Panel.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}

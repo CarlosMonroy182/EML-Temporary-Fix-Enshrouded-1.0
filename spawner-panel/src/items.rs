@@ -6,6 +6,7 @@ use eframe::egui::{self, RichText, Vec2};
 use serde_json::{json, Value};
 
 use crate::theme::*;
+use crate::copies::{self, Plan, Used};
 use crate::{powers, write_atomic, App};
 
 pub const STATS_FILE: &str = "m182_item_stats.json";
@@ -395,6 +396,20 @@ pub fn level_hex(min: u32, max: u32) -> String {
     min.to_le_bytes().iter().chain(max.to_le_bytes().iter()).map(|b| format!("{b:02x}")).collect()
 }
 
+pub struct CopyDelivery {
+    pub item: u32,
+    pub guid: String,
+    pub slot: u32,
+    pub commands: Vec<Value>,
+    pub stats: Value,
+}
+
+pub enum CopyOutcome {
+    Plain,
+    Deliver(CopyDelivery),
+    Blocked { message: String, commands: Vec<Value> },
+}
+
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Edit {
     pub dmg: Option<[f32; 15]>,
@@ -418,6 +433,9 @@ pub struct ItemsState {
     pub names_applied: bool,
     pub sent: BTreeMap<u32, Edit>,
     pub dirty: BTreeMap<u32, Instant>,
+    pub draft: BTreeMap<u32, Edit>,
+    pub global: bool,
+    pub book: copies::Book,
     pub levels: Levels,
 }
 
@@ -698,8 +716,10 @@ if type(tables) == "table" and #tables > 0 then
 end
 
 print(string.format("[m182-item-stats] values applied=%d failed=%d", applied, failed))
+
 "#,
     );
+    s.push_str(include_str!("custom.lua"));
     s
 }
 
@@ -730,11 +750,16 @@ impl ItemsState {
     }
 
     pub fn current(&self, item: &Item) -> Edit {
-        self.working.get(&item.id).cloned().or_else(|| self.saved.get(&item.id).cloned()).unwrap_or_else(|| Self::base_edit(item))
+        let drafted = if self.global { None } else { self.draft.get(&item.id).cloned() };
+        self.working.get(&item.id).cloned().or(drafted).or_else(|| self.saved.get(&item.id).cloned()).unwrap_or_else(|| Self::base_edit(item))
     }
 
     pub fn is_modified(&self, item: &Item) -> bool {
-        self.saved.contains_key(&item.id)
+        if self.global {
+            self.saved.contains_key(&item.id)
+        } else {
+            self.draft.contains_key(&item.id) || self.saved.contains_key(&item.id)
+        }
     }
 
     pub fn set_edit(&mut self, item: &Item, edit: Edit) {
@@ -746,6 +771,15 @@ impl ItemsState {
             dmg: edit.dmg.filter(|d| *d != item.dmg),
             arm: edit.arm.filter(|a| *a != item.arm),
         };
+        if !self.global {
+            if stripped.dmg.is_none() && stripped.arm.is_none() {
+                self.draft.remove(&item.id);
+            } else {
+                self.draft.insert(item.id, stripped);
+            }
+            self.working.remove(&item.id);
+            return;
+        }
         if stripped.dmg.is_none() && stripped.arm.is_none() {
             self.saved.remove(&item.id);
         } else {
@@ -753,6 +787,104 @@ impl ItemsState {
         }
         self.working.remove(&item.id);
         self.dirty.insert(item.id, Instant::now());
+    }
+
+    /// The level range a copy must have so the delivered level exists; (0, 0) when the item's own range already covers it.
+    fn copy_levels(item: &Item, level: u32) -> (u32, u32) {
+        if level > 0 && item.level_max > 0 && (level < item.level_min || level > item.level_max) {
+            (item.level_min.min(level), item.level_max.max(level))
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Decides how an item with unsaved-for-everyone edits is delivered: as a plain item, as a unique
+    /// copy (commands for the game, the stats to patch live and the copy's id), or not yet.
+    pub fn copy_outcome(&mut self, dir: &Path, item: &Item, level: u32, remote: bool) -> CopyOutcome {
+        if self.global {
+            return CopyOutcome::Plain;
+        }
+        let Some(edit) = self.draft.get(&item.id).cloned() else { return CopyOutcome::Plain };
+        let lvl = Self::copy_levels(item, level);
+        let want = Used { name: item.name.clone(), dmg: edit.dmg, arm: edit.arm, lvl, active: true };
+        let ready = if remote { None } else { Some(copies::ready_copies(dir).unwrap_or_default()) };
+        match self.book.plan(item.id, &want, ready.as_ref()) {
+            Plan::NoPool => {
+                self.book.register(item.id, copies::SLOTS);
+                let saved = self.book.save(dir);
+                let mut message = format!(
+                    "Primera copia única de «{}»: se han reservado {} copias. {} una sola vez para que existan; después cada entrega sale con sus propios stats.",
+                    item.name,
+                    copies::SLOTS,
+                    if remote { "Reinicia el servidor" } else { "Reinicia el juego" }
+                );
+                if let Err(e) = saved {
+                    message = format!("{message} (No se pudo guardar el registro: {e})");
+                }
+                CopyOutcome::Blocked { message, commands: vec![json!({"cmd": "item_pool", "base": item.id, "slots": copies::SLOTS})] }
+            }
+            Plan::Pending => CopyOutcome::Blocked {
+                message: if remote {
+                    "Las copias de esta arma se crean al reiniciar el servidor. Cuando lo hayas reiniciado, pulsa «Ya reinicié el servidor» en Ajustes.".to_string()
+                } else {
+                    "Las copias de esta arma se crean al abrir el juego. Reinicia el juego una vez y vuelve a entregar.".to_string()
+                },
+                commands: Vec::new(),
+            },
+            Plan::Full => CopyOutcome::Blocked {
+                message: format!("Las {} copias de «{}» ya están en uso. Pulsa «Liberar copias» para reutilizarlas (las ya entregadas cambiarán de stats).", self.book.pools.get(&item.id).map(|p| p.slots).unwrap_or(0), item.name),
+                commands: Vec::new(),
+            },
+            Plan::Use { slot, fresh } => {
+                let Some(guid) = copies::item_guid(&item.guid, slot) else {
+                    return CopyOutcome::Blocked { message: "Esta arma tiene un identificador que no permite copias.".to_string(), commands: Vec::new() };
+                };
+                let id = copies::item_id(item.id, slot);
+                let leftover = self.book.leftover(item.id, slot).cloned();
+                let mut stats = serde_json::Map::new();
+                if let Some(d) = want.dmg {
+                    let mut olds = vec![dmg_hex(&item.dmg)];
+                    if let Some(p) = leftover.as_ref().and_then(|l| l.dmg) {
+                        olds.push(dmg_hex(&p));
+                    }
+                    stats.insert("dmg_new".into(), json!(dmg_hex(&d)));
+                    stats.insert("dmg_old".into(), json!(olds));
+                }
+                if let Some(a) = want.arm {
+                    let mut olds = vec![hex_of(&item.arm)];
+                    if let Some(p) = leftover.as_ref().and_then(|l| l.arm) {
+                        olds.push(hex_of(&p));
+                    }
+                    stats.insert("arm_new".into(), json!(hex_of(&a)));
+                    stats.insert("arm_old".into(), json!(olds));
+                }
+                if lvl != (0, 0) {
+                    stats.insert("lvl_new".into(), json!(level_hex(lvl.0, lvl.1)));
+                    stats.insert("lvl_old".into(), json!([level_hex(item.level_min, item.level_max)]));
+                }
+                let mut commands = Vec::new();
+                if fresh {
+                    let mut save = json!({"cmd": "item_copy", "base": item.id, "slot": slot, "lvl": [lvl.0, lvl.1]});
+                    if let Some(d) = want.dmg {
+                        save["dmg"] = json!(copies::csv_numbers(&d));
+                    }
+                    if let Some(a) = want.arm {
+                        save["arm"] = json!(copies::csv_numbers(&a));
+                    }
+                    commands.push(save);
+                }
+                self.book.mark_used(item.id, slot, want);
+                let _ = self.book.save(dir);
+                CopyOutcome::Deliver(CopyDelivery { item: id, guid, slot, commands, stats: Value::Object(stats) })
+            }
+        }
+    }
+
+    /// Frees every copy of an item for new stats; returns the commands that forget them in the game's files.
+    pub fn release_copies(&mut self, dir: &Path, item: &Item) -> Vec<Value> {
+        let slots = self.book.release(item.id);
+        let _ = self.book.save(dir);
+        slots.into_iter().map(|slot| json!({"cmd": "item_copy_drop", "base": item.id, "slot": slot})).collect()
     }
 
     /// Everything the game has to change in memory for this item: the damage and armour blocks
@@ -993,8 +1125,28 @@ impl App {
         let mut edit = self.items.current(&item);
         let modified = self.items.is_modified(&item);
         label_title(ui, "MODIFICADORES DE STATS");
+        if ui.checkbox(&mut self.items.global, "Cambiar el ítem para todos (afecta a todas sus copias)").changed() {
+            self.items.notice.clear();
+        }
+        if self.items.global {
+            ui.label(RichText::new("Los cambios valen para todas las copias de este ítem en el mundo y piden reiniciar el juego para quedarse.").color(GOLD_DIM).size(12.5));
+        } else {
+            ui.label(RichText::new("Los cambios solo valen para la copia que te entregues: cada arma sale distinta y las demás no cambian.").color(MUTED).size(12.5));
+            let used = self.items.book.active_count(item.id);
+            if let Some(pool) = self.items.book.pools.get(&item.id) {
+                ui.label(RichText::new(format!("Copias únicas de este ítem: {used} en uso de {}.", pool.slots)).color(MUTED).size(12.5));
+                if button(ui, "Liberar copias", Vec2::new(ui.available_width(), 28.0), used > 0, false) {
+                    let dir = self.dir.clone();
+                    let commands = self.items.release_copies(&dir, &item);
+                    for command in commands {
+                        let _ = powers::command(&dir, &command);
+                    }
+                    self.items.notice = "Copias liberadas. Las que ya entregaste cambian de stats si reutilizas ese hueco.".to_string();
+                }
+            }
+        }
         if modified {
-            ui.label(RichText::new("Este ítem ya tiene valores personalizados guardados.").color(GOOD));
+            ui.label(RichText::new(if self.items.global { "Este ítem ya tiene valores personalizados guardados." } else { "Stats pendientes: se aplican a una copia nueva al ENTREGAR." }).color(GOOD));
         }
         let mut changed = false;
         let show_dmg = item.dmg_set || item.category == "Weapons" || item.dmg.iter().any(|v| *v != 0.0);
@@ -1106,12 +1258,16 @@ impl App {
     pub fn settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(12.0);
+            self.server_ui(ui);
+            divider(ui);
+            self.copies_ui(ui);
+            divider(ui);
             ui.label(RichText::new("AJUSTES GLOBALES").font(title_font(22.0)).color(GOLD));
             ui.label(RichText::new("Durabilidad, vida base del jugador, niveles máximos… Afectan a todo el juego, no a un ítem concreto.").color(MUTED));
             divider(ui);
             self.balance_ui(ui);
             divider(ui);
-            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego. Los stats de cada ítem cambian ese tipo de ítem para todas sus copias.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego.").color(MUTED).size(12.5));
             if button(ui, "RESTAURAR TODO A VALORES DEL JUEGO", Vec2::new(ui.available_width().min(360.0), 34.0), true, false) {
                 let dir = self.dir.clone();
                 self.items.notice = match self.items.reset_all(&dir) {
@@ -1307,7 +1463,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let items = parse_items(&sample());
         let sword = items.iter().find(|i| i.id == 1234).unwrap().clone();
-        let mut state = ItemsState { rows: items, ..Default::default() };
+        let mut state = ItemsState { rows: items, global: true, ..Default::default() };
         state.balance_base.insert("durabilityStart".to_string(), 100.0);
         state.balance.insert("durabilityStart".to_string(), 900.0);
         let mut edit = ItemsState::base_edit(&sword);
@@ -1343,7 +1499,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let items = parse_items(&sample());
         let sword = items.iter().find(|i| i.id == 1234).unwrap().clone();
-        let mut state = ItemsState { rows: items, ..Default::default() };
+        let mut state = ItemsState { rows: items, global: true, ..Default::default() };
         let mut edit = ItemsState::base_edit(&sword);
         edit.dmg.as_mut().unwrap()[1] = 9.0;
         state.set_edit(&sword, edit);
@@ -1463,4 +1619,114 @@ mod tests {
         }
         st.persist(&to).unwrap();
     }
+
+    fn copy_state() -> (std::path::PathBuf, ItemsState, Item) {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!("m182_items_copy_{}_{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        let items = parse_items(&sample());
+        let mut sword = items.iter().find(|i| i.id == 1234).unwrap().clone();
+        sword.guid = "99999999-0000-0000-0000-000000000001".to_string();
+        (dir, ItemsState { rows: items, ..Default::default() }, sword)
+    }
+
+    fn edited(state: &mut ItemsState, sword: &Item, damage: f32) {
+        let mut edit = ItemsState::base_edit(sword);
+        edit.dmg.as_mut().unwrap()[1] = damage;
+        state.set_edit(sword, edit);
+    }
+
+    #[test]
+    fn edits_made_for_a_copy_never_change_the_item_for_everyone() {
+        let (dir, mut state, sword) = copy_state();
+        edited(&mut state, &sword, 9.0);
+        assert!(state.saved.is_empty() && state.dirty.is_empty());
+        assert!(state.is_modified(&sword));
+        assert_eq!(state.current(&sword).dmg.unwrap()[1], 9.0);
+        state.persist(&dir).unwrap();
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
+        assert!(!lua.contains("dmgMod = 9"));
+        assert!(lua.contains("local function custom_items()"));
+        state.set_edit(&sword, ItemsState::base_edit(&sword));
+        assert!(!state.is_modified(&sword));
+    }
+
+    #[test]
+    fn each_distinct_edit_gets_its_own_copy_and_the_original_is_untouched() {
+        let (dir, mut state, sword) = copy_state();
+        // nothing edited: the plain item is delivered
+        assert!(matches!(state.copy_outcome(&dir, &sword, 3, false), CopyOutcome::Plain));
+        edited(&mut state, &sword, 9.0);
+        // first time: copies are reserved, the game has to start once to create them
+        let CopyOutcome::Blocked { message, commands } = state.copy_outcome(&dir, &sword, 3, false) else { panic!("expected a reservation") };
+        assert!(message.contains("Reinicia el juego"), "{message}");
+        assert_eq!(commands, vec![json!({"cmd": "item_pool", "base": 1234, "slots": copies::SLOTS})]);
+        let CopyOutcome::Blocked { message, .. } = state.copy_outcome(&dir, &sword, 3, false) else { panic!("still waiting for the game") };
+        assert!(message.contains("al abrir el juego"), "{message}");
+        // the game reports having created the copies
+        let rows: String = (1..=copies::SLOTS).map(|s| format!("1234,{s},{},g,Sword\n", copies::item_id(1234, s))).collect();
+        std::fs::write(dir.join(copies::READY_FILE), format!("base_id,slot,item_id,guid,debug_name\n{rows}")).unwrap();
+        let CopyOutcome::Deliver(first) = state.copy_outcome(&dir, &sword, 3, false) else { panic!("expected a copy") };
+        assert_eq!(first.slot, 1);
+        assert_eq!(first.item, copies::item_id(1234, 1));
+        assert_eq!(first.guid, copies::item_guid(&sword.guid, 1).unwrap());
+        assert_ne!(first.item, sword.id);
+        assert_eq!(first.stats["dmg_old"][0], dmg_hex(&sword.dmg));
+        let mut want = sword.dmg;
+        want[1] = 9.0;
+        assert_eq!(first.stats["dmg_new"], dmg_hex(&want));
+        assert!(first.stats.get("arm_new").is_none());
+        assert_eq!(first.commands.len(), 1);
+        assert_eq!(first.commands[0]["cmd"], "item_copy");
+        assert_eq!(first.commands[0]["slot"], 1);
+        assert!(first.commands[0]["dmg"].as_str().unwrap().starts_with("1,9,"));
+        // the same stats again reuse the copy and save nothing new
+        let CopyOutcome::Deliver(again) = state.copy_outcome(&dir, &sword, 3, false) else { panic!("expected a copy") };
+        assert_eq!((again.slot, again.commands.len()), (1, 0));
+        // other stats go to the next copy
+        edited(&mut state, &sword, 20.0);
+        let CopyOutcome::Deliver(second) = state.copy_outcome(&dir, &sword, 3, false) else { panic!("expected a copy") };
+        assert_eq!(second.slot, 2);
+        assert_ne!(second.item, first.item);
+        // the original item and the first copy are never part of the second copy's patch
+        assert!(!second.stats.to_string().contains(&dmg_hex(&want)) || second.stats["dmg_old"].to_string().contains(&dmg_hex(&want)) == false);
+        // the book survives a restart of the panel
+        let book = copies::Book::load(&dir);
+        assert_eq!(book.active_count(1234), 2);
+        // releasing frees the copies; reusing one remembers what it may still hold
+        let drops = state.release_copies(&dir, &sword);
+        assert_eq!(drops.len(), 2);
+        assert_eq!(drops[0]["cmd"], "item_copy_drop");
+        edited(&mut state, &sword, 30.0);
+        let CopyOutcome::Deliver(third) = state.copy_outcome(&dir, &sword, 3, false) else { panic!("expected a copy") };
+        assert_eq!(third.slot, 1);
+        assert_eq!(third.stats["dmg_old"].as_array().unwrap().len(), 2);
+        assert_eq!(third.stats["dmg_old"][1], first.stats["dmg_new"]);
+    }
+
+    #[test]
+    fn a_full_pool_is_reported_and_levels_beyond_the_range_are_part_of_the_copy() {
+        let (dir, mut state, sword) = copy_state();
+        edited(&mut state, &sword, 9.0);
+        state.book.register(1234, 1);
+        state.book.confirm_restart();
+        let CopyOutcome::Deliver(copy) = state.copy_outcome(&dir, &sword, 200, true) else { panic!("expected a copy") };
+        assert_eq!(copy.commands[0]["lvl"], json!([sword.level_min, 200]));
+        assert_eq!(copy.stats["lvl_new"], level_hex(sword.level_min, 200));
+        assert_eq!(copy.stats["lvl_old"][0], level_hex(sword.level_min, sword.level_max));
+        edited(&mut state, &sword, 20.0);
+        let CopyOutcome::Blocked { message, .. } = state.copy_outcome(&dir, &sword, 200, true) else { panic!("the only copy is taken") };
+        assert!(message.contains("en uso"), "{message}");
+    }
+
+    #[test]
+    fn items_edited_for_everyone_keep_the_old_behaviour() {
+        let (dir, mut state, sword) = copy_state();
+        state.global = true;
+        edited(&mut state, &sword, 9.0);
+        assert!(state.saved.contains_key(&1234) && state.draft.is_empty());
+        assert!(matches!(state.copy_outcome(&dir, &sword, 3, false), CopyOutcome::Plain));
+    }
+
 }

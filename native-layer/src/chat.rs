@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,15 @@ pub enum Verdict {
 pub struct Session {
     buffers: HashMap<String, (String, Instant)>,
     failures: Vec<Instant>,
+}
+
+/// Chat client (plus one) that wrote the request waiting to be executed; 0 when none.
+pub static REQUESTER: AtomicU32 = AtomicU32::new(0);
+
+fn note_requester(file: &str, client: u32) {
+    if file == "m182_spawn.request" || file == "m182_command.request" {
+        REQUESTER.store(client.wrapping_add(1), Ordering::SeqCst);
+    }
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -105,7 +115,11 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
         "ping" => Ok("ping".to_string()),
         "set" => {
             let (file, body) = next_token(rest);
-            write_json(dir, file, body)
+            let written = write_json(dir, file, body);
+            if written.is_ok() {
+                note_requester(file, client);
+            }
+            written
         }
         "put" => {
             let (file, chunk) = next_token(rest);
@@ -137,7 +151,13 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
             let (file, _) = next_token(rest);
             match allowed(file) {
                 Some(name) => match session.buffers.remove(name) {
-                    Some((buffer, _)) => write_json(dir, name, &buffer),
+                    Some((buffer, _)) => {
+                        let written = write_json(dir, name, &buffer);
+                        if written.is_ok() {
+                            note_requester(name, client);
+                        }
+                        written
+                    }
                     None => Err(format!("nothing buffered for {name}")),
                 },
                 None => Err(format!("file \"{file}\" is not allowed")),

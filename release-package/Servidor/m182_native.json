@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "pvp": true,
+  "pvp_friend_checks": true,
+  "spawn_probe": false,
+  "spawner": true,
+  "spawn_key": "F8",
+  "spawn_template": "59811b72-4e30-49b5-98f9-ccbca2050712",
+  "spawn_level": 20,
+  "spawn_count": 1,
+  "spawn_distance": 1.0,
+  "spawn_health": 70,
+  "spawn_damage": 0.8,
+  "dump_player_key": "F7",
+  "dump_spawned_key": "F6",
+  "watch_key": "F5",
+  "chat_key": "m182-7dde183b"
+}
