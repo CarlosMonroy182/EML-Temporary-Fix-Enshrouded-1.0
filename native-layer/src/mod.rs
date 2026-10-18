@@ -6,6 +6,7 @@
 //! * Every failure path logs and returns; nothing panics (the release profile aborts).
 //! * `m182_native.json` has a master switch (`"enabled": false`) that disables all of it.
 
+pub mod chat;
 pub mod config;
 pub mod faction;
 pub mod groups;

@@ -30,6 +30,8 @@ pub struct NativeConfig {
     pub dump_player_key: String,
     pub dump_spawned_key: String,
     pub watch_key: String,
+    /// Secret for the chat command channel (`/m182 <key> ...`). Empty = channel off.
+    pub chat_key: String,
 }
 
 impl Default for NativeConfig {
@@ -50,6 +52,7 @@ impl Default for NativeConfig {
             dump_player_key: "F7".to_string(),
             dump_spawned_key: "F6".to_string(),
             watch_key: "F5".to_string(),
+            chat_key: String::new(),
         }
     }
 }
@@ -72,6 +75,7 @@ pub struct LiveState {
     pub pvp_friend_checks: AtomicBool,
     pub spawn_probe: AtomicBool,
     pub spawner: AtomicBool,
+    pub chat_key: std::sync::Mutex<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +149,7 @@ pub static LIVE: LiveState = LiveState {
     pvp_friend_checks: AtomicBool::new(false),
     spawn_probe: AtomicBool::new(false),
     spawner: AtomicBool::new(false),
+    chat_key: std::sync::Mutex::new(String::new()),
 };
 
 impl LiveState {
@@ -154,6 +159,15 @@ impl LiveState {
             .store(cfg.enabled && cfg.pvp && cfg.pvp_friend_checks, Ordering::Relaxed);
         self.spawn_probe.store(cfg.enabled && cfg.spawn_probe, Ordering::Relaxed);
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
+
+        let chat_key = cfg.chat_key.trim();
+        let usable = cfg.enabled && super::chat::valid_key(chat_key);
+        if !chat_key.is_empty() && !usable {
+            tracing::warn!(target: "m182::native", "chat_key must have at least {} characters and no spaces; chat commands stay off", super::chat::MIN_KEY_LEN);
+        }
+        if let Ok(mut k) = self.chat_key.lock() {
+            *k = if usable { chat_key.to_string() } else { String::new() };
+        }
 
         let key = parse_key(&cfg.spawn_key);
         if key.is_none() {
@@ -177,6 +191,10 @@ impl LiveState {
             s.damage = cfg.spawn_damage.clamp(0.0, 1000.0);
             s.watch_key = parse_key(&cfg.watch_key).unwrap_or(s.watch_key);
         }
+    }
+
+    pub fn chat_key(&self) -> String {
+        self.chat_key.lock().map(|k| k.clone()).unwrap_or_default()
     }
 
     #[inline]
