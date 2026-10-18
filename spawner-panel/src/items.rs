@@ -1445,4 +1445,22 @@ mod tests {
         assert_eq!(st.levels.len(), 1);
         assert_eq!(st.levels[&11], (3, 255));
     }
+
+    #[test]
+    fn dump_mod_when_asked() {
+        let (Ok(from), Ok(to)) = (std::env::var("M182_MOD_FROM"), std::env::var("M182_MOD_TO")) else { return };
+        let (from, to) = (std::path::PathBuf::from(from), std::path::PathBuf::from(to));
+        let rows = parse_items(&std::fs::read_to_string(from.join("export").join("m182_items.csv")).unwrap());
+        let (saved, saved_balance) = load_saved(&from);
+        let base = load_balance(&from);
+        let mut balance = base.clone();
+        for (k, v) in saved_balance {
+            balance.insert(k, v);
+        }
+        let mut st = ItemsState { rows, balance_base: base, balance, saved, levels: load_levels(&from), ..Default::default() };
+        if let Ok(log) = std::fs::read_to_string(from.join("m182_spawner.log")) {
+            st.adopt_logged_deliveries(&log);
+        }
+        st.persist(&to).unwrap();
+    }
 }

@@ -475,9 +475,10 @@ impl App {
             ..Default::default()
         };
         if let Ok(log) = std::fs::read_to_string(dir.join("m182_spawner.log")) {
-            if item_state.adopt_logged_deliveries(&log) {
-                let _ = item_state.persist(&dir);
-            }
+            item_state.adopt_logged_deliveries(&log);
+        }
+        if dir.join("enshrouded.exe").exists() {
+            let _ = item_state.persist(&dir);
         }
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
         let get_f = |key: &str, default: f32| cfg.get(key).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(default);
