@@ -16,6 +16,7 @@ use super::{KFCReadError, KFCWriteError, StaticMap, StaticMapBucket, header::*};
 
 #[derive(Debug, Clone)]
 pub struct KFCFile {
+    magic: u32,
     version: String,
 
     containers: Vec<ContainerInfo>,
@@ -32,6 +33,7 @@ pub struct KFCFile {
 impl Default for KFCFile {
     fn default() -> Self {
         Self {
+            magic: 0,
             resource_locations: vec![ResourceLocation::default()],
             resource_chunks: Vec::default(),
 
@@ -94,6 +96,10 @@ impl KFCFile {
     #[inline]
     pub fn contents(&self) -> &StaticMap<ContentHash, ContentEntry> {
         &self.contents
+    }
+
+    pub fn set_magic(&mut self, magic: u32) {
+        self.magic = if is_known_magic(magic) { magic } else { 0 };
     }
 
     #[inline]
@@ -319,6 +325,7 @@ impl KFCFile {
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(Self {
+                magic: header.magic,
                 version,
                 containers,
 
@@ -333,6 +340,7 @@ impl KFCFile {
             })
         } else {
             Ok(Self {
+                magic: header.magic,
                 version,
                 containers: Vec::new(),
                 resource_locations,
@@ -443,6 +451,7 @@ impl KFCFile {
 
         // KFCHeader
         let header = KFCHeader {
+            magic: self.magic,
             unused0: Default::default(),
             unused1: Default::default(),
 
@@ -480,4 +489,34 @@ impl KFCFile {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod magic_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn sample(path: &str) -> Option<Vec<u8>> {
+        std::fs::read(path).ok()
+    }
+
+    #[test]
+    fn server_directory_is_read_and_rewritten_with_its_own_tag() {
+        let Some(bytes) = std::env::var("M182_KFC_SAMPLE").ok().and_then(|p| sample(&p)) else { return };
+        let original_tag = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        let file = KFCFile::from_reader(&mut Cursor::new(bytes.clone()), false).expect("directory must be readable");
+        assert!(!file.resources().is_empty());
+
+        let mut out = Cursor::new(Vec::new());
+        file.write(&mut out).expect("rewrite");
+        let written = out.into_inner();
+        assert_eq!(&written[0..4], &original_tag, "tag must be preserved");
+
+        let again = KFCFile::from_reader(&mut Cursor::new(written), false).expect("rewritten directory must be readable");
+        assert_eq!(again.resources().len(), file.resources().len());
+        assert_eq!(again.contents().len(), file.contents().len());
+        assert_eq!(again.game_version(), file.game_version());
+        assert_eq!(again.containers().len(), file.containers().len());
+        assert_eq!(again.resource_chunks().len(), file.resource_chunks().len());
+    }
 }

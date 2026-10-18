@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::HashMap, fs::File, io::{BufWriter, Cursor, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
+use std::{borrow::Borrow, collections::HashMap, fs::File, io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
 
 use crate::{Hash32, container::header::ResourceChunkInfo, guid::{ContentHash, ResourceId}, io::{WriteExt, WriteSeekExt}, reflection::TypeRegistry};
 
@@ -409,8 +409,17 @@ where
 
         // header construction
 
+        let magic = {
+            let position = self.file.stream_position()?;
+            let mut tag = [0u8; 4];
+            let found = self.file.seek(SeekFrom::Start(0)).is_ok() && self.file.read_exact(&mut tag).is_ok();
+            self.file.seek(SeekFrom::Start(position))?;
+            if found { u32::from_le_bytes(tag) } else { 0 }
+        };
+
         let mut file_writer = BufWriter::new(&mut self.file);
         let mut file = KFCFile::default();
+        file.set_magic(magic);
 
         file.set_game_version(self.game_version);
         file.set_resources(
