@@ -342,6 +342,10 @@ pub fn load_generic_pickup(dir: &Path) -> String {
     GENERIC_PICKUP.to_string()
 }
 
+/// The level caps the game ships with. Earlier versions of this mod raised them, and EML keeps
+/// whatever a patched game file contained, so the exported values cannot be trusted for these two.
+pub const VANILLA_CAPS: [(&str, f64); 2] = [("itemLevelCap", 55.0), ("playerLevelCap", 50.0)];
+
 pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
     let mut out = BTreeMap::new();
     if let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_balance.csv")) {
@@ -352,6 +356,9 @@ pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
                 }
             }
         }
+    }
+    for (key, value) in VANILLA_CAPS {
+        out.insert(key.to_string(), value);
     }
     out
 }
@@ -411,6 +418,7 @@ pub struct ItemsState {
     pub names_applied: bool,
     pub sent: BTreeMap<u32, Edit>,
     pub dirty: BTreeMap<u32, Instant>,
+    pub levels: Levels,
 }
 
 pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
@@ -457,7 +465,40 @@ pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
     (items, balance)
 }
 
-pub fn stats_json(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) -> Value {
+pub type Levels = BTreeMap<u32, (u32, u32)>;
+
+pub fn load_levels(dir: &Path) -> Levels {
+    let mut out = Levels::new();
+    let Some(v) = std::fs::read_to_string(dir.join(STATS_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return out };
+    if let Some(map) = v.get("levels").and_then(|m| m.as_object()) {
+        for (k, r) in map {
+            let (Ok(id), Some(a)) = (k.parse::<u32>(), r.as_array()) else { continue };
+            if let (Some(lo), Some(hi)) = (a.first().and_then(|x| x.as_u64()), a.get(1).and_then(|x| x.as_u64())) {
+                if lo <= hi && hi <= 100_000 {
+                    out.insert(id, (lo as u32, hi as u32));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Item levels the game was asked to deliver, read back from the spawner log.
+pub fn delivered_levels(log: &str) -> BTreeMap<u32, u32> {
+    let mut out = BTreeMap::new();
+    for line in log.lines() {
+        let Some(rest) = line.split("delivery: item ").nth(1) else { continue };
+        let mut parts = rest.split_whitespace();
+        let (Some(id), Some(_), Some(_), Some(level)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { continue };
+        if let (Ok(id), Ok(level)) = (id.parse::<u32>(), level.parse::<u32>()) {
+            let slot = out.entry(id).or_insert(level);
+            *slot = (*slot).max(level);
+        }
+    }
+    out
+}
+
+pub fn stats_json(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, levels: &Levels) -> Value {
     let mut map = serde_json::Map::new();
     for (id, e) in items {
         let mut o = serde_json::Map::new();
@@ -471,7 +512,8 @@ pub fn stats_json(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) 
         }
         map.insert(id.to_string(), Value::Object(o));
     }
-    json!({"items": Value::Object(map), "balance": balance})
+    let ranges: serde_json::Map<String, Value> = levels.iter().map(|(id, (lo, hi))| (id.to_string(), json!([lo, hi]))).collect();
+    json!({"items": Value::Object(map), "balance": balance, "levels": Value::Object(ranges)})
 }
 
 fn lua_num(v: f64) -> String {
@@ -482,7 +524,7 @@ fn lua_num(v: f64) -> String {
     }
 }
 
-pub fn lua_source(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) -> String {
+pub fn lua_source(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, levels: &Levels) -> String {
     let mut s = String::new();
     s.push_str("local OVERRIDES = {\n");
     for (id, e) in items {
@@ -502,6 +544,10 @@ pub fn lua_source(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) 
             s.push_str("},\n");
         }
         s.push_str("    },\n");
+    }
+    s.push_str("}\n\nlocal LEVELS = {\n");
+    for (id, (lo, hi)) in levels {
+        s.push_str(&format!("    [{}] = {{ {}, {} }},\n", id, lo, hi));
     }
     s.push_str("}\n\nlocal BALANCE = {\n");
     for (k, v) in balance {
@@ -584,6 +630,7 @@ local function write_group(container, values, label, report)
 end
 
 local found = {}
+local levelsDone = {}
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 if items ~= nil then
     pcall(function()
@@ -591,6 +638,23 @@ if items ~= nil then
             pcall(function()
                 local data = resource.data
                 local id = unsigned(hash_of(data.itemId))
+                local range = id and LEVELS[id]
+                if range ~= nil then
+                    local span = try(function() return data.itemLevelRange end)
+                    local lo = try(function() return span.minLevel end)
+                    local hi = try(function() return span.maxLevel end)
+                    local wrote = false
+                    if span ~= nil and type(lo) == "number" and type(hi) == "number" then
+                        local newLo, newHi = math.min(lo, range[1]), math.max(hi, range[2])
+                        if newLo ~= lo then wrote = put(span, "minLevel", newLo) end
+                        if newHi ~= hi then wrote = put(span, "maxLevel", newHi) end
+                        print(string.format("[m182-item-stats] item %d level range %s-%s -> %s-%s (%s)", id, tostring(lo), tostring(hi),
+                            tostring(try(function() return span.minLevel end)), tostring(try(function() return span.maxLevel end)), wrote and "written" or "unchanged"))
+                    else
+                        print(string.format("[m182-item-stats] item %d has no readable level range", id))
+                    end
+                    levelsDone[id] = true
+                end
                 local o = id and OVERRIDES[id]
                 if o == nil then return end
                 local report = { written = 0, mismatch = 0, missing = 0 }
@@ -607,6 +671,9 @@ end
 for id in pairs(OVERRIDES) do
     if found[id] == nil then print(string.format("[m182-item-stats] item %d not found in the game data", id)) end
 end
+for id in pairs(LEVELS) do
+    if levelsDone[id] == nil then print(string.format("[m182-item-stats] item %d (level range) not found in the game data", id)) end
+end
 
 print(string.format("[m182-item-stats] items done applied=%d failed=%d", applied, failed))
 
@@ -622,6 +689,11 @@ if type(tables) == "table" and #tables > 0 then
             ok = put(d, key, value)
         end
         if ok then applied = applied + 1 else failed = failed + 1 end
+        local back = try(function()
+            if rarity then return d.rarityDurabilityMod[rarity] end
+            return d[key]
+        end)
+        print(string.format("[m182-item-stats] balance %s = %s (%s)", key, tostring(back), ok and "written" or "not written"))
     end
 end
 
@@ -631,7 +703,7 @@ print(string.format("[m182-item-stats] values applied=%d failed=%d", applied, fa
     s
 }
 
-pub fn write_mod(dir: &Path, items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>) -> Result<(), String> {
+pub fn write_mod(dir: &Path, items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, levels: &Levels) -> Result<(), String> {
     let root = dir.join("mods").join(MOD_DIR);
     let src = root.join("src");
     std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
@@ -648,7 +720,7 @@ pub fn write_mod(dir: &Path, items: &BTreeMap<u32, Edit>, balance: &BTreeMap<Str
 }
 "#;
     std::fs::write(root.join("mod.json"), manifest).map_err(|e| e.to_string())?;
-    std::fs::write(src.join("mod.lua"), lua_source(items, balance)).map_err(|e| e.to_string())?;
+    std::fs::write(src.join("mod.lua"), lua_source(items, balance, levels)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -728,6 +800,34 @@ impl ItemsState {
         }
     }
 
+    /// Remembers what a delivery at `level` needs from the game data so the item still
+    /// exists, with its level and rarity, after the game is restarted: the item's own level
+    /// range and the global item level cap. Returns true when something new has to be saved.
+    pub fn note_delivery(&mut self, item: &Item, level: u32) -> bool {
+        let mut changed = false;
+        if level > 0 && item.level_max > 0 && (level < item.level_min || level > item.level_max) {
+            let want = (item.level_min.min(level), item.level_max.max(level));
+            let merged = match self.levels.get(&item.id) {
+                Some(have) => (have.0.min(want.0), have.1.max(want.1)),
+                None => want,
+            };
+            if self.levels.get(&item.id) != Some(&merged) {
+                self.levels.insert(item.id, merged);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn adopt_logged_deliveries(&mut self, log: &str) -> bool {
+        let mut changed = false;
+        for (id, level) in delivered_levels(log) {
+            let Some(item) = self.rows.iter().find(|r| r.id == id).cloned() else { continue };
+            changed |= self.note_delivery(&item, level);
+        }
+        changed
+    }
+
     pub fn stats_request(&self, item: &Item) -> Option<Value> {
         self.stats_for(item, self.level)
     }
@@ -782,17 +882,27 @@ impl ItemsState {
     }
 
     pub fn persist(&self, dir: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(&stats_json(&self.saved, &self.balance_overrides())).map_err(|e| e.to_string())?;
+        let text = serde_json::to_string_pretty(&stats_json(&self.saved, &self.balance_overrides(), &self.levels)).map_err(|e| e.to_string())?;
         write_atomic(dir, STATS_FILE, "m182_item_stats.json.tmp", &text)?;
-        write_mod(dir, &self.saved, &self.balance_overrides())
+        write_mod(dir, &self.saved, &self.balance_overrides(), &self.levels)
     }
 
     pub fn balance_overrides(&self) -> BTreeMap<String, f64> {
-        self.balance
+        let mut out: BTreeMap<String, f64> = self
+            .balance
             .iter()
             .map(|(k, v)| (k.clone(), balance_normalize(k, *v)))
             .filter(|(k, v)| self.balance_base.get(k).map(|b| (b - *v).abs() > 1e-9).unwrap_or(false))
-            .collect()
+            .collect();
+        for (key, vanilla) in VANILLA_CAPS {
+            let value = self.balance.get(key).copied().unwrap_or(vanilla);
+            out.insert(key.to_string(), balance_normalize(key, value));
+        }
+        out
+    }
+
+    pub fn item_level_cap(&self) -> u32 {
+        self.balance.get("itemLevelCap").copied().unwrap_or(VANILLA_CAPS[0].1).round().clamp(1.0, 255.0) as u32
     }
 }
 
@@ -830,7 +940,7 @@ impl App {
         let item = self.items.rows[index].clone();
         if self.items.selected_for != Some(index) {
             self.items.selected_for = Some(index);
-            self.items.level = item.give_level.clamp(1, 255);
+            self.items.level = item.give_level.clamp(1, self.items.item_level_cap());
             self.items.rarity = item.rarity_index();
             self.items.amount = 1;
         }
@@ -842,7 +952,9 @@ impl App {
         ui.label(RichText::new(format!("{}  ·  rareza base {}  ·  niveles {}–{}", item.group, rarity_name, item.level_min, item.level_max)).color(MUTED).size(13.0));
         divider(ui);
         label_title(ui, "NIVEL DEL ÍTEM");
-        ui.add(egui::Slider::new(&mut self.items.level, 1..=255));
+        let cap = self.items.item_level_cap();
+        self.items.level = self.items.level.clamp(1, cap);
+        ui.add(egui::Slider::new(&mut self.items.level, 1..=cap));
         if self.items.level > item.level_max && item.level_max > 0 {
             ui.label(RichText::new(format!("Por encima del máximo normal ({}). Se amplía el rango del ítem al entregarlo.", item.level_max)).color(MUTED).size(12.5));
         }
@@ -958,7 +1070,7 @@ impl App {
             }
             let mut changed = false;
             if self.items.balance.iter().any(|(k, v)| (k == "itemLevelCap" || k == "playerLevelCap") && self.items.balance_base.get(k).map(|b| *v > *b + 0.5).unwrap_or(false)) {
-                ui.label(RichText::new("Aviso: subir los niveles máximos podría dejar el loot de las criaturas sin poder recogerse tras reiniciar (sospecha sin confirmar). Si te pasa, restaura estos valores.").color(GOLD_DIM).size(12.5));
+                ui.label(RichText::new("Aviso: por encima de los máximos normales (ítems 55, jugador 50) el botín de las criaturas puede dejar de poder recogerse. Si te pasa, pulsa Restaurar.").color(GOLD_DIM).size(12.5));
             }
             for (key, label) in BALANCE_LABELS {
                 if let Some(value) = self.items.balance.get_mut(*key) {
@@ -1050,8 +1162,8 @@ mod tests {
     #[test]
     fn dump_empty_lua_when_asked() {
         let Ok(path) = std::env::var("M182_DUMP_EMPTY_LUA") else { return };
-        std::fs::write(&path, lua_source(&BTreeMap::new(), &BTreeMap::new())).unwrap();
-        let json = serde_json::to_string_pretty(&stats_json(&BTreeMap::new(), &BTreeMap::new())).unwrap();
+        std::fs::write(&path, lua_source(&BTreeMap::new(), &BTreeMap::new(), &Levels::new())).unwrap();
+        let json = serde_json::to_string_pretty(&stats_json(&BTreeMap::new(), &BTreeMap::new(), &Levels::new())).unwrap();
         std::fs::write(format!("{path}.json"), json).unwrap();
     }
 
@@ -1072,7 +1184,10 @@ mod tests {
         let mut balance = BTreeMap::new();
         balance.insert("durabilityStart".to_string(), 500.0);
         balance.insert("rarityDurabilityMod.epic".to_string(), 3.5);
-        std::fs::write(path, lua_source(&saved, &balance)).unwrap();
+        let mut levels = Levels::new();
+        levels.insert(1234, (3, 255));
+        levels.insert(555, (1, 9));
+        std::fs::write(path, lua_source(&saved, &balance, &levels)).unwrap();
     }
 
     #[test]
@@ -1107,9 +1222,10 @@ mod tests {
         state.balance.insert("itemLevelCap".to_string(), 85.8);
         state.balance.insert("durabilityStart".to_string(), 145.0);
         let o = state.balance_overrides();
-        assert_eq!(o.len(), 1);
+        assert_eq!(o.len(), 2);
         assert_eq!(o["itemLevelCap"], 86.0);
-        let lua = lua_source(&BTreeMap::new(), &o);
+        assert_eq!(o["playerLevelCap"], 50.0);
+        let lua = lua_source(&BTreeMap::new(), &o, &Levels::new());
         assert!(lua.contains("[\"itemLevelCap\"] = 86,"));
         assert!(lua.contains("INTEGER_KEYS"));
     }
@@ -1176,7 +1292,7 @@ mod tests {
         let mut balance = BTreeMap::new();
         balance.insert("durabilityStart".to_string(), 500.0);
         balance.insert("rarityDurabilityMod.epic".to_string(), 3.5);
-        let lua = lua_source(&saved, &balance);
+        let lua = lua_source(&saved, &balance, &Levels::new());
         assert!(lua.contains("[1234] = {"));
         assert!(lua.contains("dmgMod = 5"));
         assert!(lua.contains("[\"durabilityStart\"] = 500"));
@@ -1208,7 +1324,10 @@ mod tests {
         assert!(!lua.contains("dmgMod = 9"));
         assert!(!lua.contains("durabilityStart\"] = 900"));
         let (loaded, bal) = load_saved(&dir);
-        assert!(loaded.is_empty() && bal.is_empty());
+        assert!(loaded.is_empty());
+        assert_eq!(bal.len(), 2);
+        assert_eq!(bal["itemLevelCap"], 55.0);
+        assert_eq!(bal["playerLevelCap"], 50.0);
     }
 
     #[test]
@@ -1252,5 +1371,78 @@ mod tests {
         assert!(!state.saved.contains_key(&1234));
         assert_eq!(state.outbox.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deliveries_keep_the_item_valid_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!("m182_levels_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut st = ItemsState::default();
+        st.balance_base.insert("itemLevelCap".into(), 55.0);
+        st.balance.insert("itemLevelCap".into(), 55.0);
+        let mut item = Item::default();
+        item.id = 1275936258;
+        item.level_min = 5;
+        item.level_max = 5;
+        st.rows.push(item.clone());
+
+        assert!(!st.note_delivery(&item, 5));
+        assert!(st.note_delivery(&item, 255));
+        assert_eq!(st.levels.get(&item.id), Some(&(5, 255)));
+        assert_eq!(st.balance["itemLevelCap"], 55.0);
+        assert!(!st.note_delivery(&item, 255));
+        assert!(!st.note_delivery(&item, 100));
+
+        st.persist(&dir).unwrap();
+        assert_eq!(load_levels(&dir).get(&item.id), Some(&(5, 255)));
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
+        assert!(lua.contains("[1275936258] = { 5, 255 }"), "{lua}");
+        assert!(lua.contains("[\"itemLevelCap\"] = 55"), "{lua}");
+        assert!(lua.contains("[\"playerLevelCap\"] = 50"), "{lua}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn level_caps_are_forced_back_to_the_games_own_values_even_if_the_export_shows_more() {
+        let dir = std::env::temp_dir().join(format!("m182_caps_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        std::fs::write(dir.join("export").join("m182_balance.csv"), "key,value\nitemLevelCap,255\nplayerLevelCap,255\ndurabilityStart,145\n").unwrap();
+        let base = load_balance(&dir);
+        assert_eq!(base["itemLevelCap"], 55.0);
+        assert_eq!(base["playerLevelCap"], 50.0);
+        assert_eq!(base["durabilityStart"], 145.0);
+        let mut st = ItemsState::default();
+        st.balance_base = base.clone();
+        st.balance = base;
+        assert_eq!(st.item_level_cap(), 55);
+        let forced = st.balance_overrides();
+        assert_eq!(forced["itemLevelCap"], 55.0);
+        assert_eq!(forced["playerLevelCap"], 50.0);
+        assert!(!forced.contains_key("durabilityStart"));
+        st.balance.insert("itemLevelCap".into(), 120.0);
+        assert_eq!(st.item_level_cap(), 120);
+        assert_eq!(st.balance_overrides()["itemLevelCap"], 120.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn earlier_deliveries_are_recovered_from_the_log() {
+        let log = "[1ms] delivery: item 11 placed (level 255 rarity 4 amount 1)\n[2ms] spawn requested\n[3ms] delivery: item 11 placed (level 40 rarity 0 amount 1)\n[4ms] delivery: item 12 placed (level 1 rarity 4 amount 1)\nnoise delivery: item x placed";
+        let got = delivered_levels(log);
+        assert_eq!(got.get(&11), Some(&255));
+        assert_eq!(got.get(&12), Some(&1));
+        let mut st = ItemsState::default();
+        let mut a = Item::default();
+        a.id = 11;
+        a.level_min = 3;
+        a.level_max = 30;
+        let mut b = Item::default();
+        b.id = 12;
+        b.level_min = 1;
+        b.level_max = 30;
+        st.rows = vec![a, b];
+        assert!(st.adopt_logged_deliveries(log));
+        assert_eq!(st.levels.len(), 1);
+        assert_eq!(st.levels[&11], (3, 255));
     }
 }

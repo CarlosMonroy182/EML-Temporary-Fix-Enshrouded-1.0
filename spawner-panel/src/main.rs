@@ -461,7 +461,8 @@ impl App {
         for (k, v) in saved_balance {
             balance.insert(k, v);
         }
-        let item_state = items::ItemsState {
+        let mut item_state = items::ItemsState {
+            levels: items::load_levels(&dir),
             rows: item_rows,
             balance_base,
             balance,
@@ -473,6 +474,11 @@ impl App {
             generic_pickup: items::load_generic_pickup(&dir),
             ..Default::default()
         };
+        if let Ok(log) = std::fs::read_to_string(dir.join("m182_spawner.log")) {
+            if item_state.adopt_logged_deliveries(&log) {
+                let _ = item_state.persist(&dir);
+            }
+        }
         let get_u = |key: &str, default: u32| cfg.get(key).and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(default);
         let get_f = |key: &str, default: f32| cfg.get(key).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(default);
         let get_b = |key: &str| cfg.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -620,6 +626,13 @@ impl App {
         let guid = self.catalog(mode).entries[index].guid.clone();
         if mode == Mode::Items {
             if let Some(item) = self.items.rows.get(index).cloned() {
+                if self.items.note_delivery(&item, self.items.level) {
+                    let dir = self.dir.clone();
+                    if let Err(e) = self.items.persist(&dir) {
+                        self.status = Status::Error(e);
+                        return;
+                    }
+                }
                 if self.items.dirty.contains_key(&item.id) {
                     let dir = self.dir.clone();
                     if let Err(e) = self.items.apply_item(&dir, &item) {
