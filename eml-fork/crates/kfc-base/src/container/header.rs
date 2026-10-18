@@ -5,6 +5,11 @@ use crate::{io::{ReadExt, ReadSeekExt, WriteExt, WriteSeekExt}, Hash32};
 use super::{KFCReadError, KFCWriteError};
 
 const KFC_DIR_MAGIC: u32 = 0x3343464B; // KFC3
+const KFC_DIR_MAGIC_SERVER: u32 = 0x3443464B; // KFC4 (dedicated server)
+
+pub fn is_known_magic(magic: u32) -> bool {
+    magic == KFC_DIR_MAGIC || magic == KFC_DIR_MAGIC_SERVER
+}
 
 /// # Layout
 /// ```c
@@ -40,6 +45,7 @@ const KFC_DIR_MAGIC: u32 = 0x3343464B; // KFC3
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct KFCHeader {
+    pub magic: u32,
     pub size: u64,
     // pub unk0: u32,
 
@@ -72,7 +78,7 @@ impl KFCHeader {
     pub fn read<R: Read + Seek>(reader: &mut R) -> Result<Self, KFCReadError> {
         let magic = reader.read_u32()?;
 
-        if magic != KFC_DIR_MAGIC {
+        if !is_known_magic(magic) {
             return Err(KFCReadError::InvalidMagic(magic));
         }
 
@@ -105,6 +111,7 @@ impl KFCHeader {
         let resource_chunks = KFCLocation::read(reader)?;
 
         Ok(Self {
+            magic,
             size,
 
             version,
@@ -137,7 +144,7 @@ impl KFCHeader {
             return Err(KFCWriteError::SizeTooLarge(self.size));
         }
 
-        writer.write_u32(KFC_DIR_MAGIC)?;
+        writer.write_u32(if self.magic == 0 { KFC_DIR_MAGIC } else { self.magic })?;
         writer.write_u32(self.size as u32)?;
         writer.write_u32(12)?;
         writer.padding(4)?;
