@@ -4,7 +4,21 @@
 //! against the original machine code, see the tests) plus one optional rule:
 //! with `pvp` enabled two entities of the `Player` faction are hostile to each other.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 pub const PLAYER: u8 = 7;
+pub const TEAM_FACTIONS: [u8; 2] = [8, 11];
+
+static TEAM_MASK: AtomicU32 = AtomicU32::new(0);
+
+/// Faction values currently lent to teams (bit n set = value n is a team).
+pub fn set_team_mask(mask: u32) {
+    TEAM_MASK.store(mask, Ordering::Relaxed);
+}
+
+pub fn team_mask() -> u32 {
+    TEAM_MASK.load(Ordering::Relaxed)
+}
 
 #[inline]
 fn player_group(x: u8) -> bool {
@@ -13,8 +27,14 @@ fn player_group(x: u8) -> bool {
 }
 
 #[inline]
+fn player_pair_in(a: u8, b: u8, mask: u32) -> bool {
+    let known = |x: u8| x == PLAYER || (TEAM_FACTIONS.contains(&x) && mask & (1u32 << x) != 0);
+    (a == PLAYER && b == PLAYER) || (a != b && known(a) && known(b))
+}
+
+#[inline]
 fn player_pair(a: u8, b: u8) -> bool {
-    a == PLAYER && b == PLAYER
+    player_pair_in(a, b, team_mask())
 }
 
 /// `isEnemy(a, b)` exactly as the game computes it.
@@ -58,6 +78,13 @@ pub fn friend_opts_vanilla(a: u8, b: u8, flag: bool) -> bool {
         return player_group(b);
     }
     matches!(b, 7 | 8) && flag
+}
+
+pub fn enemy_in(a: u8, b: u8, pvp: bool, mask: u32) -> bool {
+    if pvp && player_pair_in(a, b, mask) {
+        return true;
+    }
+    enemy_vanilla(a, b)
 }
 
 pub fn enemy(a: u8, b: u8, pvp: bool) -> bool {
@@ -148,6 +175,25 @@ mod tests {
             }
             assert_eq!(friend_opts_vanilla(0, 0, flag) as u8, F3_NULL[base + 512]);
         }
+    }
+
+    #[test]
+    fn teammates_share_a_faction_and_everyone_else_stays_hostile() {
+        let team_a = 1u32 << 8;
+        let both = (1u32 << 8) | (1u32 << 11);
+        assert!(!enemy_in(8, 8, true, team_a));
+        assert!(enemy_in(8, PLAYER, true, team_a));
+        assert!(enemy_in(PLAYER, 8, true, team_a));
+        assert!(enemy_in(PLAYER, PLAYER, true, team_a));
+        assert!(!enemy_in(11, PLAYER, true, team_a));
+        assert!(!enemy_in(11, 11, true, both));
+        assert!(enemy_in(8, 11, true, both));
+        assert!(enemy_in(11, 8, true, both));
+        assert!(enemy_in(11, PLAYER, true, both));
+        assert!(!enemy_in(8, 8, false, both));
+        assert!(!enemy_in(8, 11, false, both));
+        assert!(enemy_in(4, 8, true, both));
+        assert!(enemy_in(8, 4, true, both));
     }
 
     #[test]

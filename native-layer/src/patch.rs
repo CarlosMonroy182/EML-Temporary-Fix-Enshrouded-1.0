@@ -32,8 +32,20 @@ fn read_faction(ptr: *const u8) -> u8 {
     if ptr.is_null() { 0 } else { unsafe { ptr.read() } }
 }
 
+static TEAM_CHECKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
+    let teams = faction::TEAM_FACTIONS;
+    if (teams.contains(&a) || teams.contains(&b)) && faction::team_mask() != 0 && TEAM_CHECKS.fetch_add(1, Ordering::Relaxed) < 30 {
+        super::spawner::log(&format!("teams: relation check {via} {a} vs {b} -> {}", if hostile { "hostile" } else { "not hostile" }));
+    }
+}
+
 extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
-    faction::enemy(rcx as u8, rdx as u8, LIVE.pvp()) as u8
+    let (a, b) = (rcx as u8, rdx as u8);
+    let hostile = faction::enemy(a, b, LIVE.pvp());
+    team_check_report(a, b, hostile, "values");
+    hostile as u8
 }
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
@@ -44,15 +56,9 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
         }
         return 0;
     }
-    if LIVE.pvp() && fa == faction::PLAYER && fb == faction::PLAYER {
-        if let Some(line) = groups::pair_report(a as usize, b as usize) {
-            super::spawner::log(&line);
-        }
-        if groups::same_team(a as usize, b as usize) {
-            return faction::enemy_vanilla(fa, fb) as u8;
-        }
-    }
-    faction::enemy(fa, fb, LIVE.pvp()) as u8
+    let hostile = faction::enemy(fa, fb, LIVE.pvp());
+    team_check_report(fa, fb, hostile, "pointers");
+    hostile as u8
 }
 
 extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
@@ -62,9 +68,6 @@ extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
     let (fa, fb) = (read_faction(a), read_faction(b));
-    if LIVE.pvp_friend_checks() && fa == faction::PLAYER && fb == faction::PLAYER && groups::same_team(a as usize, b as usize) {
-        return faction::friend_opts_vanilla(fa, fb, flag) as u8;
-    }
     faction::friend_opts(fa, fb, flag, LIVE.pvp_friend_checks()) as u8
 }
 

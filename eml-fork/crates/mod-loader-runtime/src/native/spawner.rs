@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -392,6 +392,9 @@ fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Optio
             let current = u32_at(&b, 8);
             if current == 0 {
                 // dead (or not initialised yet): never bring it back
+                if u32_at(&b, 36) > 0 {
+                    open_loot_watch(id);
+                }
                 health_done = true;
                 continue;
             }
@@ -1044,9 +1047,61 @@ fn calibration_done() -> bool {
     TRANSFORM_INDEX.load(Ordering::Relaxed) >= 0 || CALIBRATION_TRIES.load(Ordering::Relaxed) >= MAX_CALIBRATION_TRIES
 }
 
+fn guid_text(b: &[u8]) -> String {
+    if b.len() < 16 {
+        return String::new();
+    }
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+static LOOT_WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
+static LOOT_WATCH_LINES: AtomicU32 = AtomicU32::new(0);
+
+fn now_ms() -> u64 {
+    CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+static LOOT_WATCHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn open_loot_watch(id: u32) {
+    if let Ok(mut seen) = LOOT_WATCHED.lock() {
+        if seen.contains(&id) {
+            return;
+        }
+        seen.push(id);
+        if seen.len() > 64 {
+            seen.remove(0);
+        }
+    }
+    if LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms() {
+        return;
+    }
+    LOOT_WATCH_UNTIL.store(now_ms() + 20_000, Ordering::Relaxed);
+    LOOT_WATCH_LINES.store(0, Ordering::Relaxed);
+    log(&format!("loot-watch: spawned creature {id} died; every entity the game creates in the next 20 s is listed"));
+}
+
+fn loot_watch_report(manager: usize, edx: u32, desc: usize, ret: u32) {
+    if LOOT_WATCH_LINES.fetch_add(1, Ordering::Relaxed) >= 120 {
+        return;
+    }
+    let Some(head) = read_bytes(desc, 0x30) else { return };
+    if head.len() < 0x30 {
+        return;
+    }
+    let at = transform_of(manager, ret).map(|t| format!(" at {:.1},{:.1},{:.1}", le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS)).unwrap_or_default();
+    log(&format!("loot-watch: entity {ret} flags={edx} template {}{at}", guid_text(&head[4..20])));
+}
+
 pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if ret == 0 {
         return;
+    }
+    if LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms() {
+        loot_watch_report(manager, edx, desc, ret);
     }
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
     if settled && edx != 1 {
@@ -1888,20 +1943,70 @@ impl GroupState {
     }
 }
 
+const FACTION_COMPONENT: usize = 205;
+
+static LENT_FACTIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+fn is_player_faction(value: u8) -> bool {
+    matches!(value, 7 | 8 | 11)
+}
+
 fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
-    let mut out = Vec::new();
-    let Some((_, _, slots)) = entity_layout(manager, id) else { return out };
+    let mut genuine = Vec::new();
+    let mut guessed = Vec::new();
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return genuine };
+    let lent = LENT_FACTIONS.lock().map(|l| l.clone()).unwrap_or_default();
     for slot in &slots {
         if slot.stride != 1 {
             continue;
         }
-        if let Some(b) = read_bytes(slot.addr, 1) {
-            if b.first() == Some(&super::faction::PLAYER) {
-                out.push(slot.addr);
-            }
+        let Some(b) = read_bytes(slot.addr, 1) else { continue };
+        let Some(&value) = b.first() else { continue };
+        if slot.index == FACTION_COMPONENT && is_player_faction(value) {
+            genuine.push(slot.addr);
+        } else if value == super::faction::PLAYER || (lent.contains(&slot.addr) && is_player_faction(value)) {
+            guessed.push(slot.addr);
         }
     }
-    out
+    if genuine.is_empty() { guessed } else { genuine }
+}
+
+fn lend_faction(addr: usize, value: u8) -> bool {
+    let current = read_bytes(addr, 1).and_then(|b| b.first().copied());
+    match current {
+        Some(c) if c == value => true,
+        Some(c) if is_player_faction(c) => {
+            if !write_bytes(addr, &[value]) {
+                return false;
+            }
+            log(&format!("teams: faction at {addr:#x} {c} -> {value}"));
+            if let Ok(mut l) = LENT_FACTIONS.lock() {
+                if value == super::faction::PLAYER {
+                    l.retain(|a| *a != addr);
+                } else if !l.contains(&addr) {
+                    l.push(addr);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn team_factions(teams: &[Vec<u32>], online: &[u32], pvp: bool) -> Vec<u8> {
+    let mut by_team: Vec<u8> = vec![super::faction::PLAYER; teams.len()];
+    if !pvp {
+        return by_team;
+    }
+    let mut next = 0usize;
+    for (index, members) in teams.iter().enumerate() {
+        let present = members.iter().filter(|m| online.contains(m)).count();
+        if present >= 2 && next < super::faction::TEAM_FACTIONS.len() {
+            by_team[index] = super::faction::TEAM_FACTIONS[next];
+            next += 1;
+        }
+    }
+    by_team
 }
 
 fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
@@ -1937,6 +2042,9 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     };
     let me = PLAYER_ID.load(Ordering::SeqCst);
 
+    let online: Vec<u32> = players.iter().map(|(_, n)| *n).collect();
+    let lent = team_factions(&st.groups.teams, &online, LIVE.pvp());
+    let mut mask = 0u32;
     let mut rows = Vec::new();
     let mut map: Vec<(usize, u8)> = Vec::new();
     let mut shielded: Vec<usize> = Vec::new();
@@ -1957,9 +2065,17 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     shielded.extend(faction_addresses(manager, *id));
                 }
                 let team = groups::team_of_player(&st.groups.teams, *number);
-                if team != 0 {
-                    for addr in faction_addresses(manager, *id) {
+                let wanted = if team != 0 { lent.get(team as usize - 1).copied().unwrap_or(super::faction::PLAYER) } else { super::faction::PLAYER };
+                for addr in faction_addresses(manager, *id) {
+                    if team != 0 {
                         map.push((addr, team));
+                    }
+                    if lend_faction(addr, wanted) {
+                        if wanted != super::faction::PLAYER {
+                            mask |= 1u32 << wanted;
+                        }
+                    } else {
+                        log(&format!("teams: could not set the faction of entity {id}"));
                     }
                 }
             }
@@ -1987,6 +2103,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         st.zone_ids = inside_ids;
     }
     groups::set_team_map(map);
+    super::faction::set_team_mask(mask);
     groups::set_protected(shielded);
     if !inside_at.is_empty()
         && AURA_FAILED.load(Ordering::Relaxed) < 3
