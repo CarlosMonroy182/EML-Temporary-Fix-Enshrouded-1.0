@@ -70,7 +70,7 @@ pub fn utf16_text(bytes: &[u8]) -> Option<String> {
 }
 
 fn pointer_like(v: u64) -> bool {
-    (0x1_0000..0x7fff_ffff_ffff).contains(&v)
+    (0x1_0000..0x7ff0_0000_0000).contains(&v)
 }
 
 /// Finds the player's name in a slot: inline text first, then text behind a pointer.
@@ -106,13 +106,37 @@ pub fn guess_name(slot: &[u8], deref: &dyn Fn(usize) -> Option<Vec<u8>>) -> Opti
         }
     }
     let mut off = 0x18;
-    while off + 6 <= slot.len().min(0x120) {
+    while off + 6 <= slot.len() {
         if let Some(n) = utf8_text(&slot[off..]) {
             if n.chars().count() >= 3 && n.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
                 return Some((n, format!("inline utf-8 at +{off:#x}")));
             }
         }
         off += 4;
+    }
+    let mut off = 0x18;
+    while off + 8 <= slot.len() {
+        if let Some(n) = utf16_text(&slot[off..]) {
+            if n.chars().count() >= 3 && n.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' || c == '.') {
+                return Some((n, format!("inline utf-16 at +{off:#x}")));
+            }
+        }
+        off += 2;
+    }
+    let mut off = 0;
+    while off + 8 <= slot.len() {
+        let p = u64::from_le_bytes(slot[off..off + 8].try_into().unwrap_or([0; 8]));
+        if pointer_like(p) {
+            if let Some(bytes) = deref(p as usize) {
+                let found = utf8_text(&bytes).filter(|n| n.chars().count() >= 3 && n.chars().all(|c| c.is_ascii_graphic() || c == ' ')).map(|n| (n, "utf-8")).or_else(|| {
+                    utf16_text(&bytes).filter(|n| n.chars().count() >= 3 && n.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' || c == '.')).map(|n| (n, "utf-16"))
+                });
+                if let Some((n, kind)) = found {
+                    return Some((n, format!("{kind} behind the pointer at +{off:#x}")));
+                }
+            }
+        }
+        off += 8;
     }
     None
 }
@@ -232,6 +256,22 @@ mod tests {
         assert_eq!(name, "Nacht");
         assert!(how.contains("pointer"));
 
+        let mut late = vec![0u8; SLOT_SIZE];
+        late[0x100..0x100 + 6].copy_from_slice(b"Nacht9");
+        assert_eq!(guess_name(&late, &nothing).unwrap().1, "inline utf-8 at +0x100");
+        let mut wide_late = vec![0u8; SLOT_SIZE];
+        for (i, u) in "Luis_M".encode_utf16().enumerate() {
+            wide_late[0xe0 + i * 2..0xe0 + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(guess_name(&wide_late, &nothing).unwrap().0, "Luis_M");
+        let mut far = vec![0u8; SLOT_SIZE];
+        far[0xf0..0xf8].copy_from_slice(&0x3000_1234_0000u64.to_le_bytes());
+        let deref_far = |p: usize| if p == 0x3000_1234_0000 { Some(b"Valkyria\0".to_vec()) } else { None };
+        assert_eq!(guess_name(&far, &deref_far).unwrap().0, "Valkyria");
+        let mut module = vec![0u8; SLOT_SIZE];
+        module[0x38..0x40].copy_from_slice(&0x7ff7_8245_2a90u64.to_le_bytes());
+        let deref_any = |_p: usize| Some(b"RuntimeTypeName\0".to_vec());
+        assert!(guess_name(&module, &deref_any).is_none(), "pointers into the game's own image are not names");
         assert!(guess_name(&vec![0u8; SLOT_SIZE], &nothing).is_none());
         let mut noise = vec![0u8; SLOT_SIZE];
         noise[SLOT_NAME..SLOT_NAME + 4].copy_from_slice(&[1, 2, 3, 4]);

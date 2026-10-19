@@ -62,7 +62,7 @@ pub fn entries() -> Vec<Entry> {
                         Some((n, how)) => format!("\"{n}\" ({how})"),
                         None => "unreadable".to_string(),
                     },
-                    hex(&slot[..0x80])
+                    hex(slot)
                 ));
             }
         }
