@@ -29,6 +29,7 @@ pub fn start(dir: PathBuf) {
     }
     let spawned = std::thread::Builder::new().name("m182-panel-loader".into()).spawn(move || {
         std::thread::sleep(START_DELAY);
+        tracing::info!(target: "m182::native", file = ?library, "loading panel library");
         let module = unsafe { LoadLibraryW(wide(&library).as_ptr()) };
         if module.is_null() {
             tracing::warn!(target: "m182::native", file = ?library, "panel library could not be loaded");
@@ -39,6 +40,7 @@ pub fn start(dir: PathBuf) {
             tracing::warn!(target: "m182::native", "panel library has no start function");
             return;
         }
+        tracing::info!(target: "m182::native", "panel library loaded, starting it");
         let start: extern "C" fn(*const u16) -> i32 = unsafe { std::mem::transmute(entry) };
         let folder = wide(&dir);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(folder.as_ptr())));

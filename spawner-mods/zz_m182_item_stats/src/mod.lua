@@ -194,9 +194,14 @@ local function custom_set_id(data, id)
 end
 
 local function custom_items()
+    local present = try(function() return io.exists(CUSTOM_FILE) end)
+    if present ~= true then
+        print("[m182-custom] no " .. CUSTOM_FILE .. ", no copies to create")
+        return
+    end
     local text = try(function() return io.read_to_string(CUSTOM_FILE) end)
     if text == nil then
-        print("[m182-custom] no " .. CUSTOM_FILE .. ", no copies to create")
+        print("[m182-custom] " .. CUSTOM_FILE .. " could not be read")
         return
     end
     text = tostring(text)
@@ -214,6 +219,12 @@ local function custom_items()
         end
     end
 
+    if #pools == 0 and #copies == 0 then
+        print("[m182-custom] " .. CUSTOM_FILE .. " is empty, no copies to create")
+        return
+    end
+
+    print(string.format("[m182-custom] reading item definitions for %d pools", #pools))
     local sources, taken = {}, {}
     local all = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
     if type(all) ~= "table" then
