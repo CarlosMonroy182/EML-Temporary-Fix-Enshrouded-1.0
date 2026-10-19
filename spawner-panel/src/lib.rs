@@ -2,6 +2,7 @@ pub mod copies;
 pub mod embed;
 pub mod host;
 pub mod input;
+pub mod rawguard;
 mod emblems;
 mod icons;
 mod items;

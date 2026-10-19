@@ -1,6 +1,21 @@
 //! Stand-in used where there is no Windows game to drive (tests, previews).
 
 use crate::host::Sys;
+use crate::rawguard::{Raw, RawSys};
+
+pub struct RawOs;
+
+impl RawSys for RawOs {
+    fn registered(&self) -> Vec<Raw> {
+        Vec::new()
+    }
+    fn is_foreign(&self, _target: usize) -> bool {
+        false
+    }
+    fn register(&self, _devices: &[Raw]) -> bool {
+        true
+    }
+}
 
 pub struct Os;
 
