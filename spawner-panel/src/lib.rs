@@ -485,6 +485,7 @@ impl App {
             balance.insert(k, v);
         }
         let mut item_state = items::ItemsState {
+            global: !copies::ENABLED,
             levels: items::load_levels(&dir),
             rows: item_rows,
             balance_base,

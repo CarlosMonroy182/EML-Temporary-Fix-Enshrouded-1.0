@@ -73,12 +73,17 @@ local function custom_items()
 
     print(string.format("[m182-custom] reading item definitions for %d pools", #pools))
     local sources, taken = {}, {}
+    print("[m182-custom] step: listing item definitions")
     local all = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
     if type(all) ~= "table" then
         print("[m182-custom] item definitions not available")
         return
     end
+    print(string.format("[m182-custom] step: %d item definitions listed", #all))
+    local visited = 0
     for _, resource in ipairs(all) do
+        visited = visited + 1
+        if visited % 500 == 0 then print(string.format("[m182-custom] step: indexed %d", visited)) end
         pcall(function()
             local id = unsigned(hash_of(resource.data.itemId))
             if id ~= nil and sources[id] == nil then sources[id] = resource end
@@ -86,6 +91,7 @@ local function custom_items()
         end)
     end
 
+    print(string.format("[m182-custom] step: indexed all, %d usable", visited))
     local created, failed, reused = 0, 0, 0
     local made = {}
     local lines = {}
@@ -110,7 +116,10 @@ local function custom_items()
                         made[pool.base .. ":" .. slot] = existing
                         return
                     end
+                    local progress = created + failed
+                    if progress < 3 or progress % 100 == 0 then print(string.format("[m182-custom] step: creating copy %d (base %d slot %d)", progress + 1, pool.base, slot)) end
                     local copy = game.assets.create_resource(base.data, "keen::ItemInfo", guid, 0)
+                    if progress < 3 or progress % 100 == 0 then print("[m182-custom] step: created, writing id") end
                     local data = copy.data
                     if not custom_set_id(data, id) then error("itemId not writable") end
                     local name = tostring(try(function() return base.data.debugName end) or "item")

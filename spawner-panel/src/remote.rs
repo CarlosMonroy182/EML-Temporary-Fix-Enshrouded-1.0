@@ -182,6 +182,12 @@ pub fn active() -> bool {
     s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed && s.hosting != Some(true)
 }
 
+/// True when the panel can type into the game chat (used by the connection test).
+pub fn can_type() -> bool {
+    let s = state();
+    s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed
+}
+
 /// How a file the panel wants to write must be handled.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Route {

@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+pub const ENABLED: bool = false;
 pub const FILE: &str = "m182_copies.json";
 pub const READY_FILE: &str = "export/m182_custom_items.csv";
 pub const SLOTS: u32 = 8;
