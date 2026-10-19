@@ -1125,7 +1125,7 @@ impl App {
         let mut edit = self.items.current(&item);
         let modified = self.items.is_modified(&item);
         label_title(ui, "MODIFICADORES DE STATS");
-        if ui.checkbox(&mut self.items.global, "Cambiar el ítem para todos (afecta a todas sus copias)").changed() {
+        if copies::ENABLED && ui.checkbox(&mut self.items.global, "Cambiar el ítem para todos (afecta a todas sus copias)").changed() {
             self.items.notice.clear();
         }
         if self.items.global {

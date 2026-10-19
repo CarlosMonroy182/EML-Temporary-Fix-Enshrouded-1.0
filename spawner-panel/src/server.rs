@@ -57,7 +57,7 @@ impl App {
             };
         }
         ui.horizontal(|ui| {
-            if button(ui, "PROBAR CONEXIÓN", Vec2::new(190.0, 32.0), remote::active(), true) {
+            if button(ui, "PROBAR CONEXIÓN", Vec2::new(190.0, 32.0), remote::can_type(), true) {
                 remote::submit_ping();
                 self.remote_notice = "Prueba enviada. En el servidor, m182_spawner.log debe mostrar «chat: client N ok: ping».".to_string();
             }
