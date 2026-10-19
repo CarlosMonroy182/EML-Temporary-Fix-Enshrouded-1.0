@@ -11,6 +11,7 @@ pub mod config;
 pub mod custom;
 pub mod faction;
 pub mod groups;
+pub mod roster;
 mod signatures;
 
 #[cfg(windows)]
@@ -24,6 +25,9 @@ mod spawn_probe;
 
 #[cfg(windows)]
 mod spawner;
+
+#[cfg(windows)]
+mod table;
 
 use std::path::PathBuf;
 

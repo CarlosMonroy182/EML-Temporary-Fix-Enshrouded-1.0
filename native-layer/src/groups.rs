@@ -15,6 +15,28 @@ pub struct Zone {
     pub z: f64,
     pub radius: f64,
     pub enabled: Option<bool>,
+    /// Enemies cannot hurt anyone inside (the default for zones without this field).
+    pub safe: Option<bool>,
+    /// Team that owns the place (1-based, as in the teams file); 0 or missing = nobody.
+    pub team: Option<u32>,
+    /// Anybody outside the owning team is a visitor: no chests, no building.
+    pub lock: Option<bool>,
+    /// Also restrict administrators (to try it out yourself).
+    pub lock_admins: Option<bool>,
+}
+
+impl Zone {
+    pub fn is_safe(&self) -> bool {
+        self.safe.unwrap_or(true)
+    }
+
+    pub fn owner(&self) -> u32 {
+        self.team.unwrap_or(0)
+    }
+
+    pub fn locks(&self) -> bool {
+        self.lock.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -27,6 +49,21 @@ struct ZonesFile {
 #[serde(default)]
 struct Team {
     members: Vec<u32>,
+    names: Vec<String>,
+    people: Vec<Person>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct Person {
+    name: String,
+}
+
+/// A team as the native layer needs it: the old player numbers plus the names of its people.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TeamDef {
+    pub members: Vec<u32>,
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -49,6 +86,40 @@ pub fn inside(zones: &[Zone], x: f64, z: f64) -> bool {
         let dz = z - zone.z;
         dx * dx + dz * dz <= zone.radius * zone.radius
     })
+}
+
+pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
+    let Ok(file) = serde_json::from_str::<TeamsFile>(text) else { return Vec::new() };
+    file.teams
+        .into_iter()
+        .map(|t| {
+            let mut names = t.names;
+            names.extend(t.people.into_iter().map(|p| p.name));
+            names.retain(|n| !n.trim().is_empty());
+            TeamDef { members: t.members, names }
+        })
+        .collect()
+}
+
+/// Team (1-based) of a connected player; 0 when in none. Names win over numbers because
+/// numbers change every time somebody reconnects.
+pub fn team_for(teams: &[TeamDef], number: u32, name: Option<&str>, entity: u32) -> u8 {
+    for (index, team) in teams.iter().enumerate() {
+        let by_name = name.is_some_and(|n| team.names.iter().any(|t| super::roster::same_name(t, n)))
+            || team.names.iter().any(|t| super::roster::placeholder_number(t) == Some(entity) && name.is_none());
+        if by_name {
+            return (index + 1).min(255) as u8;
+        }
+    }
+    let named = teams.iter().any(|t| !t.names.is_empty());
+    if !named {
+        for (index, team) in teams.iter().enumerate() {
+            if team.members.contains(&number) {
+                return (index + 1).min(255) as u8;
+            }
+        }
+    }
+    0
 }
 
 pub fn parse_teams(text: &str) -> Vec<Vec<u32>> {
@@ -141,6 +212,31 @@ mod tests {
         assert_eq!(team_of_player(&teams, 3), 1);
         assert_eq!(team_of_player(&teams, 2), 2);
         assert_eq!(team_of_player(&teams, 4), 0);
+    }
+
+    #[test]
+    fn zones_know_their_owner_and_lock() {
+        let zones = parse_zones(r#"{"zones":[{"name":"Base","x":0,"z":0,"radius":30,"team":2,"lock":true},{"name":"Vieja","x":5,"z":5,"radius":3}]}"#);
+        assert_eq!(zones[0].owner(), 2);
+        assert!(zones[0].locks() && zones[0].is_safe());
+        assert_eq!(zones[1].owner(), 0);
+        assert!(!zones[1].locks() && zones[1].is_safe());
+        let open = parse_zones(r#"{"zones":[{"name":"Mia","x":0,"z":0,"radius":10,"safe":false,"team":1,"lock":true,"lock_admins":true}]}"#);
+        assert!(!open[0].is_safe());
+        assert_eq!(open[0].lock_admins, Some(true));
+    }
+
+    #[test]
+    fn teams_match_people_by_name_before_numbers() {
+        let teams = parse_team_defs(r#"{"teams":[{"name":"Rojo","members":[1],"people":[{"key":"a","name":"Ana"},{"key":"b","name":"Jugador 4"}]},{"name":"Azul","members":[2],"people":[{"key":"c","name":"luis"}]}]}"#);
+        assert_eq!(team_for(&teams, 9, Some("ANA"), 5), 1);
+        assert_eq!(team_for(&teams, 9, Some("Luis"), 6), 2);
+        assert_eq!(team_for(&teams, 1, Some("Pedro"), 7), 0, "a stale number must not put a stranger in a team");
+        assert_eq!(team_for(&teams, 1, None, 4), 1, "placeholder names stand for the entity number");
+        let numbers = parse_team_defs(r#"{"teams":[{"members":[1,3]},{"members":[2]}]}"#);
+        assert_eq!(team_for(&numbers, 3, None, 9), 1);
+        assert_eq!(team_for(&numbers, 2, Some("x"), 9), 2);
+        assert_eq!(team_for(&numbers, 4, None, 9), 0);
     }
 
     #[test]

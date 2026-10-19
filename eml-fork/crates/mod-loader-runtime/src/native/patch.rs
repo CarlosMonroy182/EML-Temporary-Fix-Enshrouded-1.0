@@ -123,6 +123,25 @@ stub!(stub_friend_opts, friend_opts);
 // ---------------------------------------------------------------- chat commands
 
 pub(super) static CHAT_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static PUMP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+/// The server's player table, captured the first time the game runs its per-tick chat pump.
+pub(super) static PLAYERS_OBJECT: AtomicUsize = AtomicUsize::new(0);
+
+static REPLY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// Replaces the text of the message being queued, so the game delivers our line instead.
+fn replace_text(text: usize, line: &str) -> bool {
+    let Ok(mut buffer) = REPLY.lock() else { return false };
+    buffer.clear();
+    buffer.reserve(1100);
+    let bytes = line.as_bytes();
+    buffer.extend_from_slice(&bytes[..bytes.len().min(0x3f0)]);
+    let (pointer, length) = (buffer.as_ptr() as u64, buffer.len() as u64);
+    let mut head = [0u8; 16];
+    head[0..8].copy_from_slice(&pointer.to_le_bytes());
+    head[8..16].copy_from_slice(&length.to_le_bytes());
+    super::spawner::write_bytes(text, &head)
+}
 
 extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
@@ -146,6 +165,12 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
             1
+        }
+        super::chat::Verdict::Roster(seq) => {
+            let line = super::spawner::roster_line(seq);
+            let sent = replace_text(text, &line);
+            super::spawner::log(&format!("chat: client {} asked for the player list ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
+            if sent { 0 } else { 1 }
         }
     }
 }
@@ -200,6 +225,49 @@ unsafe extern "win64" fn stub_chat() {
         f = sym hook_chat,
         t = sym CHAT_TRAMPOLINE,
     );
+}
+
+// Entry of the server's per-tick chat pump: only remembers the player table (rcx) and goes on.
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_pump() {
+    core::arch::naked_asm!(
+        "mov qword ptr [rip + {object}], rcx",
+        "jmp qword ptr [rip + {t}]",
+        object = sym PLAYERS_OBJECT,
+        t = sym PUMP_TRAMPOLINE,
+    );
+}
+
+fn install_pump(sections: &[&'static [u8]]) {
+    let target = match find_unique(sections, &signatures::PLAYERS_PUMP) {
+        Ok(addr) => addr,
+        Err(count) => {
+            super::spawner::log(&format!("player table: pump signature matched {count} times; names and base permissions off"));
+            return;
+        }
+    };
+    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+    if page.is_null() {
+        super::spawner::log("player table: trampoline allocation failed");
+        return;
+    }
+    let displaced = signatures::PLAYERS_PUMP_DISPLACED;
+    unsafe {
+        std::ptr::copy_nonoverlapping(target, page, displaced);
+        let tail = page.add(displaced);
+        tail.write(0xFF);
+        tail.add(1).write(0x25);
+        tail.add(2).cast::<u32>().write_unaligned(0);
+        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+    }
+    PUMP_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
+    match unsafe { write_jump(target, stub_pump as usize) } {
+        Ok(()) => super::spawner::log("player table hooked"),
+        Err(code) => {
+            PUMP_TRAMPOLINE.store(0, Ordering::SeqCst);
+            super::spawner::log(&format!("player table: VirtualProtect failed ({code})"));
+        }
+    }
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
@@ -265,6 +333,9 @@ pub fn install() -> Outcome {
     }
 
     install_chat(&sections);
+    if super::config::LIVE.spawner() {
+        install_pump(&sections);
+    }
 
     let targets = [
         Target { name: "isEnemy(values)", signature: &signatures::IS_ENEMY_VALUES, hook: stub_enemy_values },

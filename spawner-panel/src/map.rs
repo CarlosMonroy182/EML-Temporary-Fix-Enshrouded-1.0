@@ -408,7 +408,7 @@ impl App {
                     painter.circle_filled(p, r + 1.5, Color32::from_rgb(10, 8, 6));
                     painter.circle_filled(p, r, color);
                     if labels || hovered_marker == Some(i) {
-                        painter.text(p + Vec2::new(9.0, 0.0), Align2::LEFT_CENTER, &m.title, egui::FontId::proportional(12.5), Color32::WHITE);
+                        painter.text(p + Vec2::new(9.0, 0.0), Align2::LEFT_CENTER, &m.title, egui::FontId::proportional(14.5), Color32::WHITE);
                     }
                 }
             }
@@ -418,7 +418,7 @@ impl App {
                     if rect.expand(40.0).contains(p) {
                         crate::theme::diamond(&painter, p, 7.0, Color32::from_rgb(10, 8, 6));
                         crate::theme::diamond(&painter, p, 5.5, GOLD);
-                        let galley = painter.layout_no_wrap(place.name.clone(), egui::FontId::proportional(13.5), PARCHMENT);
+                        let galley = painter.layout_no_wrap(place.name.clone(), egui::FontId::proportional(15.5), PARCHMENT);
                         let pos = p + Vec2::new(10.0, -8.0);
                         painter.rect_filled(Rect::from_min_size(pos - Vec2::new(3.0, 1.0), galley.size() + Vec2::new(6.0, 2.0)), 3.0, Color32::from_black_alpha(170));
                         painter.galley(pos, galley, PARCHMENT);
@@ -441,13 +441,13 @@ impl App {
             if let Some(pos) = hover {
                 let (x, z) = view.to_world(pos);
                 let text = format!("X {x:.0}    Z {z:.0}");
-                let galley = painter.layout_no_wrap(text, egui::FontId::proportional(15.0), Color32::WHITE);
+                let galley = painter.layout_no_wrap(text, egui::FontId::proportional(17.0), Color32::WHITE);
                 let at = rect.right_top() + Vec2::new(-galley.size().x - 16.0, 10.0);
                 painter.rect_filled(Rect::from_min_size(at - Vec2::new(6.0, 3.0), galley.size() + Vec2::new(12.0, 6.0)), 4.0, Color32::from_black_alpha(190));
                 painter.galley(at, galley, Color32::WHITE);
             }
             if self.map.calibrating {
-                let galley = painter.layout_no_wrap("Calibrando: haz clic en el mapa donde está tu personaje".to_string(), egui::FontId::proportional(16.0), Color32::WHITE);
+                let galley = painter.layout_no_wrap("Calibrando: haz clic en el mapa donde está tu personaje".to_string(), egui::FontId::proportional(18.0), Color32::WHITE);
                 let at = rect.center_top() + Vec2::new(-galley.size().x / 2.0, 14.0);
                 painter.rect_filled(Rect::from_min_size(at - Vec2::new(8.0, 4.0), galley.size() + Vec2::new(16.0, 8.0)), 4.0, Color32::from_rgba_unmultiplied(120, 70, 10, 230));
                 painter.galley(at, galley, Color32::WHITE);
@@ -459,7 +459,7 @@ impl App {
                 .map(|t| (t.pending(), t.downloaded.load(std::sync::atomic::Ordering::Relaxed)))
                 .unwrap_or((0, 0));
             if pending > 0 {
-                painter.text(rect.left_bottom() + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, format!("Cargando mapa… {pending} piezas pendientes ({got} descargadas)"), egui::FontId::proportional(13.0), Color32::from_rgb(236, 220, 170));
+                painter.text(rect.left_bottom() + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, format!("Cargando mapa… {pending} piezas pendientes ({got} descargadas)"), egui::FontId::proportional(15.0), Color32::from_rgb(236, 220, 170));
             }
         });
     }
@@ -524,7 +524,7 @@ impl App {
                 }
                 ui.label(RichText::new(format!("X {:.0}     Y {:.0}     Z {:.0}", sel[0], sel[1], sel[2])).size(17.0));
                 if !self.map.selected_height_known {
-                    ui.label(RichText::new("Altura desconocida: el juego te baja solo hasta el suelo, sin daño por caída.").color(MUTED).size(12.5));
+                    ui.label(RichText::new("Altura desconocida: el juego te baja solo hasta el suelo, sin daño por caída.").color(MUTED).size(14.5));
                 }
             }
             None => {
@@ -569,12 +569,12 @@ impl App {
         let frame = egui::Frame::none().fill(CARD).stroke(Stroke::new(1.5_f32, GOLD_DIM)).rounding(5.0).inner_margin(egui::Margin::same(10.0));
         frame.show(ui, |ui| {
             label_title(ui, "CALIBRAR EL MAPA");
-            ui.label(RichText::new("Si tu punto verde no coincide con donde estás, párate en un lugar reconocible del juego, pulsa el botón y haz clic en el mapa donde estás. Repite en otro lugar lejano para ajustar también la escala.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Si tu punto verde no coincide con donde estás, párate en un lugar reconocible del juego, pulsa el botón y haz clic en el mapa donde estás. Repite en otro lugar lejano para ajustar también la escala.").color(MUTED).size(14.5));
             let label = if self.map.calibrating { "Haz clic en el mapa donde estás…" } else { "Calibrar con mi posición" };
             if button(ui, label, Vec2::new(ui.available_width(), 34.0), self.player.is_some(), self.map.calibrating) {
                 self.map.calibrating = !self.map.calibrating;
             }
-            ui.label(RichText::new(format!("Puntos de calibración: {}", self.map.anchors.len())).color(MUTED).size(12.5));
+            ui.label(RichText::new(format!("Puntos de calibración: {}", self.map.anchors.len())).color(MUTED).size(14.5));
             if button(ui, "Quitar calibración", Vec2::new(ui.available_width(), 30.0), !self.map.anchors.is_empty(), false) {
                 self.map.anchors.clear();
                 self.map.calibrating = false;

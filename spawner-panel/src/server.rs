@@ -7,23 +7,26 @@ use crate::{powers, App};
 
 impl App {
     /// One line under the header while the panel drives a server.
-    pub fn server_strip(&self, ui: &mut egui::Ui) {
+    pub fn server_strip(&mut self, ui: &mut egui::Ui) {
         if !remote::active() {
             return;
         }
         let status = remote::status();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("SERVIDOR").color(GOLD).size(12.5));
+            ui.label(RichText::new("SERVIDOR").color(GOLD).size(14.5));
             if status.sending {
-                ui.label(RichText::new("escribiendo en el chat del juego… no toques el teclado").color(GOLD_DIM).size(12.5));
+                ui.label(RichText::new("escribiendo en el chat del juego… no toques el teclado").color(GOLD_DIM).size(14.5));
             } else if !status.error.is_empty() {
-                ui.label(RichText::new(status.error.clone()).color(BAD).size(12.5));
+                ui.label(RichText::new(status.error.clone()).color(BAD).size(14.5));
             } else if status.queued > 0 {
-                ui.label(RichText::new(format!("{} envíos en cola", status.queued)).color(MUTED).size(12.5));
+                ui.label(RichText::new(format!("{} envíos en cola", status.queued)).color(MUTED).size(14.5));
             } else if !status.last.is_empty() {
-                ui.label(RichText::new(status.last.clone()).color(GOOD).size(12.5));
+                ui.label(RichText::new(status.last.clone()).color(GOOD).size(14.5));
             } else {
-                ui.label(RichText::new("listo: lo que hagas aquí se envía al servidor").color(MUTED).size(12.5));
+                ui.label(RichText::new("listo: lo que hagas aquí se envía al servidor").color(MUTED).size(14.5));
+            }
+            if button(ui, "Reenviar todo", Vec2::new(130.0, 24.0), remote::connected() && !status.sending, false) {
+                self.resend_state();
             }
         });
     }
@@ -46,7 +49,7 @@ impl App {
                 self.remote_cfg.limit = limit as usize;
                 changed = true;
             }
-            ui.label(RichText::new("Si el chat del juego recorta mensajes largos, bájalo.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Si el chat del juego recorta mensajes largos, bájalo.").color(MUTED).size(14.5));
         });
         if changed {
             let settings = self.remote_cfg.clone();
@@ -67,9 +70,9 @@ impl App {
             }
         });
         if !self.remote_notice.is_empty() {
-            ui.label(RichText::new(self.remote_notice.clone()).color(GOOD).size(12.5));
+            ui.label(RichText::new(self.remote_notice.clone()).color(GOOD).size(14.5));
         }
-        ui.label(RichText::new("Para que el envío funcione: el chat del juego debe abrirse con Enter y el mundo del servidor estar cargado. No uses el teclado mientras el panel escribe.").color(MUTED).size(12.5));
+        ui.label(RichText::new("Para que el envío funcione: el chat del juego debe abrirse con Enter y el mundo del servidor estar cargado. No uses el teclado mientras el panel escribe.").color(MUTED).size(14.5));
     }
 
     #[allow(dead_code)]
@@ -85,7 +88,7 @@ impl App {
             }
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("Reservar copias de varias armas de una vez (4 por arma). Alarga un poco el arranque del juego:").color(MUTED).size(12.5));
+        ui.label(RichText::new("Reservar copias de varias armas de una vez (4 por arma). Alarga un poco el arranque del juego:").color(MUTED).size(14.5));
         ui.horizontal_wrapped(|ui| {
             for (label, slot) in [("Cuerpo a cuerpo", "MeleeWeapon"), ("Arcos y ballestas", "RangeWeapon"), ("Bastones y varitas", "MidRangeWeapon"), ("Escudos", "Shield")] {
                 if button(ui, label, Vec2::new(170.0, 30.0), true, false) {
@@ -106,9 +109,9 @@ impl App {
             }
         });
         if !self.items.notice.is_empty() {
-            ui.label(RichText::new(self.items.notice.clone()).color(GOOD).size(12.5));
+            ui.label(RichText::new(self.items.notice.clone()).color(GOOD).size(14.5));
         }
         let used: usize = self.items.book.pools.values().map(|p| p.used.values().filter(|u| u.active).count()).sum();
-        ui.label(RichText::new(format!("Ítems con copias reservadas: {} · copias en uso: {} · copias de {} ítems por crear", self.items.book.pools.len(), used, pending)).color(MUTED).size(12.5));
+        ui.label(RichText::new(format!("Ítems con copias reservadas: {} · copias en uso: {} · copias de {} ítems por crear", self.items.book.pools.len(), used, pending)).color(MUTED).size(14.5));
     }
 }

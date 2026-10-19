@@ -1079,16 +1079,16 @@ impl App {
         let rarity_name = RARITIES[item.rarity_index().min(4) as usize];
         if let Some(entry) = self.item_cat.entries.get(index) {
             ui.label(RichText::new(entry.label.clone()).font(title_font(20.0)).color(GOLD));
-            ui.label(RichText::new(item.debug.clone()).color(MUTED).size(11.5));
+            ui.label(RichText::new(item.debug.clone()).color(MUTED).size(13.5));
         }
-        ui.label(RichText::new(format!("{}  ·  rareza base {}  ·  niveles {}–{}", item.group, rarity_name, item.level_min, item.level_max)).color(MUTED).size(13.0));
+        ui.label(RichText::new(format!("{}  ·  rareza base {}  ·  niveles {}–{}", item.group, rarity_name, item.level_min, item.level_max)).color(MUTED).size(15.0));
         divider(ui);
         label_title(ui, "NIVEL DEL ÍTEM");
         let cap = self.items.item_level_cap();
         self.items.level = self.items.level.clamp(1, cap);
         ui.add(egui::Slider::new(&mut self.items.level, 1..=cap));
         if self.items.level > item.level_max && item.level_max > 0 {
-            ui.label(RichText::new(format!("Por encima del máximo normal ({}). Se amplía el rango del ítem al entregarlo.", item.level_max)).color(MUTED).size(12.5));
+            ui.label(RichText::new(format!("Por encima del máximo normal ({}). Se amplía el rango del ítem al entregarlo.", item.level_max)).color(MUTED).size(14.5));
         }
         label_title(ui, "RAREZA");
         egui::ComboBox::from_id_salt("item_rarity").selected_text(RARITIES[self.items.rarity.min(4) as usize]).show_ui(ui, |ui| {
@@ -1105,14 +1105,7 @@ impl App {
             self.items.amount = 1;
         }
         divider(ui);
-        if button(ui, "ENTREGAR", Vec2::new(ui.available_width(), 52.0), item.deliverable(), true) {
-            self.spawn(crate::Mode::Items);
-        }
-        let (text, color) = self.status_text();
-        if !text.is_empty() {
-            ui.label(RichText::new(text).color(color));
-        }
-        ui.label(RichText::new("Va directo a tu inventario: aparece a tus pies y se recoge solo. Para eso activa en las opciones del juego la recogida automática de botín suelto.").color(MUTED).size(13.0));
+        ui.label(RichText::new("Va directo a tu inventario: aparece a tus pies y se recoge solo. Para eso activa en las opciones del juego la recogida automática de botín suelto.").color(MUTED).size(15.0));
         divider(ui);
         self.item_stats_ui(ui, index);
         if !self.items.notice.is_empty() {
@@ -1129,12 +1122,12 @@ impl App {
             self.items.notice.clear();
         }
         if self.items.global {
-            ui.label(RichText::new("Los cambios valen para todas las copias de este ítem en el mundo y piden reiniciar el juego para quedarse.").color(GOLD_DIM).size(12.5));
+            ui.label(RichText::new("Los cambios valen para todas las copias de este ítem en el mundo y piden reiniciar el juego para quedarse.").color(GOLD_DIM).size(14.5));
         } else {
-            ui.label(RichText::new("Los cambios solo valen para la copia que te entregues: cada arma sale distinta y las demás no cambian.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Los cambios solo valen para la copia que te entregues: cada arma sale distinta y las demás no cambian.").color(MUTED).size(14.5));
             let used = self.items.book.active_count(item.id);
             if let Some(pool) = self.items.book.pools.get(&item.id) {
-                ui.label(RichText::new(format!("Copias únicas de este ítem: {used} en uso de {}.", pool.slots)).color(MUTED).size(12.5));
+                ui.label(RichText::new(format!("Copias únicas de este ítem: {used} en uso de {}.", pool.slots)).color(MUTED).size(14.5));
                 if button(ui, "Liberar copias", Vec2::new(ui.available_width(), 28.0), used > 0, false) {
                     let dir = self.dir.clone();
                     let commands = self.items.release_copies(&dir, &item);
@@ -1202,9 +1195,9 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura. Todo se guarda solo.").color(MUTED).size(12.5));
+            ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura. Todo se guarda solo.").color(MUTED).size(14.5));
             if matches!(item.slot.as_str(), "RangedWeapon") || item.category == "Ammunition" {
-                ui.label(RichText::new("Los bastones y arcos hacen el daño de su munición o hechizo: para subirlo, edita también la munición.").color(MUTED).size(12.5));
+                ui.label(RichText::new("Los bastones y arcos hacen el daño de su munición o hechizo: para subirlo, edita también la munición.").color(MUTED).size(14.5));
             }
             if button(ui, "Restaurar valores originales", Vec2::new(ui.available_width(), 30.0), modified, false) {
                 self.items.set_edit(&item, ItemsState::base_edit(&item));
@@ -1215,14 +1208,14 @@ impl App {
 
     pub fn balance_ui(&mut self, ui: &mut egui::Ui) {
         {
-            ui.label(RichText::new("Se guardan en el mod zz_m182_item_stats y se aplican al abrir el juego de nuevo.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Se guardan en el mod zz_m182_item_stats y se aplican al abrir el juego de nuevo.").color(MUTED).size(14.5));
             if self.items.balance.is_empty() {
                 ui.label(RichText::new("Aún no hay valores. Abre el juego una vez con el mod m182_spawn_variants actualizado.").color(MUTED));
                 return;
             }
             let mut changed = false;
             if self.items.balance.iter().any(|(k, v)| (k == "itemLevelCap" || k == "playerLevelCap") && self.items.balance_base.get(k).map(|b| *v > *b + 0.5).unwrap_or(false)) {
-                ui.label(RichText::new("Aviso: por encima de los máximos normales (ítems 55, jugador 50) el botín de las criaturas puede dejar de poder recogerse. Si te pasa, pulsa Restaurar.").color(GOLD_DIM).size(12.5));
+                ui.label(RichText::new("Aviso: por encima de los máximos normales (ítems 55, jugador 50) el botín de las criaturas puede dejar de poder recogerse. Si te pasa, pulsa Restaurar.").color(GOLD_DIM).size(14.5));
             }
             for (key, label) in BALANCE_LABELS {
                 if let Some(value) = self.items.balance.get_mut(*key) {
@@ -1263,7 +1256,7 @@ impl App {
             divider(ui);
             self.balance_ui(ui);
             divider(ui);
-            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego.").color(MUTED).size(14.5));
             if button(ui, "RESTAURAR TODO A VALORES DEL JUEGO", Vec2::new(ui.available_width().min(360.0), 34.0), true, false) {
                 let dir = self.dir.clone();
                 self.items.notice = match self.items.reset_all(&dir) {

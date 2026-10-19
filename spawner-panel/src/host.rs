@@ -21,6 +21,12 @@ pub trait Sys: Send + Sync + 'static {
     fn focus(&self, hwnd: usize) -> bool;
     fn tap(&self, scan: u16);
     fn unit(&self, unit: u16);
+    /// Several characters handed to the keyboard queue in one go.
+    fn units(&self, units: &[u16]) {
+        for u in units {
+            self.unit(*u);
+        }
+    }
     fn sleep(&self, ms: u64);
 }
 
@@ -128,14 +134,52 @@ impl<S: Sys> Host<S> {
     }
 }
 
+/// Timing of the typed chat lines (milliseconds, except `burst` which counts characters).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pace {
+    pub burst: usize,
+    pub gap: u64,
+    pub opened: u64,
+    pub before_send: u64,
+    pub after_send: u64,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self { burst: 4, gap: 2, opened: 120, before_send: 60, after_send: 140 }
+    }
+}
+
+impl Pace {
+    /// Defaults overridden by `typing_*` entries of the panel's settings file.
+    pub fn from_settings(text: &str) -> Self {
+        let mut pace = Self::default();
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return pace };
+        let get = |key: &str| v.get(key).and_then(serde_json::Value::as_u64);
+        if let Some(n) = get("typing_burst") {
+            pace.burst = (n as usize).clamp(1, 64);
+        }
+        if let Some(n) = get("typing_gap_ms") {
+            pace.gap = n.min(50);
+        }
+        pace
+    }
+}
+
 pub struct ChatTypist<S: Sys> {
     host: Arc<Host<S>>,
     open_scan: u16,
+    pace: Pace,
 }
 
 impl<S: Sys> ChatTypist<S> {
     pub fn new(host: Arc<Host<S>>, open_key: &str) -> Self {
-        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER) }
+        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER), pace: Pace::default() }
+    }
+
+    pub fn with_pace(mut self, pace: Pace) -> Self {
+        self.pace = pace;
+        self
     }
 
     fn game_has_focus(&self, game: usize) -> bool {
@@ -165,14 +209,15 @@ impl<S: Sys> Typist for ChatTypist<S> {
             return Err("El juego perdió el control mientras se escribía. No toques el teclado ni el ratón durante el envío.".to_string());
         }
         sys.tap(self.open_scan);
-        sys.sleep(200);
-        for unit in text.encode_utf16() {
-            sys.unit(unit);
-            sys.sleep(4);
+        sys.sleep(self.pace.opened);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        for burst in units.chunks(self.pace.burst) {
+            sys.units(burst);
+            sys.sleep(self.pace.gap);
         }
-        sys.sleep(120);
+        sys.sleep(self.pace.before_send);
         sys.tap(ENTER);
-        sys.sleep(260);
+        sys.sleep(self.pace.after_send);
         Ok(())
     }
 
@@ -312,6 +357,16 @@ mod tests {
         assert_eq!(typed, "/m182 k ñ");
         assert_eq!(log[log.len() - 2], "tap 0x1c");
         assert_eq!(log.last().unwrap(), "focus 200");
+    }
+
+    #[test]
+    fn typing_speed_can_be_tuned_from_the_settings_file() {
+        assert_eq!(Pace::from_settings("{}"), Pace::default());
+        assert_eq!(Pace::from_settings("basura"), Pace::default());
+        let p = Pace::from_settings(r#"{"typing_burst":8,"typing_gap_ms":1}"#);
+        assert_eq!((p.burst, p.gap), (8, 1));
+        let p = Pace::from_settings(r#"{"typing_burst":0,"typing_gap_ms":900}"#);
+        assert_eq!((p.burst, p.gap), (1, 50));
     }
 
     #[test]

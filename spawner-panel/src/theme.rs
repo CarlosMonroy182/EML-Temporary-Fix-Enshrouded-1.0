@@ -27,9 +27,9 @@ pub fn install(ctx: &egui::Context) {
         .insert("Cinzel".to_owned(), FontData::from_static(include_bytes!("../assets/Cinzel.ttf")));
     fonts
         .font_data
-        .insert("IMFell".to_owned(), FontData::from_static(include_bytes!("../assets/IMFell.ttf")));
-    fonts.families.insert(FontFamily::Name("Cinzel".into()), vec!["Cinzel".to_owned(), "IMFell".to_owned()]);
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "IMFell".to_owned());
+        .insert("Lato".to_owned(), FontData::from_static(include_bytes!("../assets/Lato.ttf")));
+    fonts.families.insert(FontFamily::Name("Cinzel".into()), vec!["Cinzel".to_owned(), "Lato".to_owned()]);
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Lato".to_owned());
     ctx.set_fonts(fonts);
 
     let mut visuals = egui::Visuals::dark();
@@ -57,9 +57,82 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.slider_width = 210.0;
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     for (_, font) in style.text_styles.iter_mut() {
-        font.size *= 1.12;
+        font.size *= 1.3;
     }
     ctx.set_style(style);
+}
+
+fn hash01(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B1) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    x = x.wrapping_mul(0x297A_2D39);
+    x ^= x >> 15;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
+pub fn gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    let mut mesh = egui::epaint::Mesh::default();
+    let uv = egui::pos2(0.0, 0.0);
+    mesh.vertices.push(egui::epaint::Vertex { pos: rect.left_top(), uv, color: top });
+    mesh.vertices.push(egui::epaint::Vertex { pos: rect.right_top(), uv, color: top });
+    mesh.vertices.push(egui::epaint::Vertex { pos: rect.right_bottom(), uv, color: bottom });
+    mesh.vertices.push(egui::epaint::Vertex { pos: rect.left_bottom(), uv, color: bottom });
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+pub fn sparkle(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let thin = r * 0.22;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + Vec2::new(0.0, -r),
+            center + Vec2::new(thin, -thin),
+            center + Vec2::new(r, 0.0),
+            center + Vec2::new(thin, thin),
+            center + Vec2::new(0.0, r),
+            center + Vec2::new(-thin, thin),
+            center + Vec2::new(-r, 0.0),
+            center + Vec2::new(-thin, -thin),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+pub fn enchanted_backdrop(painter: &egui::Painter, rect: Rect, time: f64) {
+    gradient(painter, rect, Color32::from_rgb(24, 16, 30), Color32::from_rgb(14, 10, 8));
+    let t = time as f32;
+    for i in 0..44u32 {
+        let x = hash01(i * 3 + 1);
+        let y0 = hash01(i * 3 + 2);
+        let phase = hash01(i * 3 + 3) * std::f32::consts::TAU;
+        let speed = 0.35 + hash01(i + 900) * 0.9;
+        let rise = (t * 0.012 * (0.4 + speed)).fract();
+        let y = (y0 - rise).rem_euclid(1.0);
+        let pos = Pos2::new(rect.left() + x * rect.width(), rect.top() + y * rect.height());
+        let glow = 0.5 + 0.5 * (t * speed + phase).sin();
+        let size = 1.6 + hash01(i + 400) * 3.4;
+        let violet = hash01(i + 700) > 0.55;
+        let base = if violet { Color32::from_rgb(170, 140, 235) } else { Color32::from_rgb(236, 196, 104) };
+        let alpha = (glow * 150.0 + 20.0) as u8;
+        let color = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+        sparkle(painter, pos, size * (0.7 + 0.5 * glow), color);
+        if size > 3.6 {
+            painter.circle_filled(pos, size * 2.4, Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (glow * 14.0) as u8));
+        }
+    }
+}
+
+pub fn glow_stroke(painter: &egui::Painter, rect: Rect, color: Color32, strength: f32) {
+    for (grow, alpha) in [(5.0_f32, 18.0_f32), (3.5, 34.0), (2.0, 60.0)] {
+        painter.rect_stroke(
+            rect.expand(grow),
+            Rounding::same(4.0 + grow),
+            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (alpha * strength) as u8)),
+        );
+    }
 }
 
 pub fn ornate_frame(painter: &egui::Painter, rect: Rect) {
@@ -98,7 +171,7 @@ pub fn heading(ui: &mut egui::Ui, text: &str, size: f32) {
 }
 
 pub fn label_title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).font(title_font(13.0)).color(GOLD_DIM));
+    ui.label(egui::RichText::new(text).font(title_font(15.0)).color(GOLD_DIM));
 }
 
 pub fn button(ui: &mut egui::Ui, text: &str, size: Vec2, enabled: bool, primary: bool) -> bool {

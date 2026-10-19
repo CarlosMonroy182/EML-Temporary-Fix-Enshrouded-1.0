@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::config::{SpawnSettings, LIVE, SPAWN};
 use super::groups;
+use super::roster;
 use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
 
 #[link(name = "user32")]
@@ -85,6 +86,8 @@ static CLIENT_MGR: AtomicUsize = AtomicUsize::new(0);
 static CLIENT_PLAYER_ID: AtomicU32 = AtomicU32::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
+static CLIENT_TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
+static CLIENT_GUESSES: AtomicU32 = AtomicU32::new(0);
 static CALIBRATION_TRIES: AtomicU32 = AtomicU32::new(0);
 static CALIBRATION_DUMPS: AtomicU32 = AtomicU32::new(0);
 static PENDING: AtomicU32 = AtomicU32::new(0);
@@ -190,6 +193,11 @@ fn key_loop() {
         if last_file.elapsed() >= Duration::from_secs(1) {
             last_file = Instant::now();
             write_mode();
+            if remote_world() && CLIENT_TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 {
+                if let Some((m, id)) = world_pair() {
+                    guess_client_transform(m, id);
+                }
+            }
             if let Some(t) = player_transform() {
                 let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
                 if file_pos != Some(pos) {
@@ -1008,8 +1016,8 @@ fn calibrate(manager: usize, id: u32, expected: &[u8]) -> bool {
         }
         if let Some(b) = read_bytes(addr, 24) {
             if b == expected {
-                TRANSFORM_INDEX.store(index as i32, Ordering::SeqCst);
-                log(&format!("transform component found: index={index} id={id} record={record:#x} chunk={:#x} slot={}", p.chunk, p.slot));
+                transform_cell(manager).store(index as i32, Ordering::SeqCst);
+                log(&format!("transform component found: index={index} id={id} record={record:#x} chunk={:#x} slot={} ({})", p.chunk, p.slot, if is_client_manager(manager) { "client" } else { "server" }));
                 return true;
             }
         }
@@ -1035,8 +1043,85 @@ fn dump_failure(manager: usize, id: u32, record: Option<usize>, why: &str) {
     log(&text);
 }
 
+fn is_client_manager(manager: usize) -> bool {
+    let c = CLIENT_MGR.load(Ordering::SeqCst);
+    c != 0 && manager == c && manager != SERVER_MGR.load(Ordering::SeqCst)
+}
+
+fn transform_cell(manager: usize) -> &'static AtomicI32 {
+    if is_client_manager(manager) { &CLIENT_TRANSFORM_INDEX } else { &TRANSFORM_INDEX }
+}
+
+/// The entity this game controls: the server's player when this process hosts the world,
+/// otherwise the character shown on screen (a game connected to a dedicated server).
+fn world_pair() -> Option<(usize, u32)> {
+    let (sm, sid) = (SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst));
+    let (cm, cid) = (CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst));
+    let forced = LIVE.force_client();
+    if sm != 0 && sid != 0 && !forced {
+        return Some((sm, sid));
+    }
+    if cm != 0 && cid != 0 && (sm == 0 || forced || cm != sm) {
+        return Some((cm, cid));
+    }
+    None
+}
+
+fn remote_world() -> bool {
+    world_pair().map(|(m, _)| is_client_manager(m)).unwrap_or(false)
+}
+
+fn plausible_position(b: &[u8]) -> bool {
+    if b.len() < TRANSFORM_SIZE {
+        return false;
+    }
+    let (x, y, z) = (le_i64(b, 0) as f64 / METERS, le_i64(b, 8) as f64 / METERS, le_i64(b, 16) as f64 / METERS);
+    x.abs() < 40_000.0 && z.abs() < 40_000.0 && (-2_000.0..6_000.0).contains(&y) && (x != 0.0 || z != 0.0)
+}
+
+/// Finds the transform component of the character shown on screen when the descriptor it was
+/// created from did not reveal it.
+fn guess_client_transform(manager: usize, id: u32) {
+    if CLIENT_TRANSFORM_INDEX.load(Ordering::SeqCst) >= 0 || CLIENT_GUESSES.load(Ordering::Relaxed) >= 40 {
+        return;
+    }
+    CLIENT_GUESSES.fetch_add(1, Ordering::Relaxed);
+    let Some(record) = find_record(manager, id) else { return };
+    let Some(p) = placement(record) else { return };
+    let mut candidates: Vec<(usize, Vec<u8>)> = Vec::new();
+    for index in 0..COMPONENT_SLOTS {
+        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        if stride != TRANSFORM_SIZE {
+            continue;
+        }
+        if let Some(b) = read_bytes(addr, TRANSFORM_SIZE) {
+            if plausible_position(&b) {
+                candidates.push((index, b));
+            }
+        }
+    }
+    let known = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    let pick = candidates
+        .iter()
+        .find(|(i, _)| *i as i32 == known)
+        .or_else(|| candidates.iter().find(|(i, _)| *i == 133))
+        .or_else(|| candidates.first());
+    if let Some((index, b)) = pick {
+        CLIENT_TRANSFORM_INDEX.store(*index as i32, Ordering::SeqCst);
+        log(&format!(
+            "transform component found by position: index={index} of {} candidates, player at x={:.1} y={:.1} z={:.1} (client)",
+            candidates.len(),
+            le_i64(b, 0) as f64 / METERS,
+            le_i64(b, 8) as f64 / METERS,
+            le_i64(b, 16) as f64 / METERS
+        ));
+    } else if CLIENT_GUESSES.load(Ordering::Relaxed) == 1 || CLIENT_GUESSES.load(Ordering::Relaxed) == 40 {
+        log("transform component of the character on screen not found yet");
+    }
+}
+
 fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
-    let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    let index = transform_cell(manager).load(Ordering::SeqCst);
     if index < 0 || id == 0 || manager == 0 {
         return None;
     }
@@ -1050,7 +1135,8 @@ fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
 }
 
 fn player_transform() -> Option<Vec<u8>> {
-    transform_of(SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))
+    let (manager, id) = world_pair()?;
+    transform_of(manager, id)
 }
 
 fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Option<Vec<u8>> {
@@ -1156,6 +1242,47 @@ fn loot_watch_report(manager: usize, edx: u32, desc: usize, ret: u32) {
     log(&format!("loot-watch: entity {ret} flags={edx} template {}{at}", guid_text(&head[4..20])));
 }
 
+static LOOT_GUIDS: OnceLock<Vec<([u8; 16], String)>> = OnceLock::new();
+static LOOT_DUMPS: AtomicU32 = AtomicU32::new(0);
+
+fn loot_guids() -> &'static Vec<([u8; 16], String)> {
+    LOOT_GUIDS.get_or_init(|| {
+        let mut out = Vec::new();
+        let Ok(dir) = std::env::current_dir() else { return out };
+        let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_objects.csv")) else { return out };
+        for line in text.lines().skip(1) {
+            let mut parts = line.split(',');
+            let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
+            if name.starts_with("LootContainer") {
+                if let Some(g) = super::config::parse_guid(guid) {
+                    out.push((g, name.to_string()));
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Writes down what the game builds when a creature dies, so loot that cannot be opened can be
+/// compared with the loot of an enemy that came from the world.
+fn loot_container_check(manager: usize, desc: usize, ret: u32) {
+    if LOOT_DUMPS.load(Ordering::Relaxed) >= 8 {
+        return;
+    }
+    let Some(head) = read_bytes(desc + 4, 16) else { return };
+    let Some((_, name)) = loot_guids().iter().find(|(g, _)| head.len() >= 16 && g[..] == head[..16]) else { return };
+    let ours = LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms();
+    let n = LOOT_DUMPS.fetch_add(1, Ordering::Relaxed);
+    if n >= 8 {
+        return;
+    }
+    let label = format!("loot container {name} ({})", if ours { "creature from the panel" } else { "creature from the world" });
+    let _ = std::thread::Builder::new().name("m182-loot-dump".into()).spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        dump_entity(&label, manager, ret);
+    });
+}
+
 pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if ret == 0 {
         return;
@@ -1163,6 +1290,7 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms() {
         loot_watch_report(manager, edx, desc, ret);
     }
+    loot_container_check(manager, desc, ret);
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
     if settled && edx != 1 {
         return;
@@ -1181,7 +1309,19 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
                 log("the world this game hosted is gone; now connected to a remote server");
             }
             CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
+            CLIENT_TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
+            CLIENT_GUESSES.store(0, Ordering::SeqCst);
             log(&format!("client player entity id={ret} mgr={manager:#x}"));
+            let array = u64_at(&head, 0x18) as usize;
+            let count = (u64_at(&head, 0x20) as usize).min(96);
+            if let Some(entries) = read_bytes(array, count * 24) {
+                let count = entries.len() / 24;
+                if let Some(expected) = component_data(&entries, count, HASH_CURRENT_TRANSFORM, TRANSFORM_SIZE) {
+                    if let Some(first) = expected.get(..24) {
+                        calibrate(manager, ret, first);
+                    }
+                }
+            }
         }
         return;
     }
@@ -1521,6 +1661,18 @@ struct PowerState {
     diag_last: Option<Instant>,
     spawners: SpawnerSet,
     buffs_seen: Vec<u32>,
+    client_powers: HashMap<u32, ClientPowers>,
+    client_scan: Option<Instant>,
+}
+
+#[derive(Default)]
+struct ClientPowers {
+    powers: Powers,
+    mtime: Option<std::time::SystemTime>,
+    stamina_peak: u32,
+    mana_peak: u32,
+    seen: Vec<u32>,
+    heal: bool,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -1845,7 +1997,7 @@ pub fn set_player_position(manager: usize, id: u32, pos: [Option<i64>; 3]) -> bo
     if manager == 0 || id == 0 {
         return false;
     }
-    let index = TRANSFORM_INDEX.load(Ordering::SeqCst);
+    let index = transform_cell(manager).load(Ordering::SeqCst);
     if index < 0 {
         return false;
     }
@@ -1908,15 +2060,28 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
         return;
     };
     let name = cmd.cmd.clone();
-    super::chat::REQUESTER.store(0, Ordering::SeqCst);
+    let requester = super::chat::REQUESTER.swap(0, Ordering::SeqCst);
+    let via_chat = requester != 0;
     match name.as_str() {
         "heal" => {
-            st.heal_once = true;
-            log("command: heal");
+            if via_chat {
+                let target = ((requester - 1) & 0x3f) + 1;
+                st.client_powers.entry(requester - 1).or_default().heal = true;
+                log(&format!("command: heal for entity {target}"));
+            } else {
+                st.heal_once = true;
+                log("command: heal");
+            }
         }
         "teleport" => {
-            let manager = SERVER_MGR.load(Ordering::SeqCst);
-            let id = PLAYER_ID.load(Ordering::SeqCst);
+            if via_chat {
+                log("command teleport ignored: a server cannot move a character, the player's own game does it");
+                return;
+            }
+            let Some((manager, id)) = world_pair() else {
+                log("command teleport: the character is not known yet");
+                return;
+            };
             let Some(at) = cmd.at else {
                 log("command teleport: missing destination");
                 return;
@@ -2036,10 +2201,6 @@ struct Tracked {
 
 static LISTED: Mutex<String> = Mutex::new(String::new());
 
-fn team_label(teams: &[Vec<u32>], number: u32) -> u8 {
-    groups::team_of_player(teams, number)
-}
-
 static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
 static TRACKED_MGR: AtomicUsize = AtomicUsize::new(0);
 static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
@@ -2060,7 +2221,7 @@ fn track_player(manager: usize, id: u32) {
 
 struct GroupState {
     zones: Vec<groups::Zone>,
-    teams: Vec<Vec<u32>>,
+    teams: Vec<groups::TeamDef>,
     zones_mtime: Option<std::time::SystemTime>,
     teams_mtime: Option<std::time::SystemTime>,
     last_fast: Option<Instant>,
@@ -2124,15 +2285,14 @@ fn lend_faction(addr: usize, value: u8) -> bool {
     }
 }
 
-fn team_factions(teams: &[Vec<u32>], online: &[u32], pvp: bool) -> Vec<u8> {
-    let mut by_team: Vec<u8> = vec![super::faction::PLAYER; teams.len()];
+fn team_factions(present: &[usize], pvp: bool) -> Vec<u8> {
+    let mut by_team: Vec<u8> = vec![super::faction::PLAYER; present.len()];
     if !pvp {
         return by_team;
     }
     let mut next = 0usize;
-    for (index, members) in teams.iter().enumerate() {
-        let present = members.iter().filter(|m| online.contains(m)).count();
-        if present >= 2 && next < super::faction::TEAM_FACTIONS.len() {
+    for (index, present) in present.iter().enumerate() {
+        if *present >= 2 && next < super::faction::TEAM_FACTIONS.len() {
             by_team[index] = super::faction::TEAM_FACTIONS[next];
             next += 1;
         }
@@ -2152,14 +2312,19 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     if zones_mtime != st.groups.zones_mtime {
         st.groups.zones_mtime = zones_mtime;
         st.groups.zones = std::fs::read_to_string(&zones_path).map(|t| groups::parse_zones(&t)).unwrap_or_default();
-        log(&format!("zones: {} active", st.groups.zones.len()));
+        log(&format!(
+            "zones: {} active ({} safe, {} owned bases)",
+            st.groups.zones.len(),
+            st.groups.zones.iter().filter(|z| z.is_safe()).count(),
+            st.groups.zones.iter().filter(|z| z.locks()).count()
+        ));
     }
     let teams_path = dir.join(groups::TEAMS_FILE);
     let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
     if teams_mtime != st.groups.teams_mtime {
         st.groups.teams_mtime = teams_mtime;
-        st.groups.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_teams(&t)).unwrap_or_default();
-        log(&format!("teams: {} defined, members {:?}", st.groups.teams.len(), st.groups.teams));
+        st.groups.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_team_defs(&t)).unwrap_or_default();
+        log(&format!("teams: {} defined {:?}", st.groups.teams.len(), st.groups.teams));
     }
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
@@ -2172,9 +2337,32 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         Err(_) => return,
     };
     let me = PLAYER_ID.load(Ordering::SeqCst);
+    let names = super::table::names();
+    let table = super::table::entries();
 
-    let online: Vec<u32> = players.iter().map(|(_, n)| *n).collect();
-    let lent = team_factions(&st.groups.teams, &online, LIVE.pvp());
+    struct Seen {
+        id: u32,
+        number: u32,
+        name: Option<String>,
+        team: u8,
+    }
+    let seen: Vec<Seen> = players
+        .iter()
+        .map(|(id, number)| {
+            let name = names.get(id).cloned();
+            let team = groups::team_for(&st.groups.teams, *number, name.as_deref(), *id);
+            Seen { id: *id, number: *number, name, team }
+        })
+        .collect();
+    let mut present = vec![0usize; st.groups.teams.len()];
+    for p in &seen {
+        if p.team != 0 {
+            if let Some(c) = present.get_mut(p.team as usize - 1) {
+                *c += 1;
+            }
+        }
+    }
+    let lent = team_factions(&present, LIVE.pvp());
     let mut mask = 0u32;
     let mut rows = Vec::new();
     let mut map: Vec<(usize, u8)> = Vec::new();
@@ -2182,22 +2370,43 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     let mut dead: Vec<u32> = Vec::new();
     let mut inside_ids: Vec<u32> = Vec::new();
     let mut inside_at: Vec<(i64, i64, i64)> = Vec::new();
-    for (id, number) in &players {
-        match transform_of(manager, *id) {
+    let mut visitors: Vec<usize> = Vec::new();
+    for p in &seen {
+        let (id, number, team) = (p.id, p.number, p.team);
+        match transform_of(manager, id) {
             Some(t) => {
                 let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
-                rows.push(format!("{{\"n\":{},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1},\"me\":{}}}", number, x, y, z, *id == me));
-                let in_zone = !st.groups.zones.is_empty() && groups::inside(&st.groups.zones, x, z);
-                if in_zone {
-                    inside_ids.push(*id);
+                rows.push(format!(
+                    "{{\"n\":{},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1},\"me\":{},\"entity\":{},\"name\":{}}}",
+                    number,
+                    x,
+                    y,
+                    z,
+                    id == me,
+                    id,
+                    serde_json::Value::String(p.name.clone().unwrap_or_default())
+                ));
+                let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
+                if in_safe {
+                    inside_ids.push(id);
                     inside_at.push((le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
+                    shielded.extend(faction_addresses(manager, id));
                 }
-                if in_zone {
-                    shielded.extend(faction_addresses(manager, *id));
+                for zone in st.groups.zones.iter().filter(|z| z.locks() && z.owner() != 0) {
+                    if !groups::inside(std::slice::from_ref(zone), x, z) || team == zone.owner() as u8 {
+                        continue;
+                    }
+                    let entry = table.iter().find(|e| e.entity() == id);
+                    let admin = entry.map(|e| roster::is_admin(e.permissions)).unwrap_or(false);
+                    if admin && !zone.lock_admins.unwrap_or(false) {
+                        continue;
+                    }
+                    if let Some(e) = entry {
+                        visitors.push(e.index);
+                    }
                 }
-                let team = groups::team_of_player(&st.groups.teams, *number);
                 let wanted = if team != 0 { lent.get(team as usize - 1).copied().unwrap_or(super::faction::PLAYER) } else { super::faction::PLAYER };
-                for addr in faction_addresses(manager, *id) {
+                for addr in faction_addresses(manager, id) {
                     if team != 0 {
                         map.push((addr, team));
                     }
@@ -2211,31 +2420,33 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                 }
             }
             None => {
-                if find_record(manager, *id).is_none() {
-                    dead.push(*id);
+                if find_record(manager, id).is_none() {
+                    dead.push(id);
                 }
             }
         }
     }
     let listed = format!(
-        "{:?} me={} teams={:?}",
-        players.iter().map(|(id, n)| (*n, *id, team_label(&st.groups.teams, *n))).collect::<Vec<_>>(),
+        "{:?} me={} teams={:?} visitors={:?}",
+        seen.iter().map(|p| (p.number, p.id, p.name.clone().unwrap_or_default(), p.team)).collect::<Vec<_>>(),
         me,
-        map.len()
+        map.len(),
+        visitors
     );
     if let Ok(mut last) = LISTED.lock() {
         if *last != listed {
-            log(&format!("players: listed (number, entity, team) {listed}"));
+            log(&format!("players: listed (number, entity, name, team) {listed}"));
             *last = listed;
         }
     }
     if st.zone_ids != inside_ids {
-        log(&format!("zones: {} player(s) inside", inside_ids.len()));
+        log(&format!("zones: {} player(s) inside a safe zone", inside_ids.len()));
         st.zone_ids = inside_ids;
     }
     groups::set_team_map(map);
     super::faction::set_team_mask(mask);
     groups::set_protected(shielded);
+    super::table::apply_visitors(&visitors);
     if !inside_at.is_empty()
         && AURA_FAILED.load(Ordering::Relaxed) < 3
         && st.groups.aura_last.map(|t| now.duration_since(t) >= AURA_PERIOD).unwrap_or(true)
@@ -2263,6 +2474,22 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         }
         list.retain(|p| p.misses < 5);
     }
+}
+
+pub fn roster_line(seq: u32) -> String {
+    let names = super::table::names();
+    let mut ids: Vec<u32> = tracked_ids();
+    for e in super::table::entries() {
+        if !ids.contains(&e.entity()) {
+            ids.push(e.entity());
+        }
+    }
+    ids.sort_unstable();
+    let entries: Vec<(u32, String)> = ids
+        .into_iter()
+        .map(|id| (id, names.get(&id).cloned().unwrap_or_else(|| format!("Jugador {id}"))))
+        .collect();
+    super::roster::reply_text(seq, &entries)
 }
 
 fn record_trail(pos: (i64, i64, i64)) {
@@ -2296,6 +2523,9 @@ fn key_down(vk: i32) -> bool {
 }
 
 fn client_pair() -> Option<(usize, u32)> {
+    if SERVER_MGR.load(Ordering::SeqCst) == 0 || LIVE.force_client() {
+        return None;
+    }
     let m = CLIENT_MGR.load(Ordering::SeqCst);
     let id = CLIENT_PLAYER_ID.load(Ordering::SeqCst);
     if m == 0 || id == 0 || m == SERVER_MGR.load(Ordering::SeqCst) {
@@ -2373,7 +2603,10 @@ fn find_locomotion(manager: usize, id: u32) -> (Option<usize>, Option<usize>) {
 }
 
 fn hold_flying_state(st: &mut PowerState) {
-    let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
+    let mut pairs: Vec<(usize, usize, u32)> = Vec::new();
+    if let Some((m, id)) = world_pair() {
+        pairs.push((0, m, id));
+    }
     if let Some((m, id)) = client_pair() {
         pairs.push((1, m, id));
     }
@@ -2427,7 +2660,10 @@ fn hold_flying_state(st: &mut PowerState) {
 }
 
 fn set_gravity(st: &mut PowerState, active: bool) {
-    let mut pairs: Vec<(usize, usize, u32)> = vec![(0, SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst))];
+    let mut pairs: Vec<(usize, usize, u32)> = Vec::new();
+    if let Some((m, id)) = world_pair() {
+        pairs.push((0, m, id));
+    }
     if let Some((m, id)) = client_pair() {
         pairs.push((1, m, id));
     }
@@ -2561,20 +2797,75 @@ fn tp_step(st: &mut PowerState, manager: usize, id: u32) {
     }
 }
 
+fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut present: Vec<u32> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(client) = super::chat::client_of_powers_file(&name) else { continue };
+        present.push(client);
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        let known = st.client_powers.get(&client).map(|c| c.mtime);
+        if known == Some(mtime) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        match serde_json::from_str::<Powers>(&text) {
+            Ok(p) => {
+                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly));
+                let slot = st.client_powers.entry(client).or_default();
+                slot.powers = p;
+                slot.mtime = mtime;
+            }
+            Err(e) => log(&format!("powers (chat client {client}): invalid file ({e})")),
+        }
+    }
+    st.client_powers.retain(|client, c| present.contains(client) || c.heal);
+}
+
+fn client_powers_busy(st: &PowerState) -> bool {
+    st.client_powers.values().any(|c| c.powers.god || c.powers.stamina || c.heal)
+}
+
+fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
+    let clients: Vec<u32> = st.client_powers.keys().copied().collect();
+    for client in clients {
+        let id = (client & 0x3f) + 1;
+        let Some(c) = st.client_powers.get_mut(&client) else { continue };
+        if find_record(manager, id).is_none() {
+            continue;
+        }
+        if c.heal {
+            c.heal = false;
+            refill_health(manager, id);
+            refill_stamina(manager, id, &mut c.stamina_peak);
+            refill_mana(manager, id, &mut c.mana_peak);
+        }
+        if c.powers.stamina {
+            if tick % 4 == 0 {
+                cleanse_debuffs(manager, id, &mut c.seen);
+            }
+            refill_stamina(manager, id, &mut c.stamina_peak);
+            refill_mana(manager, id, &mut c.mana_peak);
+        }
+    }
+}
+
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     if tick % 10 == 0 {
         refresh_powers(st, dir);
+        if SERVER_MGR.load(Ordering::SeqCst) != 0 {
+            refresh_client_powers(st, dir);
+        }
         run_command(st, dir);
+        scan_request(st, dir);
     }
-    let manager = SERVER_MGR.load(Ordering::SeqCst);
-    let id = PLAYER_ID.load(Ordering::SeqCst);
-    if manager == 0 || id == 0 {
-        return;
-    }
-    if tick % 4 == 0 {
+    let Some((manager, id)) = world_pair() else { return };
+    let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
+    if hosting && tick % 4 == 0 {
         groups_tick(st, dir);
     }
-    if tick % 16 == 0 {
+    if hosting && tick % 16 == 0 {
         spawners_tick(&mut st.spawners, dir);
     }
     let client = client_pair();
@@ -2586,9 +2877,18 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
             want.push(pair);
         }
     }
+    for (client_number, c) in &st.client_powers {
+        if c.powers.god {
+            let entity = (client_number & 0x3f) + 1;
+            if !want.contains(&(manager, entity)) {
+                want.push((SERVER_MGR.load(Ordering::SeqCst), entity));
+            }
+        }
+    }
     for zone_id in st.zone_ids.clone() {
-        if !want.contains(&(manager, zone_id)) {
-            want.push((manager, zone_id));
+        let server = SERVER_MGR.load(Ordering::SeqCst);
+        if server != 0 && !want.contains(&(server, zone_id)) {
+            want.push((server, zone_id));
             if zone_id == id {
                 if let Some(pair) = client {
                     want.push(pair);
@@ -2597,6 +2897,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
     }
     shield_tick(st, &want);
+    if hosting {
+        apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick);
+    }
     if st.heal_once {
         refill_health(manager, id);
         if let Some((m, c)) = client {
@@ -2721,6 +3024,8 @@ pub fn new_power_state() -> PowerState {
         diag_last: None,
         spawners: SpawnerSet::default(),
         buffs_seen: Vec::new(),
+        client_powers: HashMap::new(),
+        client_scan: None,
     }
 }
 
@@ -2747,6 +3052,28 @@ fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
         }
     }
     log(&format!("delivery: item {} requested; the pickup entity {id} was created", g.item));
+}
+
+pub fn data_regions() -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut addr = 0x10000usize;
+    for _ in 0..400_000 {
+        let mut info = MemInfo::default();
+        let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
+        if n == 0 {
+            break;
+        }
+        let end = info.base.saturating_add(info.size);
+        let low = info.protect & 0xff;
+        if info.state == 0x1000 && matches!(low, 0x04 | 0x08 | 0x40 | 0x80) && info.protect & 0x700 == 0 && info.kind != 0x100_0000 && info.size > 0 {
+            out.push((info.base, end));
+        }
+        if end <= addr || end >= 0x7fff_ffff_0000 {
+            break;
+        }
+        addr = end;
+    }
+    out
 }
 
 pub fn readable_regions() -> Vec<(usize, usize)> {
@@ -2801,6 +3128,103 @@ pub fn scan_regions(regions: &[(usize, usize)], pattern: &[u8], max_hits: usize)
         }
     }
     hits
+}
+
+pub const SCAN_FILE: &str = "m182_scan.request";
+pub const ONLINE_FILE: &str = "m182_online.json";
+static SCAN_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn utf16le(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+}
+
+fn decode_after(bytes: &[u8], wide: bool) -> String {
+    if wide {
+        let units: Vec<u16> = bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).take_while(|u| *u != 0).collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).to_string()
+    }
+}
+
+fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<Vec<(u32, String)>> {
+    let marker = roster::tag(seq);
+    let narrow = marker.as_bytes().to_vec();
+    let wide = utf16le(&marker);
+    const CHUNK: usize = 4 << 20;
+    for &(start, end) in regions {
+        if end - start > (3usize << 30) {
+            continue;
+        }
+        let mut at = start;
+        while at < end {
+            let len = (end - at).min(CHUNK + 2048);
+            let Some(b) = read_bytes(at, len) else {
+                at += CHUNK;
+                continue;
+            };
+            for (needle, is_wide) in [(&narrow, false), (&wide, true)] {
+                for hit in roster::find_all(&b, needle) {
+                    let tail = &b[hit..b.len().min(hit + 2200)];
+                    let text = decode_after(tail, is_wide);
+                    if let Some(list) = roster::parse_reply(&text, seq) {
+                        return Some(list);
+                    }
+                }
+            }
+            at += CHUNK;
+        }
+    }
+    None
+}
+
+fn scan_roster(seq: u32, dir: std::path::PathBuf) {
+    let started = Instant::now();
+    let mut passes = 0u32;
+    let found = loop {
+        passes += 1;
+        let regions = data_regions();
+        if let Some(list) = find_roster(&regions, seq) {
+            break Some(list);
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    };
+    match found {
+        Some(list) => {
+            let players: Vec<String> = list
+                .iter()
+                .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
+                .collect();
+            let text = format!("{{\"seq\":{seq},\"players\":[{}]}}", players.join(","));
+            let tmp = dir.join("m182_online.json.tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, dir.join(ONLINE_FILE));
+            }
+            log(&format!("roster {seq}: {} player(s) read from the chat after {} pass(es), {} ms", list.len(), passes, started.elapsed().as_millis()));
+        }
+        None => log(&format!("roster {seq}: the answer never appeared in memory ({passes} passes)")),
+    }
+    SCAN_BUSY.store(false, Ordering::SeqCst);
+}
+
+fn scan_request(_st: &mut PowerState, dir: &std::path::Path) {
+    let path = dir.join(SCAN_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let _ = std::fs::remove_file(&path);
+    let seq = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("seq").and_then(|s| s.as_u64())).unwrap_or(0) as u32;
+    if SCAN_BUSY.swap(true, Ordering::SeqCst) {
+        log("roster: a search is already running");
+        return;
+    }
+    let dir = dir.to_path_buf();
+    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || scan_roster(seq, dir)).is_err() {
+        SCAN_BUSY.store(false, Ordering::SeqCst);
+        log("roster: could not start the search");
+    }
 }
 
 fn write_anywhere(addr: usize, data: &[u8]) -> bool {
@@ -3307,6 +3731,7 @@ fn powers_loop() {
             || !st.saved.is_empty()
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
+            || client_powers_busy(&st)
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
         std::thread::sleep(Duration::from_millis(if busy { 1 } else { 25 }));
         tick = tick.wrapping_add(1);

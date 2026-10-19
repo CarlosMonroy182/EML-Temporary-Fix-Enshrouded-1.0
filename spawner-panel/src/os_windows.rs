@@ -91,6 +91,27 @@ fn send(inputs: &[Input]) {
     }
 }
 
+fn keys_for(unit: u16, out: &mut Vec<Input>) {
+    if unit < 0x80 {
+        let found = unsafe { VkKeyScanW(unit) };
+        if found != -1 {
+            let (vk, state) = ((found & 0xFF) as u32, ((found >> 8) & 0xFF) as u8);
+            let scan = unsafe { MapVirtualKeyW(vk, 0) } as u16;
+            if scan != 0 && state & !1 == 0 {
+                if state & 1 == 1 {
+                    out.push(scan_down(SHIFT_SCAN));
+                }
+                out.extend_from_slice(&scan_tap(scan));
+                if state & 1 == 1 {
+                    out.push(scan_up(SHIFT_SCAN));
+                }
+                return;
+            }
+        }
+    }
+    out.extend_from_slice(&unit_tap(unit));
+}
+
 impl Sys for Os {
     fn key_down(&self, vk: i32) -> bool {
         (unsafe { GetAsyncKeyState(vk) } as u16) & 0x8000 != 0
@@ -153,25 +174,18 @@ impl Sys for Os {
         send(&scan_tap(scan));
     }
 
-    fn unit(&self, unit: u16) {
-        if unit < 0x80 {
-            let found = unsafe { VkKeyScanW(unit) };
-            if found != -1 {
-                let (vk, state) = ((found & 0xFF) as u32, ((found >> 8) & 0xFF) as u8);
-                let scan = unsafe { MapVirtualKeyW(vk, 0) } as u16;
-                if scan != 0 && state & !1 == 0 {
-                    if state & 1 == 1 {
-                        send(&[scan_down(SHIFT_SCAN)]);
-                    }
-                    send(&scan_tap(scan));
-                    if state & 1 == 1 {
-                        send(&[scan_up(SHIFT_SCAN)]);
-                    }
-                    return;
-                }
-            }
+    fn units(&self, units: &[u16]) {
+        let mut batch: Vec<Input> = Vec::with_capacity(units.len() * 4);
+        for unit in units {
+            keys_for(*unit, &mut batch);
         }
-        send(&unit_tap(unit));
+        send(&batch);
+    }
+
+    fn unit(&self, unit: u16) {
+        let mut batch = Vec::with_capacity(4);
+        keys_for(unit, &mut batch);
+        send(&batch);
     }
 
     fn sleep(&self, ms: u64) {

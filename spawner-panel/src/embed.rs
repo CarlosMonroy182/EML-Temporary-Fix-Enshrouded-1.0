@@ -76,7 +76,8 @@ pub fn start(dir: PathBuf) -> i32 {
         return 1;
     }
     let host = Host::new(Arc::new(Os));
-    remote::install_typist(Box::new(ChatTypist::new(host.clone(), &chat_key(&dir))));
+    let pace = std::fs::read_to_string(dir.join(remote::SETTINGS_FILE)).map(|t| crate::host::Pace::from_settings(&t)).unwrap_or_default();
+    remote::install_typist(Box::new(ChatTypist::new(host.clone(), &chat_key(&dir)).with_pace(pace)));
     let guard = crate::rawguard::RawGuard::new(RawOs);
     let spawned = std::thread::Builder::new().name("m182-panel-keys".into()).spawn(move || {
         let mut ticks = 0u32;
