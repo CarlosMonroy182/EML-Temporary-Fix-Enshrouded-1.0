@@ -212,8 +212,6 @@ pub enum Route {
     ServerOnly,
 }
 
-/// Commands that act on the character this game shows: they are applied here, never forwarded.
-const LOCAL_COMMANDS: [&str; 1] = ["teleport"];
 /// Commands that also change something about the sender on the server.
 const SHARED_COMMANDS: [&str; 1] = ["heal"];
 
@@ -224,9 +222,7 @@ pub fn route_for(name: &str, text: &str) -> Route {
         return route;
     }
     let cmd = serde_json::from_str::<Value>(text).ok().and_then(|v| v.get("cmd").and_then(Value::as_str).map(str::to_string)).unwrap_or_default();
-    if LOCAL_COMMANDS.contains(&cmd.as_str()) {
-        Route::Local
-    } else if SHARED_COMMANDS.contains(&cmd.as_str()) {
+    if SHARED_COMMANDS.contains(&cmd.as_str()) {
         Route::Both
     } else {
         route
@@ -455,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_for_the_character_on_screen_stay_here() {
+    fn only_the_commands_that_also_change_the_sender_go_both_ways() {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_tests();
         configure(Settings { enabled: true, key: "abcdef1".into(), limit: DEFAULT_LIMIT });
@@ -463,7 +459,7 @@ mod tests {
         set_hosting(Some(false));
         assert!(connected());
         let command = "m182_command.request";
-        assert_eq!(route_for(command, r#"{"cmd":"teleport","at":[1,2,3]}"#), Route::Local);
+        assert_eq!(route_for(command, r#"{"cmd":"teleport","at":[1,2,3]}"#), Route::ServerOnly);
         assert_eq!(route_for(command, r#"{"cmd":"heal"}"#), Route::Both);
         assert_eq!(route_for(command, r#"{"cmd":"item_copy"}"#), Route::ServerOnly);
         assert_eq!(route_for(command, "no es json"), Route::ServerOnly);

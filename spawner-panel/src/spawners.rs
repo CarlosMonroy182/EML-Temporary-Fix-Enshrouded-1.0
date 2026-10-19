@@ -26,7 +26,6 @@ pub struct Spawner {
     pub damage: f32,
     pub radius: f32,
     pub respawn: u32,
-    pub loot: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -59,7 +58,6 @@ pub fn to_json(list: &[Spawner]) -> Value {
                 "damage": s.damage,
                 "radius": s.radius,
                 "respawn": s.respawn,
-                "loot": s.loot,
             })
         })
         .collect();
@@ -88,7 +86,6 @@ pub fn parse(text: &str) -> Vec<Spawner> {
                 damage: r.get("damage").and_then(|x| x.as_f64()).unwrap_or(1.0).clamp(0.0, 1000.0) as f32,
                 radius: r.get("radius").and_then(|x| x.as_f64()).unwrap_or(3.0).clamp(0.5, 60.0) as f32,
                 respawn: r.get("respawn").and_then(|x| x.as_u64()).unwrap_or(300).clamp(10, 86_400) as u32,
-                loot: r.get("loot").and_then(|x| x.as_array()).map(|a| a.iter().filter(|e| e.is_object()).take(12).cloned().collect()).unwrap_or_default(),
             })
         })
         .collect()
@@ -163,7 +160,6 @@ mod tests {
             damage: 1.5,
             radius: 4.0,
             respawn: 300,
-            loot: vec![json!({"template": "g", "item": 7, "guid": "x", "level": 3, "rarity": 1, "amount": 2})],
         }
     }
 
@@ -177,7 +173,6 @@ mod tests {
         assert_eq!(v["spawners"][0]["template"], "642098d4-fc09-48e2-811e-782d438bf551");
         assert_eq!(v["spawners"][0]["at"], json!([10.5, 20.0, -3.0]));
         assert_eq!(v["spawners"][0]["respawn"], 300);
-        assert_eq!(v["spawners"][0]["loot"][0]["item"], 7);
         assert_eq!(load(&dir), vec![sample()]);
         save(&dir, &[]).unwrap();
         assert!(load(&dir).is_empty());

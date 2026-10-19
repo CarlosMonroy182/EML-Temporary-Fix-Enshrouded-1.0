@@ -6,9 +6,6 @@ pub mod rawguard;
 mod emblems;
 mod icons;
 mod items;
-mod loot;
-mod map;
-mod tiles;
 mod powers;
 pub mod remote;
 mod server;
@@ -91,7 +88,6 @@ pub struct Place {
 pub enum Tab {
     Creatures,
     Items,
-    Map,
     Powers,
     Pvp,
     SafeZones,
@@ -129,7 +125,6 @@ pub struct App {
     downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
     social: social::SocialState,
-    map: map::MapState,
     level: u32,
     count: u32,
     distance: f32,
@@ -141,7 +136,6 @@ pub struct App {
     target: Target,
     place_index: usize,
     respawn_minutes: u32,
-    loot: u32,
     spawners: Vec<spawners::Spawner>,
     spawner_status: HashMap<String, spawners::Live>,
     spawner_checked: Instant,
@@ -522,7 +516,6 @@ impl App {
             Ok("teams") => Tab::Teams,
             Ok("zones") => Tab::SafeZones,
             Ok("items") => Tab::Items,
-            Ok("map") => Tab::Map,
             Ok("powers") => Tab::Powers,
             Ok("settings") => Tab::Settings,
             _ => Tab::Creatures,
@@ -538,7 +531,6 @@ impl App {
             downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
             social: social::SocialState::load(&dir),
-            map: map::MapState::default(),
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
             distance: get_f("spawn_distance", 5.0).clamp(1.0, 60.0),
@@ -550,7 +542,6 @@ impl App {
             target: Target::Around,
             place_index: 0,
             respawn_minutes: spawners::DEFAULT_RESPAWN_MINUTES,
-            loot: get_u("spawn_loot", 3).min(loot::MAX_DROPS),
             spawners: spawners::load(&dir),
             spawner_status: spawners::load_status(&dir),
             spawner_checked: Instant::now(),
@@ -645,7 +636,6 @@ impl App {
             damage: self.damage,
             radius: if self.count > 1 { self.distance } else { 3.0 },
             respawn: self.respawn_minutes.clamp(1, 1440) * 60,
-            loot: self.roll_loot(),
         };
         self.spawners.push(spawner);
         self.status = match spawners::save(&self.dir, &self.spawners) {
@@ -653,11 +643,6 @@ impl App {
             Err(e) => Status::Error(e),
         };
         self.spawner_notice = format!("Aparición creada en «{}» (cada {} min).", place.name, self.respawn_minutes);
-    }
-
-    fn roll_loot(&self) -> Vec<Value> {
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
-        loot::roll(&self.items.rows, self.level, self.loot, &self.items.generic_pickup, seed)
     }
 
     fn delete_spawner(&mut self, id: &str) {
@@ -725,7 +710,6 @@ impl App {
                 ("spawn_distance", json!(self.distance)),
                 ("spawn_health", json!(self.effective_health())),
                 ("spawn_damage", json!(self.damage)),
-                ("spawn_loot", json!(self.loot)),
                 ("spawner", json!(true)),
             ]),
             Mode::Items => Ok(()),
@@ -740,10 +724,6 @@ impl App {
                 request["level"] = json!(self.level);
                 request["health"] = json!(self.effective_health());
                 request["damage"] = json!(self.damage);
-                let drops = self.roll_loot();
-                if !drops.is_empty() {
-                    request["loot"] = Value::Array(drops);
-                }
             } else {
                 request["count"] = json!(1);
                 request["template"] = json!(self.items.generic_pickup.clone());
@@ -866,7 +846,6 @@ impl App {
         for (tab, label, soon) in [
             (Tab::Creatures, "Criaturas", false),
             (Tab::Items, "Ítems", false),
-            (Tab::Map, "Mapa", false),
             (Tab::Places, "Lugares", false),
             (Tab::Powers, "Admin", false),
             (Tab::Pvp, "PvP", false),
@@ -1188,8 +1167,6 @@ impl App {
             ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
             label_title(ui, "DAÑO  (1.00 = normal)");
             ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
-            label_title(ui, "BOTÍN  (0 = ninguno)");
-            ui.add(egui::Slider::new(&mut self.loot, 0..=loot::MAX_DROPS));
         }
         divider(ui);
 
@@ -1326,7 +1303,6 @@ impl eframe::App for App {
             match self.tab {
             Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
             Tab::Items => self.catalog_view(ui, Mode::Items),
-            Tab::Map => self.map_tab(ui),
             tab => {
                 egui::Frame::none().inner_margin(egui::Margin::same(20.0)).show(ui, |ui| match tab {
                     Tab::Places => self.places_tab(ui),
@@ -1387,7 +1363,6 @@ mod tests {
             downloader: None,
             powers: Default::default(),
             social: Default::default(),
-            map: Default::default(),
             level: 30,
             count: 2,
             distance: 7.0,
@@ -1399,7 +1374,6 @@ mod tests {
             target: Target::Around,
             place_index: 0,
             respawn_minutes: 5,
-            loot: 3,
             spawners: Vec::new(),
             spawner_status: HashMap::new(),
             spawner_checked: Instant::now(),
@@ -1444,34 +1418,6 @@ mod tests {
     fn emblem_kinds() {
         assert_eq!(emblems::kind_of("Enemy_Skeleton_Melee01", "Skeleton"), emblems::Kind::Skull);
         assert_eq!(emblems::kind_of("Enemy_Wildbeast_Wolf_Heavy", "WildBeast"), emblems::Kind::Paw);
-    }
-
-    #[test]
-    fn map_helpers() {
-        let cells = map::parse_trail("x,y,z\n100,50,200\n104,70,201\n900,10,900\nbad,line\n");
-        assert_eq!(cells.len(), 2);
-        let c = cells[&map::cell_of(100.0, 200.0)];
-        assert_eq!(c.1, 2);
-        assert!((c.0 - 60.0).abs() < 0.01);
-        let mut state = map::MapState::default();
-        state.cells = cells;
-        assert!(state.height_near(110.0, 205.0).is_some());
-        assert!(state.height_near(5000.0, 5000.0).is_none());
-    }
-
-    #[test]
-    fn teleport_ground_hint() {
-        let cells = map::parse_trail("x,y,z\n100,50,200\n300,420,260\n9000,900,9000\n");
-        let g = map::ground_around(&cells, &[], 120.0, 210.0).unwrap();
-        assert!((g - 420.0).abs() < 0.5);
-        assert!(map::ground_around(&cells, &[], 50000.0, 50000.0).is_none());
-        assert_eq!(map::ground_around(&cells, &[(130.0, 600.0, 210.0)], 120.0, 210.0), Some(600.0));
-        let known = powers::teleport_body_with_ground([1.0, 2.0, 3.0], true, Some(500.0));
-        assert!(known.get("ground").is_none());
-        let unknown = powers::teleport_body_with_ground([1.0, 2.0, 3.0], false, Some(500.0));
-        assert!(unknown["at"][1].is_null());
-        assert_eq!(unknown["ground"], json!(500.0));
-        assert!(powers::teleport_body_with_ground([1.0, 2.0, 3.0], false, None).get("ground").is_none());
     }
 
     #[test]
@@ -1562,52 +1508,6 @@ mod tests {
         let ctx = egui::Context::default();
         app.tick(&ctx);
         assert!(matches!(app.status, Status::Delivered));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn creature_loot_travels_with_the_request_and_is_saved_in_spawners() {
-        let dir = temp_dir("loot");
-        let mut app = app_in(&dir, vec![entry("642098d4-fc09-48e2-811e-782d438bf551", "A", "Drak", false)]);
-        app.items.generic_pickup = items::GENERIC_PICKUP.to_string();
-        app.items.rows = (1..=6u32)
-            .map(|i| items::Item {
-                id: i,
-                guid: format!("aaaaaaaa-0000-0000-0000-{i:012}"),
-                debug: format!("Thing_{i}"),
-                name: format!("Thing {i}"),
-                category: "Materials".into(),
-                rarity: "Common".into(),
-                stack: 50,
-                level_min: 1,
-                level_max: 1,
-                ..items::Item::default()
-            })
-            .collect();
-        app.places.push(Place { name: "Torre".into(), x: 1.0, y: 2.0, z: 3.0 });
-        app.loot = 3;
-        app.target = Target::Around;
-        app.spawn(Mode::Creatures);
-        let req = read_request(&dir);
-        let drops = req["loot"].as_array().expect("loot in the request");
-        assert!(!drops.is_empty() && drops.len() <= 3);
-        for d in drops {
-            assert!(d["item"].as_u64().unwrap() >= 1 && d["guid"].as_str().unwrap().starts_with("aaaaaaaa"));
-            assert!(d["amount"].as_u64().unwrap() >= 1 && d["level"].as_u64().unwrap() >= 1);
-        }
-        assert_eq!(read_config(&dir)["spawn_loot"], 3);
-
-        std::fs::remove_file(dir.join(REQUEST_FILE)).unwrap();
-        app.loot = 0;
-        app.spawn(Mode::Creatures);
-        assert!(read_request(&dir).get("loot").is_none());
-
-        app.loot = 4;
-        app.target = Target::Place;
-        app.create_spawner();
-        let saved = spawners::load(&dir);
-        assert_eq!(saved.len(), 1);
-        assert!(!saved[0].loot.is_empty() && saved[0].loot.len() <= 4);
         let _ = std::fs::remove_dir_all(dir);
     }
 
