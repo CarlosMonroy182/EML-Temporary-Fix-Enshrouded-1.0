@@ -19,7 +19,7 @@ mod os;
 #[path = "os_other.rs"]
 mod os;
 
-pub use os::Os;
+pub use os::{Os, RawOs};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static CONTEXT: Mutex<Option<egui::Context>> = Mutex::new(None);
@@ -77,9 +77,15 @@ pub fn start(dir: PathBuf) -> i32 {
     }
     let host = Host::new(Arc::new(Os));
     remote::install_typist(Box::new(ChatTypist::new(host.clone(), &chat_key(&dir))));
+    let guard = crate::rawguard::RawGuard::new(RawOs);
     let spawned = std::thread::Builder::new().name("m182-panel-keys".into()).spawn(move || {
+        let mut ticks = 0u32;
         loop {
             std::thread::sleep(Duration::from_millis(30));
+            ticks = ticks.wrapping_add(1);
+            if ticks % 3 == 0 && guard.tick() {
+                remote::note("the game's mouse and keyboard were handed back");
+            }
             host.poll(&mut || {
                 let (dir, host) = (dir.clone(), host.clone());
                 let _ = std::thread::Builder::new().name("m182-panel-ui".into()).stack_size(32 * 1024 * 1024).spawn(move || run_window(dir, host));

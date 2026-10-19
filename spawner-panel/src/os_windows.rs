@@ -4,6 +4,7 @@ use std::ptr::null;
 
 use crate::host::Sys;
 use crate::input::{scan_down, scan_tap, scan_up, unit_tap, Input};
+use crate::rawguard::{Raw, RawSys};
 use crate::WINDOW_TITLE;
 
 #[link(name = "user32")]
@@ -20,6 +21,50 @@ extern "system" {
     fn AttachThreadInput(from: u32, to: u32, attach: i32) -> i32;
     fn VkKeyScanW(ch: u16) -> i16;
     fn MapVirtualKeyW(code: u32, kind: u32) -> u32;
+    fn GetRegisteredRawInputDevices(devices: *mut RawDevice, count: *mut u32, size: u32) -> u32;
+    fn RegisterRawInputDevices(devices: *const RawDevice, count: u32, size: u32) -> i32;
+    fn GetClassNameW(hwnd: usize, buffer: *mut u16, max: i32) -> i32;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawDevice {
+    page: u16,
+    usage: u16,
+    flags: u32,
+    target: usize,
+}
+
+pub struct RawOs;
+
+impl RawSys for RawOs {
+    fn registered(&self) -> Vec<Raw> {
+        let size = std::mem::size_of::<RawDevice>() as u32;
+        let mut count = 0u32;
+        unsafe {
+            GetRegisteredRawInputDevices(std::ptr::null_mut(), &mut count, size);
+        }
+        if count == 0 || count > 64 {
+            return Vec::new();
+        }
+        let mut buffer = vec![RawDevice { page: 0, usage: 0, flags: 0, target: 0 }; count as usize];
+        let got = unsafe { GetRegisteredRawInputDevices(buffer.as_mut_ptr(), &mut count, size) };
+        if got == u32::MAX {
+            return Vec::new();
+        }
+        buffer.iter().take(got as usize).map(|d| Raw { page: d.page, usage: d.usage, flags: d.flags, target: d.target }).collect()
+    }
+
+    fn is_foreign(&self, target: usize) -> bool {
+        let mut name = [0u16; 128];
+        let len = unsafe { GetClassNameW(target, name.as_mut_ptr(), name.len() as i32) };
+        len > 0 && String::from_utf16_lossy(&name[..len as usize]).starts_with("Winit")
+    }
+
+    fn register(&self, devices: &[Raw]) -> bool {
+        let list: Vec<RawDevice> = devices.iter().map(|d| RawDevice { page: d.page, usage: d.usage, flags: d.flags, target: d.target }).collect();
+        unsafe { RegisterRawInputDevices(list.as_ptr(), list.len() as u32, std::mem::size_of::<RawDevice>() as u32) != 0 }
+    }
 }
 
 #[link(name = "kernel32")]
