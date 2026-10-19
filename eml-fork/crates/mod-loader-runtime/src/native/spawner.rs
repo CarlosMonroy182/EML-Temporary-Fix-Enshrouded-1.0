@@ -1244,6 +1244,7 @@ fn loot_watch_report(manager: usize, edx: u32, desc: usize, ret: u32) {
 
 static LOOT_GUIDS: OnceLock<Vec<([u8; 16], String)>> = OnceLock::new();
 static LOOT_DUMPS: AtomicU32 = AtomicU32::new(0);
+static LOOT_WORLD_DUMPS: AtomicU32 = AtomicU32::new(0);
 
 fn loot_guids() -> &'static Vec<([u8; 16], String)> {
     LOOT_GUIDS.get_or_init(|| {
@@ -1266,12 +1267,18 @@ fn loot_guids() -> &'static Vec<([u8; 16], String)> {
 /// Writes down what the game builds when a creature dies, so loot that cannot be opened can be
 /// compared with the loot of an enemy that came from the world.
 fn loot_container_check(manager: usize, desc: usize, ret: u32) {
+    let ours = LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms();
+    if !ours && (LOOT_WORLD_DUMPS.load(Ordering::Relaxed) >= 2 || now_ms() < 60_000) {
+        return;
+    }
     if LOOT_DUMPS.load(Ordering::Relaxed) >= 8 {
         return;
     }
     let Some(head) = read_bytes(desc + 4, 16) else { return };
     let Some((_, name)) = loot_guids().iter().find(|(g, _)| head.len() >= 16 && g[..] == head[..16]) else { return };
-    let ours = LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms();
+    if !ours {
+        LOOT_WORLD_DUMPS.fetch_add(1, Ordering::Relaxed);
+    }
     let n = LOOT_DUMPS.fetch_add(1, Ordering::Relaxed);
     if n >= 8 {
         return;

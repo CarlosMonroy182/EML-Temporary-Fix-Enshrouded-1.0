@@ -114,6 +114,9 @@ fn keys_for(unit: u16, out: &mut Vec<Input>) {
 
 impl Sys for Os {
     fn key_down(&self, vk: i32) -> bool {
+        if vk == crate::host::VK_INSERT && std::fs::remove_file("m182_open.request").is_ok() {
+            return true;
+        }
         (unsafe { GetAsyncKeyState(vk) } as u16) & 0x8000 != 0
     }
 

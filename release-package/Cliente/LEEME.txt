@@ -16,7 +16,16 @@ USARLO EN TU PARTIDA (local) Y EN TU SERVIDOR
 El panel detecta solo si estas en tu partida o en el servidor. No hay casillas que marcar.
 - En tu partida local todo se aplica directamente.
 - En el servidor (Dathost) debe estar instalada la carpeta "Servidor" (ver su LEEME); la clave ya coincide. El panel escribe por ti en el chat del juego (mensajes que empiezan por !m182) y el servidor los oculta al resto de jugadores. Mientras envia, no toques el teclado ni el chat; el envio de un pedido dura unos segundos.
-- En Ajustes > Servidor, "PROBAR CONEXION" comprueba que el servidor responde.
+- Al entrar al servidor el panel reenvia solo tus poderes, zonas, equipos y spawners y pregunta quien esta conectado. El boton "Reenviar todo" (bajo el titulo) lo repite cuando quieras.
+- Teletransporte, vuelo, vida y energia infinitas actuan sobre tu personaje en pantalla; el servidor tambien aplica tu modo dios y tu energia.
+
+ZONAS Y BASES (pestaña "Zonas y bases")
+- Zona segura: nadie pierde vida dentro.
+- Base protegida: crea la zona donde esta la base, elige el "Equipo dueño" y marca "Base protegida". Quien no sea de ese equipo es visitante dentro: no abre cofres ni construye. Los administradores quedan exentos (marca "tambien a los administradores" solo para probarlo).
+
+EQUIPOS
+- En el servidor pulsa "Buscar jugadores del servidor": el servidor contesta en el chat con los nombres conectados (lo ven todos, es una linea corta). Si no pudo leer algun nombre aparece como "Jugador N". Tambien puedes añadir un nombre a mano.
+- Velocidad de escritura del chat: si el servidor pierde letras, en m182_panel.json añade "typing_burst": 1 y "typing_gap_ms": 4.
 
 ARMAS UNICAS (cada arma distinta)
 - Al editar un arma y entregarla, el panel crea una COPIA propia con tus stats. Las demas armas del mismo tipo no cambian.
@@ -25,7 +34,8 @@ ARMAS UNICAS (cada arma distinta)
 
 LIMITES (sinceridad)
 - Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
-- El panel no recibe respuestas del servidor: si algo no aparece, revisa m182_spawner.log del servidor.
+- Las respuestas del servidor solo llegan para la lista de jugadores. Si algo no aparece, revisa m182_spawner.log del servidor.
+- Sin resolver todavia: soltar botin de enemigos invocados por comando y desbloquear habilidades sin puntos. Para el botin, m182_spawner.log (cliente y servidor) guarda los datos necesarios para corregirlo.
 
 DESINSTALAR
 Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.

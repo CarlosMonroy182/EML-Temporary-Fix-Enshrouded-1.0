@@ -146,7 +146,7 @@ pub struct Pace {
 
 impl Default for Pace {
     fn default() -> Self {
-        Self { burst: 4, gap: 2, opened: 120, before_send: 60, after_send: 140 }
+        Self { burst: 2, gap: 3, opened: 150, before_send: 80, after_send: 180 }
     }
 }
 
