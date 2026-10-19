@@ -1729,4 +1729,18 @@ mod tests {
         assert!(matches!(state.copy_outcome(&dir, &sword, 3, false), CopyOutcome::Plain));
     }
 
+
+    #[test]
+    fn shipped_baseline_mod_matches_the_generator() {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("spawner-mods");
+        if let Ok(out) = std::env::var("M182_WRITE_BASELINE") {
+            let root = std::path::PathBuf::from(out);
+            write_mod(&root, &BTreeMap::new(), &BTreeMap::new(), &Levels::new()).unwrap();
+            return;
+        }
+        let shipped = target.join(MOD_DIR).join("src").join("mod.lua");
+        if let Ok(text) = std::fs::read_to_string(shipped) {
+            assert_eq!(text, lua_source(&BTreeMap::new(), &BTreeMap::new(), &Levels::new()));
+        }
+    }
 }

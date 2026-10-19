@@ -137,6 +137,7 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
     if !super::chat::has_prefix(&message) {
+        super::chat::note_other(&message, client as u32);
         return 0;
     }
     let Ok(dir) = std::env::current_dir() else { return 0 };

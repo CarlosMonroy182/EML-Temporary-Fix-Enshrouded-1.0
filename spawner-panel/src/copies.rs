@@ -13,6 +13,12 @@ use serde_json::{json, Value};
 pub const FILE: &str = "m182_copies.json";
 pub const READY_FILE: &str = "export/m182_custom_items.csv";
 pub const SLOTS: u32 = 8;
+pub const PREBUILT_SLOTS: u32 = 4;
+const PREBUILT: &str = include_str!("prebuilt_pools.txt");
+
+pub fn prebuilt() -> impl Iterator<Item = u32> {
+    PREBUILT.lines().filter_map(|l| l.trim().parse::<u32>().ok())
+}
 pub const MAX_SLOTS: u32 = 64;
 
 pub fn item_id(base: u32, slot: u32) -> u32 {
@@ -81,9 +87,9 @@ fn numbers<const N: usize>(value: &Value) -> Option<[f32; N]> {
 
 impl Book {
     pub fn load(dir: &Path) -> Book {
-        let Some(root) = std::fs::read_to_string(dir.join(FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return Book::default() };
+        let Some(root) = std::fs::read_to_string(dir.join(FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return Book::default().with_prebuilt() };
         let mut book = Book::default();
-        let Some(pools) = root.get("pools").and_then(|p| p.as_object()) else { return book };
+        let Some(pools) = root.get("pools").and_then(|p| p.as_object()) else { return book.with_prebuilt() };
         for (key, pool) in pools {
             let Ok(base) = key.parse::<u32>() else { continue };
             let mut used = BTreeMap::new();
@@ -112,7 +118,19 @@ impl Book {
                 },
             );
         }
-        book
+        book.with_prebuilt()
+    }
+
+    /// Every weapon and shield ships with its copies already created, so they never wait for a restart.
+    pub fn with_prebuilt(mut self) -> Book {
+        for base in prebuilt() {
+            let pool = self.pools.entry(base).or_insert(Pool { slots: PREBUILT_SLOTS, pending: false, used: BTreeMap::new() });
+            pool.slots = pool.slots.max(PREBUILT_SLOTS);
+            if pool.slots == PREBUILT_SLOTS {
+                pool.pending = false;
+            }
+        }
+        self
     }
 
     pub fn to_json(&self) -> Value {
@@ -289,14 +307,29 @@ mod tests {
     #[test]
     fn the_book_survives_a_restart_of_the_panel() {
         let dir = temp("book");
-        let mut book = Book::default();
+        let mut book = Book::default().with_prebuilt();
         book.register(10, 4);
         book.mark_used(10, 2, stats(7.5));
         book.save(&dir).unwrap();
         let loaded = Book::load(&dir);
         assert_eq!(loaded, book);
         std::fs::write(dir.join(FILE), "not json").unwrap();
-        assert_eq!(Book::load(&dir), Book::default());
+        assert_eq!(Book::load(&dir), Book::default().with_prebuilt());
+    }
+
+    #[test]
+    fn shipped_weapons_are_ready_without_a_restart() {
+        let dir = temp("prebuilt");
+        let base = prebuilt().next().unwrap();
+        assert!(prebuilt().count() > 500);
+        let mut book = Book::load(&dir);
+        assert_eq!(book.pending_count(), 0);
+        assert_eq!(book.plan(base, &stats(5.0), None), Plan::Use { slot: 1, fresh: true });
+        assert!(!book.register(base, 4));
+        let mut old = Book::default();
+        old.register(base, 4);
+        old.save(&dir).unwrap();
+        assert_eq!(Book::load(&dir).pending_count(), 0);
     }
 
     #[test]

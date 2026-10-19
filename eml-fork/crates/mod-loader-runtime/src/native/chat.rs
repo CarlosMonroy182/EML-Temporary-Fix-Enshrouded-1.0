@@ -54,6 +54,17 @@ fn note_requester(file: &str, client: u32) {
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
+static OTHER_SEEN: AtomicU32 = AtomicU32::new(0);
+
+/// Logs the first few ordinary messages (their first characters only) so a silent
+/// channel can be told apart from messages arriving in an unexpected shape.
+pub fn note_other(message: &str, client: u32) {
+    if OTHER_SEEN.fetch_add(1, Ordering::Relaxed) < 6 {
+        let head: String = message.chars().take(6).collect();
+        super::spawner::log(&format!("chat: client {client} sent an ordinary message ({} chars) starting \"{head}\"", message.chars().count()));
+    }
+}
+
 pub fn has_prefix(text: &str) -> bool {
     let t = text.trim_start();
     PREFIXES.iter().any(|p| {
@@ -111,7 +122,19 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     session.buffers.retain(|_, (_, at)| now.duration_since(*at) < BUFFER_LIFE);
 
     let (command, rest) = next_token(rest);
-    let outcome = match command.to_ascii_lowercase().as_str() {
+    let lowered = command.to_ascii_lowercase();
+    let (command, rest) = match lowered.as_str() {
+        "setx" | "putx" | "addx" | "endx" => {
+            let (file, hex) = next_token(rest);
+            match unhex(hex) {
+                Ok(body) => (lowered[..3].to_string(), format!("{file} {body}")),
+                Err(why) => return Verdict::Swallowed(format!("chat: client {client} rejected: {why}")),
+            }
+        }
+        _ => (lowered.clone(), rest.to_string()),
+    };
+    let rest = rest.as_str();
+    let outcome = match command.as_str() {
         "ping" => Ok("ping".to_string()),
         "set" => {
             let (file, body) = next_token(rest);
@@ -181,6 +204,23 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     })
 }
 
+fn unhex(text: &str) -> Result<String, String> {
+    let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if digits.len() % 2 != 0 {
+        return Err("hex payload has an odd length".to_string());
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16);
+        let lo = (pair[1] as char).to_digit(16);
+        match (hi, lo) {
+            (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
+            _ => return Err("hex payload has a non-hex character".to_string()),
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| "hex payload is not text".to_string())
+}
+
 fn allowed(file: &str) -> Option<&'static str> {
     FILES.iter().copied().find(|f| f.eq_ignore_ascii_case(file))
 }
@@ -231,6 +271,24 @@ mod tests {
 
     fn run(session: &mut Session, dir: &Path, text: &str) -> Verdict {
         handle_with(session, Instant::now(), text, "secret-key", 7, dir)
+    }
+
+    #[test]
+    fn hex_commands_carry_json_without_special_characters() {
+        let dir = scratch("hex");
+        let mut s = Session::default();
+        let hex = |t: &str| t.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        let body = "{\"a\":[1,2,3]}";
+        let v = run(&mut s, &dir, &format!("!m182 secret-key setx m182_zones.json {}", hex(body)));
+        assert!(matches!(v, Verdict::Swallowed(ref l) if l.contains("ok")));
+        assert_eq!(std::fs::read_to_string(dir.join("m182_zones.json")).unwrap(), body);
+        let (a, b) = body.split_at(5);
+        run(&mut s, &dir, &format!("!m182 secret-key putx m182_teams.json {}", hex(a)));
+        run(&mut s, &dir, &format!("!m182 secret-key addx m182_teams.json {}", hex(b)));
+        run(&mut s, &dir, "!m182 secret-key endx m182_teams.json");
+        assert_eq!(std::fs::read_to_string(dir.join("m182_teams.json")).unwrap(), body);
+        let Verdict::Swallowed(line) = run(&mut s, &dir, "!m182 secret-key setx m182_powers.json zz") else { panic!() };
+        assert!(line.contains("rejected"));
     }
 
     #[test]

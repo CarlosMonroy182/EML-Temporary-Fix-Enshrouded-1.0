@@ -12,27 +12,22 @@ IMPORTANTE
 - Juega en "Ventana sin bordes" (Opciones > Graficos > Modo de pantalla). El panel es una ventana propia que se pone encima del juego; en pantalla completa exclusiva no se vera.
 - No hace falta ningun .exe. La primera vez el panel tarda unos segundos en aparecer despues de cargar el juego.
 
-USARLO EN TU PARTIDA (local)
-Todo funciona igual que antes: abre el panel con INSERT y usa las pestañas. No hay que tocar nada mas.
-
-USARLO EN TU SERVIDOR (Dathost)
-1. En el servidor debe estar instalada la carpeta "Servidor" (ver su LEEME). La clave ya coincide en las dos carpetas.
-2. Entra al servidor con tu juego, pulsa INSERT y ve a la pestaña "Ajustes".
-3. En el bloque "Servidor" marca "Controlar un servidor dedicado" y pulsa "PROBAR CONEXION".
-4. Desde ese momento las apariciones, poderes, PvP, zonas, equipos y entregas de items viajan al servidor por el chat. El panel escribe en el chat del juego por ti; no escribas ni uses el chat mientras envia.
-5. Cuando juegues en tu partida local, desmarca esa casilla.
+USARLO EN TU PARTIDA (local) Y EN TU SERVIDOR
+El panel detecta solo si estas en tu partida o en el servidor. No hay casillas que marcar.
+- En tu partida local todo se aplica directamente.
+- En el servidor (Dathost) debe estar instalada la carpeta "Servidor" (ver su LEEME); la clave ya coincide. El panel escribe por ti en el chat del juego (mensajes que empiezan por !m182) y el servidor los oculta al resto de jugadores. Mientras envia, no toques el teclado ni el chat; el envio de un pedido dura unos segundos.
+- En Ajustes > Servidor, "PROBAR CONEXION" comprueba que el servidor responde.
 
 ARMAS UNICAS (cada arma distinta)
 - Al editar un arma y entregarla, el panel crea una COPIA propia con tus stats. Las demas armas del mismo tipo no cambian.
-- La primera vez que usas un arma, el panel reserva copias para ella y te pide reiniciar el juego (o el servidor) UNA vez. Despues del reinicio pulsa "YA REINICIE EL SERVIDOR" en Ajustes (solo en modo servidor).
-- En Ajustes hay botones para reservar copias de todas las armas de golpe y asi reiniciar una sola vez.
+- Las copias vienen ya preparadas para todas las armas, escudos y arcos: no hay que reiniciar nada. Cada arma tiene 4 copias propias listas. Si necesitas mas copias de un arma, el panel las reserva y te avisa de reiniciar una vez.
 - Si quieres cambiar un item para todos a la vez, marca "Cambiar el ítem para todos" en la pestaña de items.
 
 LIMITES (sinceridad)
-- Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame el archivo mods/zz_m182_item_stats y el log de EML (eml.log) para corregirlo.
+- Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
 - El panel no recibe respuestas del servidor: si algo no aparece, revisa m182_spawner.log del servidor.
 
 DESINSTALAR
-Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.
+Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.
 
 Hecho por M182.

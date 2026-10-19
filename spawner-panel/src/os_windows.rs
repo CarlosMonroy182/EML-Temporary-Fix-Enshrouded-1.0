@@ -3,7 +3,7 @@
 use std::ptr::null;
 
 use crate::host::Sys;
-use crate::input::{scan_tap, unit_tap, Input};
+use crate::input::{scan_down, scan_tap, scan_up, unit_tap, Input};
 use crate::WINDOW_TITLE;
 
 #[link(name = "user32")]
@@ -18,6 +18,8 @@ extern "system" {
     fn IsIconic(hwnd: usize) -> i32;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     fn AttachThreadInput(from: u32, to: u32, attach: i32) -> i32;
+    fn VkKeyScanW(ch: u16) -> i16;
+    fn MapVirtualKeyW(code: u32, kind: u32) -> u32;
 }
 
 #[link(name = "kernel32")]
@@ -26,6 +28,7 @@ extern "system" {
     fn GetCurrentThreadId() -> u32;
 }
 
+const SHIFT_SCAN: u16 = 0x2A;
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
 const SW_RESTORE: i32 = 9;
@@ -106,6 +109,23 @@ impl Sys for Os {
     }
 
     fn unit(&self, unit: u16) {
+        if unit < 0x80 {
+            let found = unsafe { VkKeyScanW(unit) };
+            if found != -1 {
+                let (vk, state) = ((found & 0xFF) as u32, ((found >> 8) & 0xFF) as u8);
+                let scan = unsafe { MapVirtualKeyW(vk, 0) } as u16;
+                if scan != 0 && state & !1 == 0 {
+                    if state & 1 == 1 {
+                        send(&[scan_down(SHIFT_SCAN)]);
+                    }
+                    send(&scan_tap(scan));
+                    if state & 1 == 1 {
+                        send(&[scan_up(SHIFT_SCAN)]);
+                    }
+                    return;
+                }
+            }
+        }
         send(&unit_tap(unit));
     }
 

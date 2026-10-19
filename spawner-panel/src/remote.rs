@@ -13,6 +13,8 @@ pub use crate::remote_proto::{DEFAULT_LIMIT, MAX_LIMIT, MIN_LIMIT};
 use crate::remote_proto as proto;
 
 pub const SETTINGS_FILE: &str = "m182_panel.json";
+pub const LOG_FILE: &str = "m182_panel.log";
+pub const MODE_FILE: &str = "m182_mode.json";
 pub const CONFIG_KEY: &str = "remote_key";
 
 /// Files the server accepts through chat.
@@ -62,6 +64,7 @@ struct State {
     typist: Option<Box<dyn Typist>>,
     installed: bool,
     worker: bool,
+    hosting: Option<bool>,
     status: Status,
 }
 
@@ -71,6 +74,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     typist: None,
     installed: false,
     worker: false,
+    hosting: None,
     status: Status { queued: 0, sending: false, sent_lines: 0, last: String::new(), error: String::new() },
 });
 
@@ -130,10 +134,52 @@ pub fn install_typist(typist: Box<dyn Typist>) {
     }
 }
 
+static LOG_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+static LOG_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Starts the panel's own log next to the game files.
+pub fn open_log(dir: &Path) {
+    let _ = std::fs::write(dir.join(LOG_FILE), "# m182 panel log\n");
+    *LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.to_path_buf());
+    let _ = LOG_START.set(Instant::now());
+}
+
+pub fn note(message: &str) {
+    let Some(dir) = LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+    let at = LOG_START.get().map(|t| t.elapsed().as_millis()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(dir.join(LOG_FILE)) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{at}ms] {message}");
+    }
+}
+
+/// Tells the panel whether this game hosts the world itself (then nothing is sent anywhere).
+pub fn set_hosting(hosting: Option<bool>) {
+    let changed = {
+        let mut s = state();
+        let changed = s.hosting != hosting;
+        s.hosting = hosting;
+        changed
+    };
+    if changed {
+        note(&match hosting {
+            Some(true) => "mode: this game hosts the world, requests are applied locally".to_string(),
+            Some(false) => "mode: connected to a server, requests go through the chat".to_string(),
+            None => "mode: unknown".to_string(),
+        });
+    }
+}
+
+/// Reads the mode file the native layer writes once it knows how the game is connected.
+pub fn read_hosting(dir: &Path) -> Option<bool> {
+    let text = std::fs::read_to_string(dir.join(MODE_FILE)).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.get("hosting")?.as_bool()
+}
+
 /// True when the panel is set to drive a server and can type into the game.
 pub fn active() -> bool {
     let s = state();
-    s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed
+    s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed && s.hosting != Some(true)
 }
 
 /// How a file the panel wants to write must be handled.
@@ -215,6 +261,7 @@ fn worker() {
         };
         let (Some(job), Some(mut typist)) = (job, typist) else { continue };
         let started = Instant::now();
+        note(&format!("sending {} ({} lines)", job.file, job.lines.len()));
         let mut error = String::new();
         let mut sent = 0u64;
         match typist.begin() {
@@ -231,6 +278,11 @@ fn worker() {
                 typist.end();
             }
             Err(e) => error = e,
+        }
+        if error.is_empty() {
+            note(&format!("sent {} in {:.1}s", job.file, started.elapsed().as_secs_f32()));
+        } else {
+            note(&format!("failed {}: {error}", job.file));
         }
         let mut s = state();
         s.typist = Some(typist);
@@ -251,6 +303,7 @@ pub fn reset_for_tests() {
     s.queue.clear();
     s.typist = None;
     s.installed = false;
+    s.hosting = None;
     s.settings = Settings { enabled: false, key: String::new(), limit: DEFAULT_LIMIT };
     s.status = Status::default();
 }
@@ -270,7 +323,7 @@ mod tests {
             Ok(())
         }
         fn line(&mut self, text: &str) -> Result<(), String> {
-            if self.1 && text.contains("fail") {
+            if self.1 && text.contains("6661696c") {
                 return Err("sin foco".into());
             }
             self.0.lock().unwrap().push(text.to_string());
@@ -335,6 +388,24 @@ mod tests {
     }
 
     #[test]
+    fn a_game_that_hosts_its_own_world_never_sends_to_a_server() {
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        configure(Settings { enabled: true, key: "abcdef1".into(), limit: DEFAULT_LIMIT });
+        install_typist(Box::new(Recorder(Arc::new(Mutex::new(Vec::new())), false)));
+        assert_eq!(route("m182_spawn.request"), Route::ServerOnly);
+        let dir = temp("mode");
+        assert_eq!(read_hosting(&dir), None);
+        std::fs::write(dir.join(MODE_FILE), r#"{"hosting":true}"#).unwrap();
+        set_hosting(read_hosting(&dir));
+        assert_eq!(route("m182_spawn.request"), Route::Local);
+        assert_eq!(route("m182_zones.json"), Route::Local);
+        std::fs::write(dir.join(MODE_FILE), r#"{"hosting":false}"#).unwrap();
+        set_hosting(read_hosting(&dir));
+        assert_eq!(route("m182_spawn.request"), Route::ServerOnly);
+    }
+
+    #[test]
     fn lines_are_typed_in_order_and_state_files_keep_only_the_latest() {
         let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_tests();
@@ -349,10 +420,11 @@ mod tests {
         install_typist(Box::new(Recorder(typed.clone(), false)));
         wait_idle();
         let lines = typed.lock().unwrap().clone();
-        let sent: Vec<&String> = lines.iter().filter(|l| l.starts_with('/')).collect();
+        let sent: Vec<&String> = lines.iter().filter(|l| l.starts_with('!')).collect();
         assert_eq!(sent.len(), 3, "{lines:?}");
-        assert!(sent[0].contains(r#"{"zones":[{"name":"B"}]}"#));
-        assert!(sent[1].contains("heal") && sent[2].contains("teleport"));
+        let hex = |t: &str| t.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        assert!(sent[0].contains(&hex(r#"{"zones":[{"name":"B"}]}"#)));
+        assert!(sent[1].contains(&hex("heal")) && sent[2].contains(&hex("teleport")));
         assert_eq!(lines.iter().filter(|l| *l == "<begin>").count(), 3);
         assert_eq!(lines.iter().filter(|l| *l == "<end>").count(), 3);
         assert!(status().last.contains("m182_command.request"));
@@ -371,7 +443,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let st = status();
         assert!(st.error.contains("sin foco"), "{st:?}");
-        assert!(!typed.lock().unwrap().iter().any(|l| l.contains("heal")));
+        assert!(!typed.lock().unwrap().iter().any(|l| l.contains("6865616c")));
         assert!(submit("m182_zones.json", "not json").is_err());
     }
 }
