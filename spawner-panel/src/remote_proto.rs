@@ -70,6 +70,10 @@ pub fn ping(key: &str) -> String {
     format!("{PREFIX} {key} ping")
 }
 
+pub fn players(key: &str, seq: u32) -> String {
+    format!("{PREFIX} {key} players {seq}")
+}
+
 pub fn valid_key(key: &str) -> bool {
     key.len() >= 6 && !key.chars().any(char::is_whitespace)
 }
@@ -126,6 +130,7 @@ mod tests {
         assert_eq!(pvp("abcdefg", true), "!m182 abcdefg pvp on");
         assert_eq!(pvp("abcdefg", false), "!m182 abcdefg pvp off");
         assert_eq!(ping("abcdefg"), "!m182 abcdefg ping");
+        assert_eq!(players("abcdefg", 7), "!m182 abcdefg players 7");
         assert!(valid_key("abcdef") && !valid_key("abc") && !valid_key("abc def"));
     }
 }

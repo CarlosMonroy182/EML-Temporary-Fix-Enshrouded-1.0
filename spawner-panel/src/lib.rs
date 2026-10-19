@@ -147,9 +147,11 @@ pub struct App {
     new_place: String,
     player: Option<[f64; 3]>,
     player_checked: Instant,
+    synced: bool,
     icons: HashMap<String, Option<TextureHandle>>,
     status: Status,
     notice: String,
+    spawner_notice: String,
     remote_cfg: remote::Settings,
     remote_notice: String,
 }
@@ -404,7 +406,7 @@ fn write_local(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), Stri
 /// Writes a file for the native layer; when the panel drives a server, the files the server
 /// understands are also (or only) typed into the game chat.
 pub fn write_atomic(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
-    match remote::route(name) {
+    match remote::route_for(name, text) {
         remote::Route::Local => write_local(dir, name, tmp, text),
         remote::Route::Both => {
             write_local(dir, name, tmp, text)?;
@@ -551,11 +553,13 @@ impl App {
             spawner_checked: Instant::now(),
             player: read_player(&dir),
             player_checked: Instant::now(),
+            synced: false,
             places,
             new_place: String::new(),
             icons: HashMap::new(),
             status: Status::Idle,
             notice: String::new(),
+            spawner_notice: String::new(),
             remote_cfg: remote_cfg.clone(),
             remote_notice: String::new(),
             dir,
@@ -644,7 +648,7 @@ impl App {
             Ok(()) => Status::Delivered,
             Err(e) => Status::Error(e),
         };
-        self.notice = format!("Aparición creada en «{}». Aparecerá en unos segundos y reaparecerá cada {} min si la matan.", place.name, self.respawn_minutes);
+        self.spawner_notice = format!("Aparición creada en «{}». Aparecerá en unos segundos y reaparecerá cada {} min si la matan.", place.name, self.respawn_minutes);
     }
 
     fn delete_spawner(&mut self, id: &str) {
@@ -653,7 +657,7 @@ impl App {
             Ok(()) => Status::Idle,
             Err(e) => Status::Error(e),
         };
-        self.notice = "Aparición borrada: ya no reaparecerá. Si ahora hay criaturas vivas, se quedan hasta que las mates.".to_string();
+        self.spawner_notice = "Aparición borrada: ya no reaparecerá. Si ahora hay criaturas vivas, se quedan hasta que las mates.".to_string();
     }
 
     fn spawn(&mut self, mode: Mode) {
@@ -793,8 +797,31 @@ impl App {
             self.player_checked = Instant::now();
             self.player = read_player(&self.dir);
             remote::set_hosting(remote::read_hosting(&self.dir));
+            let connected = remote::connected();
+            if connected && !self.synced {
+                self.synced = true;
+                self.resend_state();
+                let dir = self.dir.clone();
+                self.social.request_roster(&dir);
+            } else if !connected {
+                self.synced = false;
+            }
         }
         ctx.request_repaint_after(Duration::from_millis(700));
+    }
+
+    /// Sends the server everything the panel has configured (powers, zones, teams, spawners).
+    pub fn resend_state(&mut self) -> usize {
+        let mut sent = 0;
+        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json", "m182_spawners.json"] {
+            if let Ok(text) = std::fs::read_to_string(self.dir.join(name)) {
+                if remote::submit(name, &text).is_ok() {
+                    sent += 1;
+                }
+            }
+        }
+        remote::note(&format!("resent {sent} state file(s) to the server"));
+        sent
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -821,7 +848,7 @@ impl App {
             (Tab::Places, "Lugares", false),
             (Tab::Powers, "Admin", false),
             (Tab::Pvp, "PvP", false),
-            (Tab::SafeZones, "Zonas seguras", false),
+            (Tab::SafeZones, "Zonas y bases", false),
             (Tab::Teams, "Equipos", false),
             (Tab::Settings, "Ajustes", false),
         ] {
@@ -838,18 +865,22 @@ impl App {
             painter.rect_filled(rect, Rounding::same(4.0), fill);
             painter.rect_stroke(rect, Rounding::same(4.0), Stroke::new(if selected { 1.8_f32 } else { 1.0_f32 }, if selected { GOLD } else { BRONZE }));
             if selected {
+                glow_stroke(painter, rect, GOLD, 1.0);
                 diamond(painter, rect.left_center() + Vec2::new(12.0, 0.0), 4.0, GOLD);
+                diamond(painter, rect.right_center() - Vec2::new(12.0, 0.0), 3.0, GOLD_DIM);
+            } else if response.hovered() {
+                glow_stroke(painter, rect, GOLD_DIM, 0.6);
             }
             let shift = if soon { -7.0 } else { 0.0 };
             painter.text(
                 rect.left_center() + Vec2::new(28.0, shift),
                 Align2::LEFT_CENTER,
                 label,
-                title_font(15.0),
+                title_font(17.0),
                 if soon { MUTED } else { PARCHMENT },
             );
             if soon {
-                painter.text(rect.left_center() + Vec2::new(28.0, 11.0), Align2::LEFT_CENTER, "próximamente", egui::FontId::proportional(12.5), GOLD_DIM);
+                painter.text(rect.left_center() + Vec2::new(28.0, 11.0), Align2::LEFT_CENTER, "próximamente", egui::FontId::proportional(14.5), GOLD_DIM);
             }
             if response.clicked() {
                 self.tab = tab;
@@ -864,7 +895,15 @@ impl App {
         })
             .exact_width(320.0)
             .frame(egui::Frame::none().fill(LEATHER).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0_f32, BRONZE)))
-            .show_inside(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, mode)));
+            .show_inside(ui, |ui| {
+                egui::TopBottomPanel::bottom(match mode {
+                    Mode::Creatures => "creature_action",
+                    Mode::Items => "item_action",
+                })
+                .frame(egui::Frame::none())
+                .show_inside(ui, |ui| self.action_bar(ui, mode));
+                egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, mode));
+            });
 
         egui::CentralPanel::default().frame(egui::Frame::none().inner_margin(egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 8.0 })).show_inside(ui, |ui| {
             let App { creatures, item_cat, icons, dir, downloader, .. } = self;
@@ -970,13 +1009,13 @@ impl App {
         }
         let text_left = icon.right() + 10.0;
         let title = e.alias.clone().unwrap_or_else(|| e.label.clone());
-        let mut job = egui::text::LayoutJob::simple(title, egui::FontId::proportional(15.0), PARCHMENT, rect.right() - text_left - 8.0);
+        let mut job = egui::text::LayoutJob::simple(title, egui::FontId::proportional(17.0), PARCHMENT, rect.right() - text_left - 8.0);
         job.wrap.max_rows = if e.alias.is_some() { 1 } else { 2 };
         job.wrap.overflow_character = Some('…');
         let galley = painter.layout_job(job);
         painter.galley(egui::pos2(text_left, rect.top() + 7.0), galley, PARCHMENT);
         if e.alias.is_some() {
-            let mut sub = egui::text::LayoutJob::simple(e.label.clone(), egui::FontId::proportional(11.5), MUTED, rect.right() - text_left - 8.0);
+            let mut sub = egui::text::LayoutJob::simple(e.label.clone(), egui::FontId::proportional(13.5), MUTED, rect.right() - text_left - 8.0);
             sub.wrap.max_rows = 1;
             sub.wrap.overflow_character = Some('…');
             let galley = painter.layout_job(sub);
@@ -986,7 +1025,7 @@ impl App {
             egui::pos2(text_left, rect.bottom() - 8.0),
             Align2::LEFT_BOTTOM,
             group_label(mode, &e.group),
-            title_font(10.5),
+            title_font(12.5),
             group_color(&e.group),
         );
         response.clicked()
@@ -1031,7 +1070,7 @@ impl App {
                     }
                     ui.label("Reaparece cada (minutos)");
                     ui.add(egui::Slider::new(&mut self.respawn_minutes, 1..=120));
-                    ui.label(RichText::new("Queda guardado: vuelve a aparecer ahí cuando lo matan y cada vez que abres el juego.").color(MUTED).size(12.5));
+                    ui.label(RichText::new("Queda guardado: vuelve a aparecer ahí cuando lo matan y cada vez que abres el juego.").color(MUTED).size(14.5));
                 }
             }
         }
@@ -1040,7 +1079,7 @@ impl App {
     fn spawner_list(&mut self, ui: &mut egui::Ui) {
         label_title(ui, &format!("APARICIONES ACTIVAS ({})", self.spawners.len()));
         if self.spawners.is_empty() {
-            ui.label(RichText::new("Ninguna todavía.").color(MUTED).size(12.5));
+            ui.label(RichText::new("Ninguna todavía.").color(MUTED).size(14.5));
             return;
         }
         let mut remove: Option<String> = None;
@@ -1049,8 +1088,8 @@ impl App {
                 ui.vertical(|ui| {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
-                    ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(12.0));
-                    ui.label(RichText::new(spawners::describe(self.spawner_status.get(&s.id))).color(GOLD_DIM).size(12.5));
+                    ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(14.0));
+                    ui.label(RichText::new(spawners::describe(self.spawner_status.get(&s.id))).color(GOLD_DIM).size(14.5));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if button(ui, "Borrar", Vec2::new(70.0, 26.0), true, false) {
@@ -1094,9 +1133,9 @@ impl App {
                         emblems::draw(painter, target, e.kind, group_color(&e.group), e.boss);
                     }
                 }
-                ui.label(RichText::new(e.alias.as_deref().unwrap_or(&e.label)).font(title_font(17.0)).color(PARCHMENT));
+                ui.label(RichText::new(e.alias.as_deref().unwrap_or(&e.label)).font(title_font(19.0)).color(PARCHMENT));
                 if e.alias.is_some() {
-                    ui.label(RichText::new(&e.label).color(MUTED).size(13.0));
+                    ui.label(RichText::new(&e.label).color(MUTED).size(15.0));
                 }
                 ui.label(RichText::new(group_label(mode, &e.group)).color(group_color(&e.group)));
             }
@@ -1134,29 +1173,50 @@ impl App {
         self.target_controls(ui);
         divider(ui);
 
-        let enabled = selected.is_some();
-        let place_mode = mode == Mode::Creatures && self.target == Target::Place;
-        let label = if place_mode { "CREAR APARICIÓN" } else { "INVOCAR" };
-        let enabled = enabled && (!place_mode || !self.places.is_empty());
-        if button(ui, label, Vec2::new(ui.available_width(), 52.0), enabled, true) {
-            if place_mode {
-                self.create_spawner();
-            } else {
-                self.spawn(mode);
-            }
-        }
-        let (text, color) = self.status_text();
-        if !text.is_empty() {
-            ui.label(RichText::new(text).color(color));
-        }
-        if place_mode && !self.notice.is_empty() {
-            ui.label(RichText::new(self.notice.clone()).color(GOOD).size(13.0));
-        }
         if mode == Mode::Creatures {
-            ui.label(RichText::new("En el juego, F8 invoca con estos mismos valores.").color(MUTED).size(13.0));
-            divider(ui);
             self.spawner_list(ui);
         }
+    }
+
+    fn action_bar(&mut self, ui: &mut egui::Ui, mode: Mode) {
+        ui.add_space(6.0);
+        let selected = self.catalog(mode).selected;
+        match mode {
+            Mode::Creatures => {
+                let enabled = selected.is_some();
+                let place_mode = self.target == Target::Place;
+                let label = if place_mode { "CREAR APARICIÓN" } else { "INVOCAR" };
+                let enabled = enabled && (!place_mode || !self.places.is_empty());
+                if button(ui, label, Vec2::new(ui.available_width(), 52.0), enabled, true) {
+                    if place_mode {
+                        self.create_spawner();
+                    } else {
+                        self.spawn(mode);
+                    }
+                }
+                let (text, color) = self.status_text();
+                if !text.is_empty() {
+                    ui.label(RichText::new(text).color(color));
+                }
+                if place_mode && !self.spawner_notice.is_empty() {
+                    ui.label(RichText::new(self.spawner_notice.clone()).color(GOOD).size(15.0));
+                }
+            }
+            Mode::Items => {
+                let Some(index) = selected.filter(|i| *i < self.items.rows.len()) else {
+                    return;
+                };
+                let deliverable = self.items.rows[index].deliverable();
+                if button(ui, "ENTREGAR", Vec2::new(ui.available_width(), 52.0), deliverable, true) {
+                    self.spawn(Mode::Items);
+                }
+                let (text, color) = self.status_text();
+                if !text.is_empty() {
+                    ui.label(RichText::new(text).color(color));
+                }
+            }
+        }
+        ui.add_space(4.0);
     }
 
     fn places_tab(&mut self, ui: &mut egui::Ui) {
@@ -1187,7 +1247,7 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, p) in self.places.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&p.name).font(title_font(15.0)).color(PARCHMENT));
+                    ui.label(RichText::new(&p.name).font(title_font(17.0)).color(PARCHMENT));
                     ui.label(RichText::new(format!("X {:.0}  Y {:.0}  Z {:.0}", p.x, p.y, p.z)).color(MUTED));
                     if button(ui, "Borrar", Vec2::new(80.0, 26.0), true, false) {
                         remove = Some(i);
@@ -1238,7 +1298,11 @@ impl eframe::App for App {
             .frame(egui::Frame::none().fill(LEATHER).inner_margin(egui::Margin::same(12.0)).stroke(Stroke::new(1.0_f32, BRONZE)))
             .show(ctx, |ui| self.tabs(ui));
 
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| match self.tab {
+        ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| {
+            let time = ui.input(|i| i.time);
+            enchanted_backdrop(ui.painter(), ui.max_rect(), time);
+            match self.tab {
             Tab::Creatures => self.catalog_view(ui, Mode::Creatures),
             Tab::Items => self.catalog_view(ui, Mode::Items),
             Tab::Map => self.map_tab(ui),
@@ -1251,6 +1315,7 @@ impl eframe::App for App {
                     Tab::Settings => self.settings_tab(ui),
                     _ => self.teams_tab(ui),
                 });
+            }
             }
         });
     }
@@ -1320,9 +1385,11 @@ mod tests {
             new_place: String::new(),
             player: None,
             player_checked: Instant::now(),
+            synced: false,
             icons: HashMap::new(),
             status: Status::Idle,
             notice: String::new(),
+            spawner_notice: String::new(),
             remote_cfg: remote::read_settings(&std::env::temp_dir().join("m182_none")),
             remote_notice: String::new(),
         }

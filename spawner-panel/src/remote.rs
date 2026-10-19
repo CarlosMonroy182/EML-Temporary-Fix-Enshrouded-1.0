@@ -15,6 +15,8 @@ use crate::remote_proto as proto;
 pub const SETTINGS_FILE: &str = "m182_panel.json";
 pub const LOG_FILE: &str = "m182_panel.log";
 pub const MODE_FILE: &str = "m182_mode.json";
+pub const SCAN_FILE: &str = "m182_scan.request";
+pub const ONLINE_FILE: &str = "m182_online.json";
 pub const CONFIG_KEY: &str = "remote_key";
 
 /// Files the server accepts through chat.
@@ -101,8 +103,14 @@ pub fn save_settings(dir: &Path, settings: &Settings) -> Result<(), String> {
     config.insert(CONFIG_KEY.to_string(), json!(settings.key.trim()));
     let text = serde_json::to_string_pretty(&Value::Object(config)).map_err(|e| e.to_string())?;
     plain_write(dir, "m182_native.json", &text)?;
-    let panel = json!({"remote": settings.enabled, "remote_limit": settings.limit});
-    plain_write(dir, SETTINGS_FILE, &panel.to_string())
+    let mut panel: serde_json::Map<String, Value> = std::fs::read_to_string(dir.join(SETTINGS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    panel.insert("remote".to_string(), json!(settings.enabled));
+    panel.insert("remote_limit".to_string(), json!(settings.limit));
+    plain_write(dir, SETTINGS_FILE, &Value::Object(panel).to_string())
 }
 
 fn plain_write(dir: &Path, name: &str, text: &str) -> Result<(), String> {
@@ -196,6 +204,32 @@ pub enum Route {
     ServerOnly,
 }
 
+/// Commands that act on the character this game shows: they are applied here, never forwarded.
+const LOCAL_COMMANDS: [&str; 1] = ["teleport"];
+/// Commands that also change something about the sender on the server.
+const SHARED_COMMANDS: [&str; 1] = ["heal"];
+
+/// Like `route`, but looks inside the command file because not every command belongs on the server.
+pub fn route_for(name: &str, text: &str) -> Route {
+    let route = route(name);
+    if route == Route::Local || name != "m182_command.request" {
+        return route;
+    }
+    let cmd = serde_json::from_str::<Value>(text).ok().and_then(|v| v.get("cmd").and_then(Value::as_str).map(str::to_string)).unwrap_or_default();
+    if LOCAL_COMMANDS.contains(&cmd.as_str()) {
+        Route::Local
+    } else if SHARED_COMMANDS.contains(&cmd.as_str()) {
+        Route::Both
+    } else {
+        route
+    }
+}
+
+/// True when this game is connected to a server and can talk to it through the chat.
+pub fn connected() -> bool {
+    active() && state().hosting == Some(false)
+}
+
 pub fn route(name: &str) -> Route {
     if !active() || !FORWARDED.contains(&name) {
         return Route::Local;
@@ -232,6 +266,11 @@ pub fn submit(name: &str, text: &str) -> Result<(), String> {
 pub fn submit_pvp(on: bool) {
     let key = state().settings.key.clone();
     push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)] }, true);
+}
+
+pub fn submit_players(seq: u32) {
+    let key = state().settings.key.clone();
+    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)] }, true);
 }
 
 pub fn submit_ping() {
@@ -370,6 +409,10 @@ mod tests {
         let back = read_settings(&dir);
         assert_eq!(back, Settings { enabled: true, key: "newkey99".into(), limit: 150 });
         let config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("m182_native.json")).unwrap()).unwrap();
+        std::fs::write(dir.join(SETTINGS_FILE), r#"{"remote":true,"chat_open_key":"T","typing_burst":6}"#).unwrap();
+        save_settings(&dir, &Settings { enabled: false, key: "newkey99".into(), limit: 150 }).unwrap();
+        let panel: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert_eq!((panel["chat_open_key"].as_str(), panel["typing_burst"].as_u64(), panel["remote"].as_bool()), (Some("T"), Some(6), Some(false)));
         assert_eq!(config["pvp"], true);
         assert_eq!(config["enabled"], true);
     }
@@ -391,6 +434,25 @@ mod tests {
         assert_eq!(route("m182_zones.json"), Route::Local);
         configure(Settings { enabled: true, key: "abc".into(), limit: DEFAULT_LIMIT });
         assert_eq!(route("m182_zones.json"), Route::Local);
+    }
+
+    #[test]
+    fn commands_for_the_character_on_screen_stay_here() {
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        configure(Settings { enabled: true, key: "abcdef1".into(), limit: DEFAULT_LIMIT });
+        install_typist(Box::new(Recorder(Arc::new(Mutex::new(Vec::new())), false)));
+        set_hosting(Some(false));
+        assert!(connected());
+        let command = "m182_command.request";
+        assert_eq!(route_for(command, r#"{"cmd":"teleport","at":[1,2,3]}"#), Route::Local);
+        assert_eq!(route_for(command, r#"{"cmd":"heal"}"#), Route::Both);
+        assert_eq!(route_for(command, r#"{"cmd":"item_copy"}"#), Route::ServerOnly);
+        assert_eq!(route_for(command, "no es json"), Route::ServerOnly);
+        assert_eq!(route_for("m182_zones.json", "{}"), Route::Both);
+        set_hosting(Some(true));
+        assert!(!connected());
+        assert_eq!(route_for(command, r#"{"cmd":"item_copy"}"#), Route::Local);
     }
 
     #[test]

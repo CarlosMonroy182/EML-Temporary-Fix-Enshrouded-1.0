@@ -34,6 +34,8 @@ pub struct NativeConfig {
     pub chat_key: String,
     /// Load `M182_Panel.dll` (the in-game panel, Insert) when it is next to the game.
     pub panel: bool,
+    /// Test switch: act on the character shown on screen even when this game also hosts the world.
+    pub force_client: bool,
 }
 
 impl Default for NativeConfig {
@@ -56,6 +58,7 @@ impl Default for NativeConfig {
             watch_key: "F5".to_string(),
             chat_key: String::new(),
             panel: true,
+            force_client: false,
         }
     }
 }
@@ -78,6 +81,7 @@ pub struct LiveState {
     pub pvp_friend_checks: AtomicBool,
     pub spawn_probe: AtomicBool,
     pub spawner: AtomicBool,
+    pub force_client: AtomicBool,
     pub chat_key: std::sync::Mutex<String>,
 }
 
@@ -152,6 +156,7 @@ pub static LIVE: LiveState = LiveState {
     pvp_friend_checks: AtomicBool::new(false),
     spawn_probe: AtomicBool::new(false),
     spawner: AtomicBool::new(false),
+    force_client: AtomicBool::new(false),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
@@ -162,6 +167,7 @@ impl LiveState {
             .store(cfg.enabled && cfg.pvp && cfg.pvp_friend_checks, Ordering::Relaxed);
         self.spawn_probe.store(cfg.enabled && cfg.spawn_probe, Ordering::Relaxed);
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
+        self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);
@@ -203,6 +209,11 @@ impl LiveState {
     #[inline]
     pub fn spawner(&self) -> bool {
         self.spawner.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn force_client(&self) -> bool {
+        self.force_client.load(Ordering::Relaxed)
     }
 
     #[inline]

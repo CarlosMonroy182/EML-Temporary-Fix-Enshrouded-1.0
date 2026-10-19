@@ -35,6 +35,8 @@ pub enum Verdict {
     Pass,
     /// Ours: hide it from the chat. The text is for the log (never contains the key).
     Swallowed(String),
+    /// Ours: the message is replaced by the list of connected players (sequence number echoed).
+    Roster(u32),
 }
 
 #[derive(Default)]
@@ -50,6 +52,22 @@ fn note_requester(file: &str, client: u32) {
     if file == "m182_spawn.request" || file == "m182_command.request" {
         REQUESTER.store(client.wrapping_add(1), Ordering::SeqCst);
     }
+}
+
+pub const POWERS_FILE: &str = "m182_powers.json";
+pub const CLIENT_POWERS_PREFIX: &str = "m182_powers_";
+
+/// Powers belong to the player that sent them, so each chat client gets a file of its own.
+pub fn client_powers_file(client: u32) -> String {
+    format!("{CLIENT_POWERS_PREFIX}{client}.json")
+}
+
+pub fn client_of_powers_file(name: &str) -> Option<u32> {
+    name.strip_prefix(CLIENT_POWERS_PREFIX)?.strip_suffix(".json")?.parse().ok()
+}
+
+fn destination(name: &str, client: u32) -> String {
+    if name == POWERS_FILE { client_powers_file(client) } else { name.to_string() }
 }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
@@ -134,11 +152,15 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
         _ => (lowered.clone(), rest.to_string()),
     };
     let rest = rest.as_str();
+    if command == "players" {
+        let (seq, _) = next_token(rest);
+        return Verdict::Roster(seq.parse().unwrap_or(0));
+    }
     let outcome = match command.as_str() {
         "ping" => Ok("ping".to_string()),
         "set" => {
             let (file, body) = next_token(rest);
-            let written = write_json(dir, file, body);
+            let written = write_json(dir, file, body, client);
             if written.is_ok() {
                 note_requester(file, client);
             }
@@ -175,7 +197,7 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
             match allowed(file) {
                 Some(name) => match session.buffers.remove(name) {
                     Some((buffer, _)) => {
-                        let written = write_json(dir, name, &buffer);
+                        let written = write_json(dir, name, &buffer, client);
                         if written.is_ok() {
                             note_requester(name, client);
                         }
@@ -225,14 +247,15 @@ fn allowed(file: &str) -> Option<&'static str> {
     FILES.iter().copied().find(|f| f.eq_ignore_ascii_case(file))
 }
 
-fn write_json(dir: &Path, file: &str, body: &str) -> Result<String, String> {
+fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String, String> {
     let name = allowed(file).ok_or_else(|| format!("file \"{file}\" is not allowed"))?;
     if body.trim().is_empty() {
         return Err("empty content".to_string());
     }
     serde_json::from_str::<serde_json::Value>(body).map_err(|e| format!("invalid JSON for {name}: {e}"))?;
-    store(dir, name, body)?;
-    Ok(format!("wrote {name} ({} bytes)", body.len()))
+    let target = destination(name, client);
+    store(dir, &target, body)?;
+    Ok(format!("wrote {target} ({} bytes)", body.len()))
 }
 
 fn store(dir: &Path, name: &str, body: &str) -> Result<(), String> {
