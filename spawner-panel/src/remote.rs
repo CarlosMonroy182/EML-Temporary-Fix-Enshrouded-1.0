@@ -70,6 +70,12 @@ struct State {
     status: Status,
 }
 
+static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn forced() -> bool {
+    FORCE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 static STATE: Mutex<State> = Mutex::new(State {
     settings: Settings { enabled: false, key: String::new(), limit: DEFAULT_LIMIT },
     queue: VecDeque::new(),
@@ -88,6 +94,7 @@ pub fn read_settings(dir: &Path) -> Settings {
     let config: Value = std::fs::read_to_string(dir.join("m182_native.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let key = config.get(CONFIG_KEY).and_then(Value::as_str).unwrap_or("").trim().to_string();
     let panel: Value = std::fs::read_to_string(dir.join(SETTINGS_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    FORCE.store(panel.get("remote_force").and_then(Value::as_bool).unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
     let enabled = panel.get("remote").and_then(Value::as_bool).unwrap_or_else(|| !key.is_empty());
     let limit = panel.get("remote_limit").and_then(Value::as_u64).map(|l| l as usize).unwrap_or(DEFAULT_LIMIT).clamp(MIN_LIMIT, MAX_LIMIT);
     Settings { enabled, key, limit }
@@ -187,7 +194,7 @@ pub fn read_hosting(dir: &Path) -> Option<bool> {
 /// True when the panel is set to drive a server and can type into the game.
 pub fn active() -> bool {
     let s = state();
-    s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed && s.hosting != Some(true)
+    s.settings.enabled && proto::valid_key(&s.settings.key) && s.installed && (s.hosting != Some(true) || forced())
 }
 
 /// True when the panel can type into the game chat (used by the connection test).
@@ -227,7 +234,7 @@ pub fn route_for(name: &str, text: &str) -> Route {
 
 /// True when this game is connected to a server and can talk to it through the chat.
 pub fn connected() -> bool {
-    active() && state().hosting == Some(false)
+    active() && (state().hosting == Some(false) || forced())
 }
 
 pub fn route(name: &str) -> Route {
