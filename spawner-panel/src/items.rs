@@ -11,6 +11,8 @@ use crate::{powers, write_atomic, App};
 
 pub const STATS_FILE: &str = "m182_item_stats.json";
 pub const MOD_DIR: &str = "zz_m182_item_stats";
+pub const DATA_FILE: &str = "m182_data.lua";
+pub const DATA_MESSAGE_FILE: &str = "m182_data.json";
 
 pub const DMG_KEYS: [&str; 15] = [
     "speedMod",
@@ -135,6 +137,14 @@ impl Item {
         self.id != 0
     }
 
+}
+
+fn saved_notice() -> String {
+    if crate::remote::active() {
+        "Guardado y enviado al servidor. Reinícialo para aplicarlo.".to_string()
+    } else {
+        "Guardado. Se aplica al reiniciar.".to_string()
+    }
 }
 
 pub fn is_internal_item(debug: &str, category: &str) -> bool {
@@ -439,6 +449,7 @@ pub struct ItemsState {
     pub global: bool,
     pub book: copies::Book,
     pub levels: Levels,
+    pub push_due: std::cell::Cell<Option<Instant>>,
 }
 
 pub fn load_saved(dir: &Path) -> (BTreeMap<u32, Edit>, BTreeMap<String, f64>) {
@@ -540,42 +551,59 @@ fn lua_num(v: f64) -> String {
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{:.0}", v)
     } else {
-        format!("{:.9}", v)
+        let text = format!("{:.9}", v);
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
-pub fn lua_source(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, levels: &Levels) -> String {
-    let mut s = String::new();
-    s.push_str("local OVERRIDES = {\n");
+pub fn lua_data(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, levels: &Levels) -> String {
+    let list = |values: &[f32]| values.iter().map(|v| lua_num(*v as f64)).collect::<Vec<_>>().join(",");
+    let mut s = String::from("return{overrides={");
     for (id, e) in items {
-        s.push_str(&format!("    [{}] = {{\n", id));
+        s.push_str(&format!("[{id}]={{"));
         if let Some(d) = e.dmg {
-            s.push_str("        dmg = { ");
-            for (i, k) in DMG_KEYS.iter().enumerate() {
-                s.push_str(&format!("{} = {}, ", k, lua_num(d[i] as f64)));
-            }
-            s.push_str("},\n");
+            s.push_str(&format!("dmg={{{}}},", list(&d)));
         }
         if let Some(a) = e.arm {
-            s.push_str("        arm = { ");
-            for (i, k) in ARM_KEYS.iter().enumerate() {
-                s.push_str(&format!("{} = {}, ", k, lua_num(a[i] as f64)));
-            }
-            s.push_str("},\n");
+            s.push_str(&format!("arm={{{}}},", list(&a)));
         }
-        s.push_str("    },\n");
+        s.push_str("},");
     }
-    s.push_str("}\n\nlocal LEVELS = {\n");
+    s.push_str("},levels={");
     for (id, (lo, hi)) in levels {
-        s.push_str(&format!("    [{}] = {{ {}, {} }},\n", id, lo, hi));
+        s.push_str(&format!("[{id}]={{{lo},{hi}}},"));
     }
-    s.push_str("}\n\nlocal BALANCE = {\n");
+    s.push_str("},balance={");
     for (k, v) in balance {
-        s.push_str(&format!("    [\"{}\"] = {},\n", k, lua_num(*v)));
+        s.push_str(&format!("[\"{k}\"]={},", lua_num(*v)));
     }
-    s.push_str("}\n\n");
+    s.push_str("}}\n");
+    s
+}
+
+pub fn lua_code() -> String {
+    let mut s = String::new();
     s.push_str(
-        r#"local FREE_SKILLS = BALANCE["freeSkills"] == 1
+        r#"local loaded, DATA = pcall(require, "m182_data")
+if not loaded or type(DATA) ~= "table" then DATA = {} end
+local OVERRIDES = type(DATA.overrides) == "table" and DATA.overrides or {}
+local LEVELS = type(DATA.levels) == "table" and DATA.levels or {}
+local BALANCE = type(DATA.balance) == "table" and DATA.balance or {}
+for _, o in pairs(OVERRIDES) do
+    if type(o) == "table" then
+        if type(o.dmg) == "table" then
+            local named = {}
+            for i, key in ipairs(__DMG_NAMES__) do if o.dmg[i] ~= nil then named[key] = o.dmg[i] end end
+            o.dmg = named
+        end
+        if type(o.arm) == "table" then
+            local named = {}
+            for i, key in ipairs(__ARM_NAMES__) do if o.arm[i] ~= nil then named[key] = o.arm[i] end end
+            o.arm = named
+        end
+    end
+end
+local FREE_SKILLS = BALANCE["freeSkills"] == 1
 BALANCE["freeSkills"] = nil
 local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
 if WIDEN <= 55 then WIDEN = 0 end
@@ -751,6 +779,8 @@ print(string.format("[m182-item-stats] values applied=%d failed=%d", applied, fa
 
 "#,
     );
+    let names = |keys: &[&str]| format!("{{{}}}", keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(","));
+    let mut s = s.replace("__DMG_NAMES__", &names(&DMG_KEYS)).replace("__ARM_NAMES__", &names(&ARM_KEYS));
     s.push_str(include_str!("custom.lua"));
     s
 }
@@ -772,7 +802,8 @@ pub fn write_mod(dir: &Path, items: &BTreeMap<u32, Edit>, balance: &BTreeMap<Str
 }
 "#;
     std::fs::write(root.join("mod.json"), manifest).map_err(|e| e.to_string())?;
-    std::fs::write(src.join("mod.lua"), lua_source(items, balance, levels)).map_err(|e| e.to_string())?;
+    std::fs::write(src.join("mod.lua"), lua_code()).map_err(|e| e.to_string())?;
+    std::fs::write(src.join(DATA_FILE), lua_data(items, balance, levels)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1046,6 +1077,27 @@ impl ItemsState {
     }
 
     pub fn persist(&self, dir: &Path) -> Result<(), String> {
+        self.persist_local(dir)?;
+        self.push_to_server();
+        Ok(())
+    }
+
+    pub fn data_message(&self) -> String {
+        json!({ "lua": lua_data(&self.saved, &self.balance_overrides(), &self.levels) }).to_string()
+    }
+
+    pub fn push_to_server(&self) {
+        if crate::remote::active() {
+            self.push_due.set(Some(Instant::now()));
+        }
+    }
+
+    pub fn push_now(&self) {
+        self.push_due.set(None);
+        let _ = crate::remote::submit(DATA_MESSAGE_FILE, &self.data_message());
+    }
+
+    pub fn persist_local(&self, dir: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&stats_json(&self.saved, &self.balance_overrides(), &self.levels)).map_err(|e| e.to_string())?;
         write_atomic(dir, STATS_FILE, "m182_item_stats.json.tmp", &text)?;
         write_mod(dir, &self.saved, &self.balance_overrides(), &self.levels)
@@ -1075,6 +1127,9 @@ impl ItemsState {
 
 impl App {
     pub fn items_pump(&mut self) {
+        if self.items.push_due.get().is_some_and(|t| t.elapsed() >= Duration::from_millis(2500)) {
+            self.items.push_now();
+        }
         let due: Vec<u32> = self.items.dirty.iter().filter(|(_, t)| t.elapsed() >= Duration::from_millis(1500)).map(|(id, _)| *id).collect();
         for id in due {
             let Some(item) = self.items.rows.iter().find(|r| r.id == id).cloned() else {
@@ -1258,7 +1313,7 @@ impl App {
         if changed {
             let dir = self.dir.clone();
             self.items.notice = match self.items.persist(&dir) {
-                Ok(()) => "Guardado. Se aplica al reiniciar.".to_string(),
+                Ok(()) => saved_notice(),
                 Err(e) => format!("Error: {e}"),
             };
         }
@@ -1266,7 +1321,7 @@ impl App {
             self.items.balance = self.items.balance_base.clone();
             let dir = self.dir.clone();
             let _ = self.items.persist(&dir);
-            self.items.notice = "Restaurado. Se aplica al reiniciar.".to_string();
+            self.items.notice = saved_notice();
         }
     }
 
@@ -1278,12 +1333,12 @@ impl App {
             self.balance_ui(ui);
             divider(ui);
             if crate::remote::active() {
-                ui.label(RichText::new("Servidor: sube mods\\zz_m182_item_stats por FTP y reinicia.").color(GOLD_DIM).size(14.5));
+                ui.label(RichText::new("Los ajustes se guardan en el servidor al cambiarlos. Reinicia el servidor para aplicarlos.").color(GOLD_DIM).size(14.5));
             }
             if button(ui, "RESTAURAR TODO A VALORES DEL JUEGO", Vec2::new(ui.available_width().min(360.0), 34.0), true, false) {
                 let dir = self.dir.clone();
                 self.items.notice = match self.items.reset_all(&dir) {
-                    Ok(n) => format!("Restaurado ({n} ítems). Se aplica al reiniciar."),
+                    Ok(n) => format!("Restaurado ({n} ítems). {}", saved_notice()),
                     Err(e) => format!("Error: {e}"),
                 };
             }
@@ -1330,7 +1385,7 @@ mod tests {
     #[test]
     fn dump_empty_lua_when_asked() {
         let Ok(path) = std::env::var("M182_DUMP_EMPTY_LUA") else { return };
-        std::fs::write(&path, lua_source(&BTreeMap::new(), &BTreeMap::new(), &Levels::new())).unwrap();
+        std::fs::write(&path, lua_code()).unwrap();
         let json = serde_json::to_string_pretty(&stats_json(&BTreeMap::new(), &BTreeMap::new(), &Levels::new())).unwrap();
         std::fs::write(format!("{path}.json"), json).unwrap();
     }
@@ -1355,7 +1410,7 @@ mod tests {
         let mut levels = Levels::new();
         levels.insert(1234, (3, 255));
         levels.insert(555, (1, 9));
-        std::fs::write(path, lua_source(&saved, &balance, &levels)).unwrap();
+        std::fs::write(path, lua_data(&saved, &balance, &levels)).unwrap();
     }
 
     #[test]
@@ -1393,9 +1448,9 @@ mod tests {
         assert_eq!(o.len(), 2);
         assert_eq!(o["itemLevelCap"], 86.0);
         assert_eq!(o["playerLevelCap"], 50.0);
-        let lua = lua_source(&BTreeMap::new(), &o, &Levels::new());
-        assert!(lua.contains("[\"itemLevelCap\"] = 86,"));
-        assert!(lua.contains("INTEGER_KEYS"));
+        let lua = lua_data(&BTreeMap::new(), &o, &Levels::new());
+        assert!(lua.contains("[\"itemLevelCap\"]=86,"));
+        assert!(lua_code().contains("INTEGER_KEYS"));
     }
 
     #[test]
@@ -1450,7 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn lua_source_has_values_and_is_valid_text() {
+    fn the_message_for_the_server_carries_the_data_table() {
+        let mut state = ItemsState::default();
+        state.balance.insert("freeSkills".to_string(), 1.0);
+        let v: Value = serde_json::from_str(&state.data_message()).unwrap();
+        let lua = v["lua"].as_str().unwrap();
+        assert!(lua.starts_with("return{") && lua.contains("[\"freeSkills\"]=1,"), "{lua}");
+    }
+
+    #[test]
+    fn lua_data_has_values_and_the_code_is_static() {
         let items = parse_items(&sample());
         let sword = items.iter().find(|i| i.id == 1234).unwrap();
         let mut dmg = sword.dmg;
@@ -1460,12 +1524,14 @@ mod tests {
         let mut balance = BTreeMap::new();
         balance.insert("durabilityStart".to_string(), 500.0);
         balance.insert("rarityDurabilityMod.epic".to_string(), 3.5);
-        let lua = lua_source(&saved, &balance, &Levels::new());
-        assert!(lua.contains("[1234] = {"));
-        assert!(lua.contains("dmgMod = 5"));
-        assert!(lua.contains("[\"durabilityStart\"] = 500"));
-        assert!(lua.contains("[\"rarityDurabilityMod.epic\"] = 3.500000000"));
-        assert!(lua.contains("woodDamage = true, stoneDamage = true, metalDamage = true, explosionDamage = true"));
+        let lua = lua_data(&saved, &balance, &Levels::new());
+        assert!(lua.starts_with("return{"));
+        assert!(lua.contains("[1234]={dmg={"));
+        assert!(lua.contains("[\"durabilityStart\"]=500,"));
+        assert!(lua.contains("[\"rarityDurabilityMod.epic\"]=3.5,"));
+        assert!(lua_code().contains("\"speedMod\",\"dmgMod\","));
+        assert!(lua_code().contains("woodDamage = true, stoneDamage = true, metalDamage = true, explosionDamage = true"));
+        assert!(!lua_code().contains("1234") && !lua_code().contains("durabilityStart"));
     }
 
     #[test]
@@ -1488,8 +1554,8 @@ mod tests {
         assert_eq!(state.balance["durabilityStart"], 100.0);
         assert_eq!(state.outbox.len(), 1);
         assert_eq!(state.outbox[0].1["stats"]["dmg_new"], dmg_hex(&sword.dmg));
-        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
-        assert!(!lua.contains("dmgMod = 9"));
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join(DATA_FILE)).unwrap();
+        assert!(!lua.contains("dmg={1,9,"));
         assert!(!lua.contains("durabilityStart\"] = 900"));
         let (loaded, bal) = load_saved(&dir);
         assert!(loaded.is_empty());
@@ -1522,8 +1588,8 @@ mod tests {
         assert_eq!(first["item_id"], 1234);
         assert_eq!(first["stats"]["dmg_old"][0], dmg_hex(&sword.dmg));
         assert!(dir.join(STATS_FILE).exists());
-        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
-        assert!(lua.contains("dmgMod = 9"));
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join(DATA_FILE)).unwrap();
+        assert!(lua.contains("dmg={1,9,"));
         let (loaded, _) = load_saved(&dir);
         assert_eq!(loaded.get(&1234).unwrap().dmg.unwrap()[1], 9.0);
         let mut edit2 = ItemsState::base_edit(&sword);
@@ -1563,10 +1629,10 @@ mod tests {
 
         st.persist(&dir).unwrap();
         assert_eq!(load_levels(&dir).get(&item.id), Some(&(5, 255)));
-        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
-        assert!(lua.contains("[1275936258] = { 5, 255 }"), "{lua}");
-        assert!(lua.contains("[\"itemLevelCap\"] = 55"), "{lua}");
-        assert!(lua.contains("[\"playerLevelCap\"] = 50"), "{lua}");
+        let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join(DATA_FILE)).unwrap();
+        assert!(lua.contains("[1275936258]={5,255}"), "{lua}");
+        assert!(lua.contains("[\"itemLevelCap\"]=55"), "{lua}");
+        assert!(lua.contains("[\"playerLevelCap\"]=50"), "{lua}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1658,7 +1724,7 @@ mod tests {
         assert_eq!(state.current(&sword).dmg.unwrap()[1], 9.0);
         state.persist(&dir).unwrap();
         let lua = std::fs::read_to_string(dir.join("mods").join(MOD_DIR).join("src").join("mod.lua")).unwrap();
-        assert!(!lua.contains("dmgMod = 9"));
+        assert!(!lua.contains("dmg={1,9,"));
         assert!(lua.contains("local function custom_items()"));
         state.set_edit(&sword, ItemsState::base_edit(&sword));
         assert!(!state.is_modified(&sword));
@@ -1752,7 +1818,7 @@ mod tests {
         }
         let shipped = target.join(MOD_DIR).join("src").join("mod.lua");
         if let Ok(text) = std::fs::read_to_string(shipped) {
-            assert_eq!(text, lua_source(&BTreeMap::new(), &BTreeMap::new(), &Levels::new()));
+            assert_eq!(text, lua_code());
         }
     }
 }

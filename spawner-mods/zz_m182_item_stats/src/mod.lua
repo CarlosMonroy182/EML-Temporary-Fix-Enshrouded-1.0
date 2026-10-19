@@ -1,12 +1,22 @@
-local OVERRIDES = {
-}
-
-local LEVELS = {
-}
-
-local BALANCE = {
-}
-
+local loaded, DATA = pcall(require, "m182_data")
+if not loaded or type(DATA) ~= "table" then DATA = {} end
+local OVERRIDES = type(DATA.overrides) == "table" and DATA.overrides or {}
+local LEVELS = type(DATA.levels) == "table" and DATA.levels or {}
+local BALANCE = type(DATA.balance) == "table" and DATA.balance or {}
+for _, o in pairs(OVERRIDES) do
+    if type(o) == "table" then
+        if type(o.dmg) == "table" then
+            local named = {}
+            for i, key in ipairs({"speedMod","dmgMod","physicalCutDamage","physicalPierceDamage","physicalBluntDamage","magicalFireDamage","magicalIceDamage","magicalFogDamage","magicalLightningDamage","healing","poisonDamage","woodDamage","stoneDamage","metalDamage","explosionDamage"}) do if o.dmg[i] ~= nil then named[key] = o.dmg[i] end end
+            o.dmg = named
+        end
+        if type(o.arm) == "table" then
+            local named = {}
+            for i, key in ipairs({"physical","blunt","pierce","cut","magical","fire","ice","fog","lightning"}) do if o.arm[i] ~= nil then named[key] = o.arm[i] end end
+            o.arm = named
+        end
+    end
+end
 local FREE_SKILLS = BALANCE["freeSkills"] == 1
 BALANCE["freeSkills"] = nil
 local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
