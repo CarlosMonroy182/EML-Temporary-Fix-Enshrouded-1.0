@@ -1237,14 +1237,14 @@ impl App {
                     });
                 }
             }
+            if changed {
+                let dir = self.dir.clone();
+                self.items.notice = match self.items.persist(&dir) {
+                    Ok(()) => "Ajustes globales guardados. Reinicia el juego para aplicarlos.".to_string(),
+                    Err(e) => format!("Error: {e}"),
+                };
+            }
             ui.horizontal(|ui| {
-                if button(ui, "GUARDAR AJUSTES", Vec2::new(170.0, 32.0), true, true) {
-                    let dir = self.dir.clone();
-                    self.items.notice = match self.items.persist(&dir) {
-                        Ok(()) => "Ajustes globales guardados. Reinicia el juego para aplicarlos.".to_string(),
-                        Err(e) => format!("Error: {e}"),
-                    };
-                }
                 if button(ui, "Restaurar", Vec2::new(110.0, 32.0), true, false) {
                     self.items.balance = self.items.balance_base.clone();
                     let dir = self.dir.clone();
@@ -1258,10 +1258,6 @@ impl App {
     pub fn settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(12.0);
-            self.server_ui(ui);
-            divider(ui);
-            self.copies_ui(ui);
-            divider(ui);
             ui.label(RichText::new("AJUSTES GLOBALES").font(title_font(22.0)).color(GOLD));
             ui.label(RichText::new("Durabilidad, vida base del jugador, niveles máximos… Afectan a todo el juego, no a un ítem concreto.").color(MUTED));
             divider(ui);
