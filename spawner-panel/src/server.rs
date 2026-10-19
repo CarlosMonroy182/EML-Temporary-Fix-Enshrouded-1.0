@@ -28,6 +28,7 @@ impl App {
         });
     }
 
+    #[allow(dead_code)]
     pub fn server_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("SERVIDOR DEDICADO").font(title_font(22.0)).color(GOLD));
         ui.label(RichText::new("Con la clave del servidor, este panel manda sus órdenes escribiéndolas por ti en el chat del juego (nadie más las ve). Funciona con el juego abierto y dentro del mundo del servidor.").color(MUTED));
@@ -71,6 +72,7 @@ impl App {
         ui.label(RichText::new("Para que el envío funcione: el chat del juego debe abrirse con Enter y el mundo del servidor estar cargado. No uses el teclado mientras el panel escribe.").color(MUTED).size(12.5));
     }
 
+    #[allow(dead_code)]
     pub fn copies_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("ARMAS ÚNICAS").font(title_font(22.0)).color(GOLD));
         ui.label(RichText::new("Cada arma o armadura que edites sale como una copia propia, con sus stats, sin cambiar las demás. El juego solo conoce los ítems que existen al abrirse: por eso cada ítem editado reserva unas copias (se crean al abrir el juego o al reiniciar el servidor).").color(MUTED));
