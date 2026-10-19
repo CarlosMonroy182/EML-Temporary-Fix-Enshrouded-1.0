@@ -453,11 +453,6 @@ impl App {
                     self.add_zone(p[0], p[2]);
                 }
             }
-            if let Some(p) = self.map.selected {
-                if button(ui, "Crear en el punto del mapa", Vec2::new(230.0, 32.0), true, false) {
-                    self.add_zone(p[0], p[2]);
-                }
-            }
             if !self.places.is_empty() {
                 let mut picked = None;
                 egui::ComboBox::from_id_salt("zone_place").selected_text("Crear en un lugar guardado…").show_ui(ui, |ui| {

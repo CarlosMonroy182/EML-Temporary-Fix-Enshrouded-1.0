@@ -54,21 +54,16 @@ pub fn command(dir: &Path, body: &Value) -> Result<(), String> {
     write_atomic(dir, COMMAND_FILE, "m182_command.request.tmp", &body.to_string())
 }
 
-#[allow(dead_code)]
 pub fn teleport_body(point: [f64; 3], height_known: bool) -> Value {
-    teleport_body_with_ground(point, height_known, None)
-}
-
-pub fn teleport_body_with_ground(point: [f64; 3], height_known: bool, ground: Option<f64>) -> Value {
     if height_known {
         json!({"cmd": "teleport", "at": [point[0], point[1], point[2]]})
     } else {
-        let mut body = json!({"cmd": "teleport", "at": [point[0], Value::Null, point[2]]});
-        if let Some(g) = ground.filter(|g| g.is_finite()) {
-            body["ground"] = json!(g);
-        }
-        body
+        json!({"cmd": "teleport", "at": [point[0], Value::Null, point[2]]})
     }
+}
+
+pub fn marker_body() -> Value {
+    json!({"cmd": "teleport", "to": "waypoint"})
 }
 
 impl App {
@@ -120,33 +115,49 @@ impl App {
                 ui.add(egui::DragValue::new(value).speed(1.0).fixed_decimals(1));
             });
         }
-        ui.checkbox(&mut self.powers.unknown_height, "No conozco la altura: bajar solo hasta el suelo con caída protegida");
-        ui.horizontal(|ui| {
+        ui.checkbox(&mut self.powers.unknown_height, "No conozco la altura: el juego busca el suelo y la caída va protegida");
+        ui.horizontal_wrapped(|ui| {
             if let Some(p) = self.player {
                 if button(ui, "Usar mi posición", Vec2::new(170.0, 32.0), true, false) {
                     self.powers.teleport = p;
                     self.powers.unknown_height = false;
                 }
             }
-            if let Some(p) = self.map.selected {
-                if button(ui, "Usar punto del mapa", Vec2::new(190.0, 32.0), true, false) {
-                    self.powers.teleport = p;
-                    self.powers.unknown_height = !self.map.selected_height_known;
-                }
-            }
             if button(ui, "TELETRANSPORTAR", Vec2::new(210.0, 32.0), true, true) {
-                let t = self.powers.teleport;
-                let ground = self.ground_estimate(t[0], t[2]);
-                let body = teleport_body_with_ground(t, !self.powers.unknown_height, ground);
+                let body = teleport_body(self.powers.teleport, !self.powers.unknown_height);
                 self.powers.notice = match command(&self.dir, &body) {
                     Ok(()) => "Pedido de teletransporte enviado.".to_string(),
                     Err(e) => format!("Error: {e}"),
                 };
             }
         });
+        ui.add_space(4.0);
+        if button(ui, "Ir al marcador del mapa del juego", Vec2::new(300.0, 32.0), true, false) {
+            self.powers.notice = match command(&self.dir, &marker_body()) {
+                Ok(()) => "Pedido enviado: pon antes un marcador en el mapa del juego.".to_string(),
+                Err(e) => format!("Error: {e}"),
+            };
+        }
         if !self.powers.notice.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(&self.powers.notice).color(GOOD));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teleport_requests_name_a_point_or_the_game_marker() {
+        let known = teleport_body([1.0, 2.0, 3.0], true);
+        assert_eq!(known, json!({"cmd": "teleport", "at": [1.0, 2.0, 3.0]}));
+        let unknown = teleport_body([1.0, 2.0, 3.0], false);
+        assert!(unknown["at"][1].is_null());
+        assert_eq!(unknown["at"][0], 1.0);
+        assert_eq!(unknown["at"][2], 3.0);
+        assert!(unknown.get("ground").is_none());
+        assert_eq!(marker_body(), json!({"cmd": "teleport", "to": "waypoint"}));
     }
 }

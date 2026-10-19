@@ -464,10 +464,14 @@ pub fn keeper_pass() {
 }
 
 fn keeper_loop() {
+    let mut ticks = 0u32;
     loop {
         std::thread::sleep(Duration::from_millis(150));
         let _ = std::panic::catch_unwind(keeper_pass);
-        let _ = std::panic::catch_unwind(loot_pass);
+        ticks = ticks.wrapping_add(1);
+        if ticks % 130 == 0 {
+            let _ = std::panic::catch_unwind(save_loot_nodes);
+        }
     }
 }
 
@@ -513,198 +517,6 @@ struct Request {
     item_amount: Option<u32>,
     item_guid: Option<String>,
     stats: Option<StatsPatch>,
-    loot: Option<Vec<LootEntry>>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct LootEntry {
-    template: String,
-    item: u32,
-    guid: String,
-    level: u32,
-    rarity: u32,
-    amount: u32,
-}
-
-const LOOT_MAX_ENTRIES: usize = 12;
-const GENERIC_PICKUP: &str = "c15a5c9d-4956-49ff-9d72-9f522229cf1c";
-
-#[derive(Debug, Clone, Copy)]
-struct LootSpec {
-    template: [u8; 16],
-    give: GiveSpec,
-}
-
-fn loot_specs(entries: &[LootEntry]) -> Vec<LootSpec> {
-    let fallback = super::config::parse_guid(GENERIC_PICKUP).unwrap_or([0u8; 16]);
-    entries
-        .iter()
-        .filter(|e| e.item != 0)
-        .take(LOOT_MAX_ENTRIES)
-        .map(|e| LootSpec {
-            template: super::config::parse_guid(e.template.trim()).unwrap_or(fallback),
-            give: GiveSpec {
-                item: e.item,
-                level: e.level.clamp(1, 255),
-                rarity: e.rarity.min(4),
-                amount: e.amount.clamp(1, 65535),
-                guid: super::config::parse_guid(e.guid.trim()).unwrap_or([0u8; 16]),
-            },
-        })
-        .collect()
-}
-
-static REQUEST_LOOT: Mutex<Vec<LootSpec>> = Mutex::new(Vec::new());
-
-struct LootWatch {
-    manager: usize,
-    id: u32,
-    drops: Vec<LootSpec>,
-    seen_alive: bool,
-    dead: u8,
-    missing: u8,
-    last: Option<[i64; 3]>,
-}
-
-struct DropJob {
-    at: [i64; 3],
-    drops: Vec<LootSpec>,
-}
-
-static LOOT_WATCHES: Mutex<Vec<LootWatch>> = Mutex::new(Vec::new());
-static DROP_JOBS: Mutex<Vec<DropJob>> = Mutex::new(Vec::new());
-static DROP_PENDING: AtomicU32 = AtomicU32::new(0);
-const LOOT_WATCH_LIMIT: usize = 400;
-
-fn set_request_loot(entries: &[LootEntry]) {
-    if let Ok(mut l) = REQUEST_LOOT.lock() {
-        *l = loot_specs(entries);
-    }
-}
-
-fn watch_loot(manager: usize, id: u32, drops: Vec<LootSpec>) {
-    if drops.is_empty() {
-        return;
-    }
-    let Ok(mut list) = LOOT_WATCHES.lock() else { return };
-    list.retain(|w| !(w.manager == manager && w.id == id));
-    list.push(LootWatch { manager, id, drops, seen_alive: false, dead: 0, missing: 0, last: None });
-    if list.len() > LOOT_WATCH_LIMIT {
-        let extra = list.len() - LOOT_WATCH_LIMIT;
-        list.drain(0..extra);
-    }
-}
-
-fn position_of(manager: usize, id: u32) -> Option<[i64; 3]> {
-    let t = transform_of(manager, id)?;
-    if t.len() < 24 {
-        return None;
-    }
-    Some([le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)])
-}
-
-pub fn loot_pass() {
-    let current = SERVER_MGR.load(Ordering::SeqCst);
-    let Ok(mut list) = LOOT_WATCHES.lock() else { return };
-    list.retain(|w| w.manager == current);
-    let mut done: Vec<usize> = Vec::new();
-    for (index, w) in list.iter_mut().enumerate() {
-        match health_now(w.manager, w.id) {
-            None => {
-                w.missing = w.missing.saturating_add(1);
-                if w.missing >= 60 {
-                    done.push(index);
-                }
-            }
-            Some(0) if w.seen_alive => {
-                w.missing = 0;
-                w.dead = w.dead.saturating_add(1);
-                if let Some(p) = position_of(w.manager, w.id) {
-                    w.last = Some(p);
-                }
-                if w.dead >= 2 {
-                    if let Some(at) = w.last {
-                        if let Ok(mut jobs) = DROP_JOBS.lock() {
-                            jobs.push(DropJob { at, drops: w.drops.clone() });
-                            DROP_PENDING.store(1, Ordering::SeqCst);
-                        }
-                        log(&format!("loot: creature {} died, {} item(s) will be dropped", w.id, w.drops.len()));
-                    } else {
-                        log(&format!("loot: creature {} died but its position is unknown", w.id));
-                    }
-                    done.push(index);
-                }
-            }
-            Some(0) => {
-                w.missing = 0;
-            }
-            Some(_) => {
-                w.missing = 0;
-                w.dead = 0;
-                w.seen_alive = true;
-                if let Some(p) = position_of(w.manager, w.id) {
-                    w.last = Some(p);
-                }
-            }
-        }
-    }
-    for index in done.into_iter().rev() {
-        list.remove(index);
-    }
-}
-
-fn create_pickup(manager: usize, template: [u8; 16], at: [i64; 3], g: &GiveSpec) -> u32 {
-    let mut transform = [0u8; TRANSFORM_SIZE];
-    write_u64(&mut transform, 0, at[0] as u64);
-    write_u64(&mut transform, 8, at[1] as u64);
-    write_u64(&mut transform, 16, at[2] as u64);
-    transform[36..40].copy_from_slice(&1.0f32.to_le_bytes());
-    transform[40..44].copy_from_slice(&1.0f32.to_le_bytes());
-    transform[44..48].copy_from_slice(&1.0f32.to_le_bytes());
-    transform[48..52].copy_from_slice(&1.0f32.to_le_bytes());
-    let mut pickup = [0u8; PICKUP_ITEM_SIZE];
-    pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
-    pickup[4..20].copy_from_slice(&g.guid);
-    pickup[20..24].copy_from_slice(&g.level.to_le_bytes());
-    pickup[24] = g.rarity as u8;
-    pickup[26..28].copy_from_slice(&(g.amount as u16).to_le_bytes());
-    let mut entries = Block([0u8; 0x100]);
-    write_u32(&mut entries.0, 0, HASH_CURRENT_TRANSFORM);
-    write_u64(&mut entries.0, 8, transform.as_ptr() as u64);
-    write_u64(&mut entries.0, 16, TRANSFORM_SIZE as u64);
-    write_u32(&mut entries.0, 24, HASH_PICKUP_ITEM);
-    write_u64(&mut entries.0, 32, pickup.as_ptr() as u64);
-    write_u64(&mut entries.0, 40, PICKUP_ITEM_SIZE as u64);
-    let mut desc = Block([0u8; 0x100]);
-    desc.0[4..20].copy_from_slice(&template);
-    write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
-    write_u64(&mut desc.0, 0x20, 2);
-    original_create(manager, 0, desc.0.as_ptr() as usize, 0)
-}
-
-fn run_drops(manager: usize) {
-    if DROP_PENDING.swap(0, Ordering::SeqCst) == 0 {
-        return;
-    }
-    let jobs: Vec<DropJob> = match DROP_JOBS.lock() {
-        Ok(mut j) => std::mem::take(&mut *j),
-        Err(_) => return,
-    };
-    for job in jobs {
-        let n = job.drops.len().max(1);
-        for (k, spec) in job.drops.iter().enumerate() {
-            let (dx, dz) = if n == 1 {
-                (0, 0)
-            } else {
-                let angle = std::f64::consts::TAU * k as f64 / n as f64;
-                ((0.9 * angle.cos() * METERS) as i64, (0.9 * angle.sin() * METERS) as i64)
-            };
-            let at = [job.at[0].wrapping_add(dx), job.at[1].saturating_add((0.4 * METERS) as i64), job.at[2].wrapping_add(dz)];
-            let id = create_pickup(manager, spec.template, at, &spec.give);
-            log(&format!("loot: item {} x{} level {} placed as entity {id}", spec.give.item, spec.give.amount, spec.give.level));
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -776,7 +588,6 @@ pub fn poll_request() {
             guid: req.item_guid.as_deref().and_then(super::config::parse_guid).unwrap_or([0u8; 16]),
         });
     }
-    set_request_loot(req.loot.as_deref().unwrap_or(&[]));
     REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
     REQUEST_FORWARD.store(req.forward.unwrap_or(false), Ordering::SeqCst);
     if let Ok(mut r) = REQUEST_AT.lock() {
@@ -1347,7 +1158,7 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && DROP_PENDING.load(Ordering::Relaxed) == 0 {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1360,7 +1171,6 @@ pub fn before(manager: usize, edx: u32) {
         spawn_now(manager);
     }
     run_aura_queue(manager);
-    run_drops(manager);
     BUSY.store(false, Ordering::SeqCst);
 }
 
@@ -1399,7 +1209,6 @@ fn guid_text(b: &[u8]) -> String {
 }
 
 static LOOT_WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
-static LOOT_WATCH_LINES: AtomicU32 = AtomicU32::new(0);
 
 fn now_ms() -> u64 {
     CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64
@@ -1417,29 +1226,13 @@ fn open_loot_watch(id: u32) {
             seen.remove(0);
         }
     }
-    if LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms() {
-        return;
-    }
     LOOT_WATCH_UNTIL.store(now_ms() + 20_000, Ordering::Relaxed);
-    LOOT_WATCH_LINES.store(0, Ordering::Relaxed);
-    log(&format!("loot-watch: spawned creature {id} died; every entity the game creates in the next 20 s is listed"));
-}
-
-fn loot_watch_report(manager: usize, edx: u32, desc: usize, ret: u32) {
-    if LOOT_WATCH_LINES.fetch_add(1, Ordering::Relaxed) >= 120 {
-        return;
-    }
-    let Some(head) = read_bytes(desc, 0x30) else { return };
-    if head.len() < 0x30 {
-        return;
-    }
-    let at = transform_of(manager, ret).map(|t| format!(" at {:.1},{:.1},{:.1}", le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS)).unwrap_or_default();
-    log(&format!("loot-watch: entity {ret} flags={edx} template {}{at}", guid_text(&head[4..20])));
+    log(&format!("loot: spawned creature {id} died"));
 }
 
 static LOOT_GUIDS: OnceLock<Vec<([u8; 16], String)>> = OnceLock::new();
-static LOOT_DUMPS: AtomicU32 = AtomicU32::new(0);
-static LOOT_WORLD_DUMPS: AtomicU32 = AtomicU32::new(0);
+static LOOT_REPORTS: AtomicU32 = AtomicU32::new(0);
+static LOOT_WORLD_REPORTS: AtomicU32 = AtomicU32::new(0);
 
 fn loot_guids() -> &'static Vec<([u8; 16], String)> {
     LOOT_GUIDS.get_or_init(|| {
@@ -1459,40 +1252,224 @@ fn loot_guids() -> &'static Vec<([u8; 16], String)> {
     })
 }
 
-/// Writes down what the game builds when a creature dies, so loot that cannot be opened can be
-/// compared with the loot of an enemy that came from the world.
+fn container_report(label: &str, manager: usize, id: u32) {
+    let Some((_, _, slots)) = entity_layout(manager, id) else {
+        log(&format!("loot: {label}: entity {id} is gone"));
+        return;
+    };
+    let mut loot = Vec::new();
+    let mut inventory = String::new();
+    for slot in &slots {
+        let Some(b) = read_bytes(slot.addr, slot.stride) else { continue };
+        if slot.stride == 12 {
+            loot.push(format!("{}:{}", slot.index, hex(&b)));
+        } else if slot.stride == 96 && inventory.is_empty() {
+            inventory = hex(&b);
+        }
+    }
+    log(&format!("loot: {label}: entity {id} 12-byte components [{}] inventory {inventory}", loot.join(" ")));
+}
+
+/// Writes down the loot container the game builds when a creature dies, now and a little later,
+/// so what a player finds when opening it can be compared with a creature from the world.
 fn loot_container_check(manager: usize, desc: usize, ret: u32) {
     let ours = LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms();
-    if !ours && (LOOT_WORLD_DUMPS.load(Ordering::Relaxed) >= 2 || now_ms() < 60_000) {
+    if !ours && (LOOT_WORLD_REPORTS.load(Ordering::Relaxed) >= 2 || now_ms() < 60_000) {
         return;
     }
-    if LOOT_DUMPS.load(Ordering::Relaxed) >= 8 {
+    if LOOT_REPORTS.load(Ordering::Relaxed) >= 8 {
         return;
     }
     let Some(head) = read_bytes(desc + 4, 16) else { return };
     let Some((_, name)) = loot_guids().iter().find(|(g, _)| head.len() >= 16 && g[..] == head[..16]) else { return };
     if !ours {
-        LOOT_WORLD_DUMPS.fetch_add(1, Ordering::Relaxed);
+        LOOT_WORLD_REPORTS.fetch_add(1, Ordering::Relaxed);
     }
-    let n = LOOT_DUMPS.fetch_add(1, Ordering::Relaxed);
-    if n >= 8 {
+    if LOOT_REPORTS.fetch_add(1, Ordering::Relaxed) >= 8 {
         return;
     }
-    let label = format!("loot container {name} ({})", if ours { "creature from the panel" } else { "creature from the world" });
-    let _ = std::thread::Builder::new().name("m182-loot-dump".into()).spawn(move || {
-        std::thread::sleep(Duration::from_millis(1500));
-        dump_entity(&label, manager, ret);
+    let label = format!("{name} ({})", if ours { "creature from the panel" } else { "creature from the world" });
+    let _ = std::thread::Builder::new().name("m182-loot-report".into()).spawn(move || {
+        let mut waited = 0u64;
+        for (k, at) in [1_500u64, 30_000, 90_000].into_iter().enumerate() {
+            std::thread::sleep(Duration::from_millis(at - waited));
+            waited = at;
+            container_report(&format!("{label} after {} s", at / 1000), manager, ret);
+            if !ours && k == 0 {
+                break;
+            }
+        }
     });
+}
+
+const HASH_RANDOM_LOOT_CONTAINER: u32 = 0x061d_da01;
+const RANDOM_LOOT_CONTAINER_SIZE: usize = 12;
+const LOOT_NODES_FILE: &str = "m182_loot_nodes.txt";
+const LOOT_NODE_LIMIT: usize = 1500;
+
+#[derive(Clone, Copy, PartialEq)]
+struct LootNode {
+    template: [u8; 16],
+    x: f32,
+    z: f32,
+    node: u32,
+}
+
+struct LootNodes {
+    list: Vec<LootNode>,
+    loaded: bool,
+    dirty: bool,
+}
+
+static LOOT_NODES: Mutex<LootNodes> = Mutex::new(LootNodes { list: Vec::new(), loaded: false, dirty: false });
+static ENEMY_TEMPLATES: OnceLock<HashSet<[u8; 16]>> = OnceLock::new();
+
+fn enemy_templates() -> &'static HashSet<[u8; 16]> {
+    ENEMY_TEMPLATES.get_or_init(|| {
+        let mut out = HashSet::new();
+        let Ok(dir) = std::env::current_dir() else { return out };
+        let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_enemies.csv")) else { return out };
+        for line in text.lines().skip(1) {
+            let mut parts = line.split(',');
+            let (Some(_), Some(guid)) = (parts.next(), parts.next()) else { continue };
+            if let Some(g) = super::config::parse_guid(guid) {
+                out.insert(g);
+            }
+        }
+        out
+    })
+}
+
+fn parse_loot_nodes(text: &str) -> Vec<LootNode> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(guid), Some(x), Some(z), Some(node)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { continue };
+        let (Some(template), Ok(x), Ok(z), Ok(node)) = (super::config::parse_guid(guid), x.parse::<f32>(), z.parse::<f32>(), u32::from_str_radix(node, 16)) else { continue };
+        if node != 0 && x.is_finite() && z.is_finite() {
+            out.push(LootNode { template, x, z, node });
+        }
+    }
+    out
+}
+
+fn format_loot_nodes(list: &[LootNode]) -> String {
+    let mut text = String::new();
+    for n in list {
+        text.push_str(&format!("{} {:.1} {:.1} {:08x}\n", guid_text(&n.template), n.x, n.z, n.node));
+    }
+    text
+}
+
+fn load_loot_nodes(nodes: &mut LootNodes) {
+    if nodes.loaded {
+        return;
+    }
+    nodes.loaded = true;
+    let Ok(dir) = std::env::current_dir() else { return };
+    if let Ok(text) = std::fs::read_to_string(dir.join(LOOT_NODES_FILE)) {
+        nodes.list = parse_loot_nodes(&text);
+        if !nodes.list.is_empty() {
+            log(&format!("loot: {} loot nodes remembered from earlier runs", nodes.list.len()));
+        }
+    }
+}
+
+fn remember_loot_node(sample: LootNode) {
+    let Ok(mut nodes) = LOOT_NODES.lock() else { return };
+    load_loot_nodes(&mut nodes);
+    if let Some(known) = nodes.list.iter_mut().find(|n| n.template == sample.template && n.node == sample.node) {
+        if known.x != sample.x || known.z != sample.z {
+            known.x = sample.x;
+            known.z = sample.z;
+        }
+        return;
+    }
+    let first = nodes.list.is_empty();
+    nodes.list.push(sample);
+    if nodes.list.len() > LOOT_NODE_LIMIT {
+        let extra = nodes.list.len() - LOOT_NODE_LIMIT;
+        nodes.list.drain(0..extra);
+    }
+    nodes.dirty = true;
+    if first {
+        log("loot: first loot node taken from a creature of the world");
+    }
+}
+
+/// Keeps what the game itself puts on every creature it spawns: the loot node the creature rolls
+/// its loot from. Creatures made from the panel adopt one of these nodes, so they drop what a
+/// creature of the world would drop in that place.
+fn harvest_loot_node(manager: usize, edx: u32, desc: usize) {
+    if edx == 0 || edx >= 0x8000_0000 {
+        return;
+    }
+    let Some(head) = read_bytes(desc, 0x30) else { return };
+    if head.len() < 0x30 {
+        return;
+    }
+    let mut template = [0u8; 16];
+    template.copy_from_slice(&head[4..20]);
+    if !enemy_templates().contains(&template) || !is_server(manager) {
+        return;
+    }
+    let array = u64_at(&head, 0x18) as usize;
+    let count = (u64_at(&head, 0x20) as usize).min(96);
+    let Some(entries) = read_bytes(array, count * 24) else { return };
+    let count = entries.len() / 24;
+    let Some(loot) = component_data(&entries, count, HASH_RANDOM_LOOT_CONTAINER, RANDOM_LOOT_CONTAINER_SIZE) else { return };
+    let Some(transform) = component_data(&entries, count, HASH_CURRENT_TRANSFORM, TRANSFORM_SIZE) else { return };
+    let node = u32_at(&loot, 4);
+    if node == 0 {
+        return;
+    }
+    remember_loot_node(LootNode {
+        template,
+        x: (le_i64(&transform, 0) as f64 / METERS) as f32,
+        z: (le_i64(&transform, 16) as f64 / METERS) as f32,
+        node,
+    });
+}
+
+/// The loot node a creature made at `x`,`z` should roll from: the closest one used by a creature of
+/// the same kind, otherwise the closest of any kind.
+fn loot_node_for(template: &[u8; 16], x: f64, z: f64) -> Option<(u32, bool, f64)> {
+    let Ok(mut nodes) = LOOT_NODES.lock() else { return None };
+    load_loot_nodes(&mut nodes);
+    let distance = |n: &LootNode| ((n.x as f64 - x).powi(2) + (n.z as f64 - z).powi(2)).sqrt();
+    let best = |same: bool| {
+        nodes
+            .list
+            .iter()
+            .filter(|n| (n.template == *template) == same)
+            .map(|n| (n.node, distance(n)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    };
+    best(true).map(|(node, d)| (node, true, d)).or_else(|| best(false).map(|(node, d)| (node, false, d)))
+}
+
+pub fn save_loot_nodes() {
+    let text = {
+        let Ok(mut nodes) = LOOT_NODES.lock() else { return };
+        if !nodes.dirty {
+            return;
+        }
+        nodes.dirty = false;
+        format_loot_nodes(&nodes.list)
+    };
+    let Ok(dir) = std::env::current_dir() else { return };
+    let tmp = dir.join("m182_loot_nodes.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(LOOT_NODES_FILE));
+    }
 }
 
 pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if ret == 0 {
         return;
     }
-    if LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms() {
-        loot_watch_report(manager, edx, desc, ret);
-    }
     loot_container_check(manager, desc, ret);
+    harvest_loot_node(manager, edx, desc);
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
     if settled && edx != 1 {
         return;
@@ -1642,7 +1619,6 @@ fn spawn_now(manager: usize) {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
     }
     let give = REQUEST_GIVE.lock().ok().and_then(|mut g| g.take());
-    let loot: Vec<LootSpec> = REQUEST_LOOT.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default();
     let delivery = give.is_some();
     let mut settings = settings;
     if delivery {
@@ -1694,6 +1670,26 @@ fn spawn_now(manager: usize) {
             write_u64(&mut entries.0, 40, 4);
         }
 
+        let mut loot_node = [0u8; RANDOM_LOOT_CONTAINER_SIZE];
+        let mut entry_count = if delivery { 2 } else if object { 1 } else { 2 };
+        if !object && !delivery {
+            let (px, pz) = ((base.0.wrapping_add(dx)) as f64 / METERS, (base.2.wrapping_add(dz)) as f64 / METERS);
+            match loot_node_for(&template, px, pz) {
+                Some((node, same_kind, meters)) => {
+                    loot_node[4..8].copy_from_slice(&node.to_le_bytes());
+                    write_u32(&mut entries.0, 48, HASH_RANDOM_LOOT_CONTAINER);
+                    write_u64(&mut entries.0, 56, loot_node.as_ptr() as u64);
+                    write_u64(&mut entries.0, 64, RANDOM_LOOT_CONTAINER_SIZE as u64);
+                    entry_count = 3;
+                    log(&format!(
+                        "loot: creature rolls from loot node {node:08x} of a creature of the world ({}, {meters:.0} m away)",
+                        if same_kind { "same kind" } else { "other kind" }
+                    ));
+                }
+                None => log("loot: no loot node known yet; it is taken from the first creatures the game spawns, walk around and try again"),
+            }
+        }
+
         let mut pickup = [0u8; PICKUP_ITEM_SIZE];
         if let Some(g) = &give {
             pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
@@ -1709,7 +1705,7 @@ fn spawn_now(manager: usize) {
         let mut desc = Block([0u8; 0x100]);
         desc.0[4..20].copy_from_slice(&template);
         write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
-        write_u64(&mut desc.0, 0x20, if delivery { 2 } else if object { 1 } else { 2 });
+        write_u64(&mut desc.0, 0x20, entry_count);
 
         let id = original_create(manager, 0, desc.0.as_ptr() as usize, 0);
         LAST_SPAWNED.store(id, Ordering::SeqCst);
@@ -1721,7 +1717,6 @@ fn spawn_now(manager: usize) {
         }
         if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
-            watch_loot(manager, id, loot.clone());
             if let Some(tag) = &tag {
                 if let Ok(mut created) = CREATED.lock() {
                     created.push((tag.clone(), id));
@@ -1809,6 +1804,7 @@ pub struct Command {
     arm: Option<String>,
     lvl: Option<[u32; 2]>,
     bases: Option<Vec<u32>>,
+    to: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1817,24 +1813,6 @@ struct Saved {
     fall: Option<[u8; 8]>,
     retries: u32,
     seen: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TpStage {
-    Hold,
-    Fall,
-}
-
-struct Tp {
-    stage: TpStage,
-    x: i64,
-    y: i64,
-    z: i64,
-    until: Instant,
-    since: Instant,
-    last_y: i64,
-    last_change: Instant,
-    last_sample: Instant,
 }
 
 struct PowerState {
@@ -1860,7 +1838,7 @@ struct PowerState {
     groups: GroupState,
     saved: HashMap<(usize, u32), Saved>,
     zone_ids: Vec<u32>,
-    tp: Option<Tp>,
+    entity_protect: HashMap<u32, Instant>,
     diag_left: u32,
     diag_last: Option<Instant>,
     spawners: SpawnerSet,
@@ -2256,6 +2234,171 @@ fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
     }
 }
 
+const PLAYER_INPUT_SIZE: usize = 1472;
+const CONSUMED_INPUT_SIZE: usize = 224;
+const ADMIN_BLOCK_AT: usize = 0x434;
+const ADMIN_BLOCK_SIZE: usize = 0x28;
+const ADMIN_VERSION_AT: usize = 0x458;
+const CONSUMED_ADMIN_AT: usize = 0xac;
+const WAYPOINT_SIZE: usize = 32;
+const TELEPORT_PROTECTION: Duration = Duration::from_secs(25);
+const TELEPORT_HEIGHT_MARGIN: f64 = 1.0;
+const TELEPORT_UNKNOWN_RISE: f64 = 150.0;
+
+#[derive(Clone)]
+struct TeleportJob {
+    entity: u32,
+    at: [Option<f64>; 3],
+    waypoint: bool,
+    queued: Instant,
+    tries: u32,
+}
+
+struct TeleportSent {
+    job: TeleportJob,
+    block: Vec<u8>,
+    written: u32,
+}
+
+static TELEPORT_JOBS: Mutex<Vec<TeleportJob>> = Mutex::new(Vec::new());
+static TELEPORT_SENT: Mutex<Vec<TeleportSent>> = Mutex::new(Vec::new());
+
+fn queue_teleport(job: TeleportJob) {
+    if let Ok(mut jobs) = TELEPORT_JOBS.lock() {
+        jobs.retain(|j| j.entity != job.entity);
+        jobs.push(job);
+    }
+}
+
+fn teleport_watchdog() {
+    let Ok(mut jobs) = TELEPORT_JOBS.lock() else { return };
+    let before = jobs.len();
+    jobs.retain(|j| j.queued.elapsed() < Duration::from_secs(15));
+    if jobs.len() != before {
+        log("teleport: the game never took the request (the teleport hook is not active)");
+    }
+}
+
+fn waypoint_position(slots: &[Slot]) -> Option<(f64, f64, f64)> {
+    let mut found = Vec::new();
+    for slot in slots.iter().filter(|s| s.stride == WAYPOINT_SIZE) {
+        let Some(b) = read_bytes(slot.addr, WAYPOINT_SIZE) else { continue };
+        if b.len() < WAYPOINT_SIZE || b[0] != 1 || b[1..8].iter().any(|v| *v != 0) {
+            continue;
+        }
+        let p = (le_i64(&b, 8) as f64 / METERS, le_i64(&b, 16) as f64 / METERS, le_i64(&b, 24) as f64 / METERS);
+        if p.0.abs() < 40_000.0 && p.2.abs() < 40_000.0 && p.1.abs() < 6_000.0 && (p.0 != 0.0 || p.2 != 0.0) {
+            found.push(p);
+        }
+    }
+    if found.len() == 1 { found.pop() } else { None }
+}
+
+fn current_height(manager: usize, entity: u32) -> Option<f64> {
+    transform_of(manager, entity).map(|t| le_i64(&t, 8) as f64 / METERS)
+}
+
+/// Runs inside the game's own admin system, on the game thread, right before the system looks for
+/// the teleport request of each player. A request the game consumed last time is put back to what
+/// the player's own game sent, then the pending requests are handed to the game.
+pub fn admin_tick() {
+    let manager = SERVER_MGR.load(Ordering::SeqCst);
+    if manager == 0 {
+        return;
+    }
+    let sent: Vec<TeleportSent> = TELEPORT_SENT.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+    let mut again = Vec::new();
+    for item in sent {
+        let Some((_, _, slots)) = entity_layout(manager, item.job.entity) else { continue };
+        let (Some(input), Some(consumed)) = (
+            slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE),
+            slots.iter().find(|s| s.stride == CONSUMED_INPUT_SIZE),
+        ) else {
+            continue;
+        };
+        let taken = read_bytes(consumed.addr + CONSUMED_ADMIN_AT, 4).map(|b| u32_at(&b, 0) == item.written).unwrap_or(false);
+        let original = u32_at(&item.block, ADMIN_VERSION_AT - ADMIN_BLOCK_AT);
+        write_bytes(input.addr + ADMIN_BLOCK_AT, &item.block);
+        write_bytes(consumed.addr + CONSUMED_ADMIN_AT, &original.to_le_bytes());
+        if taken {
+            log(&format!("teleport: the game took the request for entity {}", item.job.entity));
+        } else if item.job.tries < 3 {
+            let mut job = item.job.clone();
+            job.tries += 1;
+            again.push(job);
+        } else {
+            log(&format!("teleport: the game did not take the request for entity {}", item.job.entity));
+        }
+    }
+    let mut jobs: Vec<TeleportJob> = TELEPORT_JOBS.lock().map(|mut j| std::mem::take(&mut *j)).unwrap_or_default();
+    jobs.extend(again);
+    for job in jobs {
+        let Some((_, _, slots)) = entity_layout(manager, job.entity) else {
+            log(&format!("teleport: entity {} is not in the world", job.entity));
+            continue;
+        };
+        let (Some(input), Some(consumed)) = (
+            slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE),
+            slots.iter().find(|s| s.stride == CONSUMED_INPUT_SIZE),
+        ) else {
+            log(&format!("teleport: entity {} has no player input", job.entity));
+            continue;
+        };
+        let Some(block) = read_bytes(input.addr + ADMIN_BLOCK_AT, ADMIN_BLOCK_SIZE).filter(|b| b.len() == ADMIN_BLOCK_SIZE) else { continue };
+        let Some(seen) = read_bytes(consumed.addr + CONSUMED_ADMIN_AT, 4).filter(|b| b.len() == 4) else { continue };
+        let mut target = job.at;
+        if job.waypoint {
+            match waypoint_position(&slots) {
+                Some((x, y, z)) => target = [Some(x), if y.abs() > 0.5 { Some(y) } else { None }, Some(z)],
+                None => {
+                    log(&format!("teleport: no marker is set on the game map for entity {}", job.entity));
+                    continue;
+                }
+            }
+        }
+        let (Some(x), Some(z)) = (target[0], target[2]) else { continue };
+        let (y, known) = match target[1] {
+            Some(y) => (y + TELEPORT_HEIGHT_MARGIN, true),
+            None => (current_height(manager, job.entity).unwrap_or(0.0) + TELEPORT_UNKNOWN_RISE, false),
+        };
+        let version = u32_at(&seen, 0).wrapping_add(1);
+        let mut out = vec![0u8; ADMIN_BLOCK_SIZE];
+        out[0..4].copy_from_slice(&(x as f32).to_le_bytes());
+        out[4..8].copy_from_slice(&(y as f32).to_le_bytes());
+        out[8..12].copy_from_slice(&(z as f32).to_le_bytes());
+        out[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+        out[28..32].copy_from_slice(&1.0f32.to_le_bytes());
+        out[32] = 1;
+        out[36..40].copy_from_slice(&version.to_le_bytes());
+        if !write_bytes(input.addr + ADMIN_BLOCK_AT, &out) {
+            log(&format!("teleport: could not hand the request to the game for entity {}", job.entity));
+            continue;
+        }
+        log(&format!(
+            "teleport: entity {} asked to go to x={x:.1} y={y:.1} z={z:.1} (height {})",
+            job.entity,
+            if known { "known" } else { "estimated, the game looks for the ground" }
+        ));
+        if let Ok(mut list) = TELEPORT_SENT.lock() {
+            list.push(TeleportSent { job: job.clone(), block, written: version });
+        }
+        let (entity, m) = (job.entity, manager);
+        let _ = std::thread::Builder::new().name("m182-teleport-check".into()).spawn(move || {
+            for wait in [1500u64, 6000] {
+                std::thread::sleep(Duration::from_millis(wait));
+                if let Some(t) = transform_of(m, entity) {
+                    log(&format!(
+                        "teleport check: entity {entity} at x={:.1} y={:.1} z={:.1}",
+                        le_i64(&t, 0) as f64 / METERS,
+                        le_i64(&t, 8) as f64 / METERS,
+                        le_i64(&t, 16) as f64 / METERS
+                    ));
+                }
+            }
+        });
+    }
+}
+
 fn run_command(st: &mut PowerState, dir: &std::path::Path) {
     let path = dir.join(COMMAND_FILE);
     let Ok(text) = std::fs::read_to_string(&path) else { return };
@@ -2279,78 +2422,39 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
             }
         }
         "teleport" => {
-            if via_chat {
-                log("command teleport ignored: a server cannot move a character, the player's own game does it");
+            let server = SERVER_MGR.load(Ordering::SeqCst);
+            if server == 0 {
+                log("command teleport: this game is not running the world, the server does it");
                 return;
             }
-            let Some((manager, id)) = world_pair() else {
+            let entity = if via_chat { ((requester - 1) & 0x3f) + 1 } else { PLAYER_ID.load(Ordering::SeqCst) };
+            if entity == 0 {
                 log("command teleport: the character is not known yet");
                 return;
-            };
-            let Some(at) = cmd.at else {
-                log("command teleport: missing destination");
-                return;
-            };
-            let finite = |v: Option<f64>| v.filter(|x| x.is_finite() && x.abs() < 1.0e6);
-            let (Some(x), Some(z)) = (finite(at[0]), finite(at[2])) else {
-                log("command teleport: invalid destination");
-                return;
-            };
-            let current_y = player_transform().map(|t| le_i64(&t, 8)).unwrap_or(0);
-            let known = finite(at[1]);
-            let hint = finite(cmd.ground);
-            let y = match known {
-                Some(y) => metres(y + 1.0),
-                None => {
-                    let base = current_y.saturating_add(metres(150.0));
-                    match hint {
-                        Some(g) => base.max(metres(g + 120.0)),
-                        None => base,
-                    }
-                }
-            };
-            let ok = set_player_position(manager, id, [Some(metres(x)), Some(y), Some(metres(z))]);
-            if let Some(t) = player_transform() {
-                set_client_position(&t, [Some(metres(x)), Some(y), Some(metres(z))]);
             }
-            log(&format!(
-                "command: teleport to x={x:.1} y={:.1} z={z:.1} (written={ok}, height_known={})",
-                y as f64 / METERS,
-                known.is_some()
-            ));
+            let waypoint = cmd.to.as_deref() == Some("waypoint");
+            let finite = |v: Option<f64>| v.filter(|x| x.is_finite() && x.abs() < 1.0e6);
+            let mut at = [None; 3];
+            if !waypoint {
+                let Some(given) = cmd.at else {
+                    log("command teleport: missing destination");
+                    return;
+                };
+                let (Some(x), Some(z)) = (finite(given[0]), finite(given[2])) else {
+                    log("command teleport: invalid destination");
+                    return;
+                };
+                at = [Some(x), finite(given[1]), Some(z)];
+            }
+            let now = Instant::now();
+            queue_teleport(TeleportJob { entity, at, waypoint, queued: now, tries: 0 });
+            if via_chat {
+                st.entity_protect.insert(entity, now + TELEPORT_PROTECTION);
+            } else {
+                st.protect_until = Some(now + TELEPORT_PROTECTION);
+            }
             st.hover = None;
             st.last_written = None;
-            let now = Instant::now();
-            if known.is_none() && !st.powers.fly {
-                set_gravity(st, false);
-                st.gravity_off = true;
-                st.tp = Some(Tp {
-                    stage: TpStage::Hold,
-                    x: metres(x),
-                    y,
-                    z: metres(z),
-                    until: now + Duration::from_secs(4),
-                    since: now,
-                    last_y: y,
-                    last_change: now,
-                    last_sample: now,
-                });
-            } else {
-                st.tp = None;
-            }
-            st.protect_until = Some(now + Duration::from_secs(8));
-            let verify = std::thread::Builder::new().name("m182-teleport-check".into()).spawn(move || {
-                std::thread::sleep(Duration::from_millis(500));
-                if let Some(t) = player_transform() {
-                    log(&format!(
-                        "teleport check: player now at x={:.1} y={:.1} z={:.1}",
-                        le_i64(&t, 0) as f64 / METERS,
-                        le_i64(&t, 8) as f64 / METERS,
-                        le_i64(&t, 16) as f64 / METERS
-                    ));
-                }
-            });
-            let _ = verify;
         }
         "item_stats" => {
             if let Err(e) = std::thread::Builder::new().name("m182-item-stats".into()).spawn(move || run_item_stats(cmd)) {
@@ -2957,56 +3061,6 @@ fn diagnostics(st: &mut PowerState, manager: usize, id: u32, client: Option<(usi
     }
 }
 
-fn tp_step(st: &mut PowerState, manager: usize, id: u32) {
-    let Some(mut tp) = st.tp.take() else { return };
-    if st.powers.fly {
-        st.protect_until = Some(Instant::now() + Duration::from_secs(4));
-        return;
-    }
-    let now = Instant::now();
-    match tp.stage {
-        TpStage::Hold => {
-            if let Some(t) = player_transform() {
-                let pos = [Some(tp.x), Some(tp.y), Some(tp.z)];
-                set_player_position(manager, id, pos);
-                set_client_position(&t, pos);
-            }
-            if now >= tp.until {
-                set_gravity(st, true);
-                st.gravity_off = false;
-                tp.stage = TpStage::Fall;
-                tp.since = now;
-                tp.last_change = now;
-                tp.last_sample = now;
-                if let Some(t) = player_transform() {
-                    tp.last_y = le_i64(&t, 8);
-                }
-                log("teleport: terrain loaded, descending");
-            }
-            st.tp = Some(tp);
-        }
-        TpStage::Fall => {
-            if now.duration_since(tp.last_sample) >= Duration::from_millis(100) {
-                tp.last_sample = now;
-                if let Some(t) = player_transform() {
-                    let y = le_i64(&t, 8);
-                    if (y - tp.last_y).abs() > metres(0.15) {
-                        tp.last_y = y;
-                        tp.last_change = now;
-                    }
-                }
-            }
-            let landed = now.duration_since(tp.last_change) > Duration::from_millis(1200) && now.duration_since(tp.since) > Duration::from_millis(1500);
-            if landed || now.duration_since(tp.since) > Duration::from_secs(40) {
-                st.protect_until = Some(now + Duration::from_secs(4));
-                log(&format!("teleport: landed at y={:.1}", tp.last_y as f64 / METERS));
-            } else {
-                st.tp = Some(tp);
-            }
-        }
-    }
-}
-
 static CLIENT_GONE_MS: AtomicU32 = AtomicU32::new(12_000);
 
 pub fn set_client_gone_ms(ms: u32) {
@@ -3110,12 +3164,21 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     let client = client_pair();
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
-    if st.powers.god || protected || st.tp.is_some() {
+    if st.powers.god || protected {
         want.push((manager, id));
         if let Some(pair) = client {
             want.push(pair);
         }
     }
+    let now = Instant::now();
+    st.entity_protect.retain(|_, until| now < *until);
+    for entity in st.entity_protect.keys() {
+        let pair = (SERVER_MGR.load(Ordering::SeqCst), *entity);
+        if !want.contains(&pair) {
+            want.push(pair);
+        }
+    }
+    teleport_watchdog();
     for (client_number, c) in &st.client_powers {
         if c.powers.god {
             let entity = (client_number & 0x3f) + 1;
@@ -3164,9 +3227,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
         diagnostics(st, manager, id, client);
     }
-    if st.tp.is_some() {
-        tp_step(st, manager, id);
-    }
     if st.powers.fly {
         if !st.gravity_off {
             st.gravity_off = true;
@@ -3180,7 +3240,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
         hold_flying_state(st);
         fly_step(st, manager, id);
-    } else if st.gravity_off && st.tp.is_none() {
+    } else if st.gravity_off {
         st.gravity_off = false;
         set_gravity(st, true);
         st.last_written = None;
@@ -3258,7 +3318,7 @@ pub fn new_power_state() -> PowerState {
         groups: GroupState::new(),
         saved: HashMap::new(),
         zone_ids: Vec::new(),
-        tp: None,
+        entity_protect: HashMap::new(),
         diag_left: 12,
         diag_last: None,
         spawners: SpawnerSet::default(),
@@ -3715,7 +3775,6 @@ struct SpawnerDef {
     id: String,
     name: String,
     template: String,
-    loot: Vec<LootEntry>,
     level: u32,
     count: u32,
     health: u32,
@@ -3832,7 +3891,6 @@ fn issue_spawn(rt: &SpawnerRt, need: u32) {
     if let Ok(mut g) = REQUEST_GIVE.lock() {
         *g = None;
     }
-    set_request_loot(&d.loot);
     if let Ok(mut r) = REQUEST_AT.lock() {
         *r = d.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
     }
@@ -3969,7 +4027,7 @@ fn powers_loop() {
             || st.powers.stamina
             || st.powers.fly
             || st.heal_once
-            || st.tp.is_some()
+            || !st.entity_protect.is_empty()
             || !st.saved.is_empty()
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
