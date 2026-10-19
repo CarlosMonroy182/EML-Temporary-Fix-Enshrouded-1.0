@@ -817,6 +817,12 @@ pub fn facing_direction(transform: &[u8]) -> (f64, f64) {
 }
 
 static HOSTING: AtomicU8 = AtomicU8::new(2);
+static SERVER_PLAYER_MS: AtomicU64 = AtomicU64::new(0);
+const WORLD_PAIR_MS: u64 = 45_000;
+
+pub fn drop_stale_world(client_manager: usize, previous_client: usize, now: u64, server_player_ms: u64) -> bool {
+    previous_client != client_manager && server_player_ms.saturating_add(WORLD_PAIR_MS) < now
+}
 
 fn write_mode() {
     let hosting = if SERVER_MGR.load(Ordering::SeqCst) != 0 {
@@ -1169,7 +1175,11 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     }
     if !server {
         if edx == 1 && head[4..20] == GUID_PLAYER {
-            CLIENT_MGR.store(manager, Ordering::SeqCst);
+            let previous_client = CLIENT_MGR.swap(manager, Ordering::SeqCst);
+            if drop_stale_world(manager, previous_client, now_ms(), SERVER_PLAYER_MS.load(Ordering::SeqCst)) && SERVER_MGR.swap(0, Ordering::SeqCst) != 0 {
+                PLAYER_ID.store(0, Ordering::SeqCst);
+                log("the world this game hosted is gone; now connected to a remote server");
+            }
             CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
             log(&format!("client player entity id={ret} mgr={manager:#x}"));
         }
@@ -1185,6 +1195,7 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
         if primary {
             PLAYER_ID.store(ret, Ordering::SeqCst);
             SERVER_MGR.store(manager, Ordering::SeqCst);
+            SERVER_PLAYER_MS.store(now_ms(), Ordering::SeqCst);
         }
         track_player(manager, ret);
         log(&format!("player entity id={ret} mgr={manager:#x} primary={primary}"));
