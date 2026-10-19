@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -115,6 +115,7 @@ pub fn start() {
     }
     let _ = CLOCK.get_or_init(Instant::now);
     log("spawner enabled");
+    let _ = std::fs::remove_file("m182_mode.json");
     if let Err(e) = std::thread::Builder::new().name("m182-spawner-keys".into()).spawn(key_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start hotkey thread");
     }
@@ -188,6 +189,7 @@ fn key_loop() {
 
         if last_file.elapsed() >= Duration::from_secs(1) {
             last_file = Instant::now();
+            write_mode();
             if let Some(t) = player_transform() {
                 let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
                 if file_pos != Some(pos) {
@@ -812,6 +814,27 @@ pub fn facing_direction(transform: &[u8]) -> (f64, f64) {
     }
     let axis = FACE_AXES[(FACE_CHOSEN.load(Ordering::SeqCst) as usize).min(3)];
     horizontal(rotate(quat_of(transform), axis)).unwrap_or((0.0, 1.0))
+}
+
+static HOSTING: AtomicU8 = AtomicU8::new(2);
+
+fn write_mode() {
+    let hosting = if SERVER_MGR.load(Ordering::SeqCst) != 0 {
+        1
+    } else if CLIENT_MGR.load(Ordering::SeqCst) != 0 {
+        0
+    } else {
+        return;
+    };
+    if HOSTING.swap(hosting, Ordering::SeqCst) == hosting {
+        return;
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let tmp = dir.join("m182_mode.json.tmp");
+    if std::fs::write(&tmp, format!("{{\"hosting\":{}}}", hosting == 1)).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("m182_mode.json"));
+    }
+    log(&format!("mode: {}", if hosting == 1 { "this game hosts the world" } else { "connected to a remote server" }));
 }
 
 pub fn write_position(pos: (i64, i64, i64)) {

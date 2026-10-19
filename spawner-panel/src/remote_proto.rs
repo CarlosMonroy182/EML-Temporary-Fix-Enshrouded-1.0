@@ -1,11 +1,18 @@
-//! Chat lines understood by the server's chat channel (`/m182 <key> ...`).
+//! Chat lines understood by the server's chat channel (`!m182 <key> ...`). File contents travel
+//! as hexadecimal text so the only characters typed are letters, digits and a few separators.
 
 pub const MIN_LIMIT: usize = 80;
 pub const DEFAULT_LIMIT: usize = 200;
 pub const MAX_LIMIT: usize = 900;
 
+pub const PREFIX: &str = "!m182";
+
 fn head(key: &str, command: &str, file: &str) -> String {
-    format!("/m182 {key} {command} {file} ")
+    format!("{PREFIX} {key} {command} {file} ")
+}
+
+fn hex(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
 fn cut(text: &str, from: usize, size: usize) -> usize {
@@ -38,29 +45,29 @@ fn cut(text: &str, from: usize, size: usize) -> usize {
 /// Every chat line needed to write `body` (compact JSON) into `file` on the server.
 pub fn compose(key: &str, file: &str, body: &str, limit: usize) -> Vec<String> {
     let limit = limit.clamp(MIN_LIMIT, MAX_LIMIT);
-    let single = format!("{}{}", head(key, "set", file), body);
+    let single = format!("{}{}", head(key, "setx", file), hex(body));
     if single.len() <= limit {
         return vec![single];
     }
-    let room = limit.saturating_sub(head(key, "add", file).len()).max(16);
+    let room = (limit.saturating_sub(head(key, "addx", file).len()) / 2).max(8);
     let mut lines = Vec::new();
     let mut from = 0;
     while from < body.len() {
         let to = cut(body, from, room);
-        let command = if from == 0 { "put" } else { "add" };
-        lines.push(format!("{}{}", head(key, command, file), &body[from..to]));
+        let command = if from == 0 { "putx" } else { "addx" };
+        lines.push(format!("{}{}", head(key, command, file), hex(&body[from..to])));
         from = to;
     }
-    lines.push(format!("/m182 {key} end {file}"));
+    lines.push(format!("{PREFIX} {key} endx {file}"));
     lines
 }
 
 pub fn pvp(key: &str, on: bool) -> String {
-    format!("/m182 {key} pvp {}", if on { "on" } else { "off" })
+    format!("{PREFIX} {key} pvp {}", if on { "on" } else { "off" })
 }
 
 pub fn ping(key: &str) -> String {
-    format!("/m182 {key} ping")
+    format!("{PREFIX} {key} ping")
 }
 
 pub fn valid_key(key: &str) -> bool {
@@ -71,13 +78,18 @@ pub fn valid_key(key: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn unhex(text: &str) -> String {
+        let bytes: Vec<u8> = (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect();
+        String::from_utf8(bytes).unwrap()
+    }
+
     fn rebuild(lines: &[String]) -> String {
         let mut out = String::new();
         for line in lines {
             let mut parts = line.splitn(5, ' ');
             let (_, _, command, _file) = (parts.next(), parts.next(), parts.next(), parts.next());
-            if matches!(command, Some("put" | "add" | "set")) {
-                out.push_str(parts.next().unwrap());
+            if matches!(command, Some("putx" | "addx" | "setx")) {
+                out.push_str(&unhex(parts.next().unwrap()));
             }
         }
         out
@@ -86,7 +98,10 @@ mod tests {
     #[test]
     fn short_bodies_go_in_one_line() {
         let lines = compose("secret-key", "m182_spawn.request", r#"{"template":"x"}"#, 200);
-        assert_eq!(lines, vec![r#"/m182 secret-key set m182_spawn.request {"template":"x"}"#.to_string()]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("!m182 secret-key setx m182_spawn.request "));
+        assert_eq!(rebuild(&lines), r#"{"template":"x"}"#);
+        assert!(lines[0].chars().all(|c| c.is_ascii_alphanumeric() || " !-_.".contains(c)));
     }
 
     #[test]
@@ -96,8 +111,8 @@ mod tests {
             let lines = compose("secret-key", "m182_zones.json", &body, limit);
             assert!(lines.len() >= 2 || body.len() < limit);
             assert!(lines.iter().all(|l| l.len() <= limit.clamp(MIN_LIMIT, MAX_LIMIT)), "limit {limit}: {:?}", lines.iter().map(|l| l.len()).collect::<Vec<_>>());
-            assert!(lines[0].contains(" put ") || lines.len() == 1);
-            assert!(lines.last().unwrap().ends_with(" end m182_zones.json") || lines.len() == 1);
+            assert!(lines[0].contains(" putx ") || lines.len() == 1);
+            assert!(lines.last().unwrap().ends_with(" endx m182_zones.json") || lines.len() == 1);
             assert_eq!(rebuild(&lines), body, "limit {limit}");
             for l in &lines {
                 let payload = l.splitn(5, ' ').nth(4).unwrap_or("");
@@ -108,9 +123,9 @@ mod tests {
 
     #[test]
     fn small_commands() {
-        assert_eq!(pvp("abcdefg", true), "/m182 abcdefg pvp on");
-        assert_eq!(pvp("abcdefg", false), "/m182 abcdefg pvp off");
-        assert_eq!(ping("abcdefg"), "/m182 abcdefg ping");
+        assert_eq!(pvp("abcdefg", true), "!m182 abcdefg pvp on");
+        assert_eq!(pvp("abcdefg", false), "!m182 abcdefg pvp off");
+        assert_eq!(ping("abcdefg"), "!m182 abcdefg ping");
         assert!(valid_key("abcdef") && !valid_key("abc") && !valid_key("abc def"));
     }
 }

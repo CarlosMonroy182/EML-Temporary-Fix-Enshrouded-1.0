@@ -32,6 +32,14 @@ pub fn scan_tap(scan: u16) -> [Input; 2] {
     [record(scan, KEYEVENTF_SCANCODE), record(scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)]
 }
 
+pub fn scan_down(scan: u16) -> Input {
+    record(scan, KEYEVENTF_SCANCODE)
+}
+
+pub fn scan_up(scan: u16) -> Input {
+    record(scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+}
+
 /// Press and release of one UTF-16 unit typed as text.
 pub fn unit_tap(unit: u16) -> [Input; 2] {
     [record(unit, KEYEVENTF_UNICODE), record(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]

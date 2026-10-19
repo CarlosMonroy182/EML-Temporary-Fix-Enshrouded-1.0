@@ -466,6 +466,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, dir: PathBuf) -> Self {
         theme::install(&cc.egui_ctx);
         let remote_cfg = remote::read_settings(&dir);
+        remote::open_log(&dir);
         remote::configure(remote_cfg.clone());
         let cfg = read_config(&dir);
         let wiki_index = wiki::load(&dir);
@@ -789,6 +790,7 @@ impl App {
         if self.player_checked.elapsed() >= Duration::from_millis(700) {
             self.player_checked = Instant::now();
             self.player = read_player(&self.dir);
+            remote::set_hosting(remote::read_hosting(&self.dir));
         }
         ctx.request_repaint_after(Duration::from_millis(700));
     }
