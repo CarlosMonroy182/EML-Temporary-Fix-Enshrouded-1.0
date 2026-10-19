@@ -14,14 +14,19 @@ pub const PREFIXES: [&str; 2] = ["/m182", "!m182"];
 pub const MIN_KEY_LEN: usize = 6;
 
 /// Files a chat command may write; each one is polled by the native layer.
-pub const FILES: [&str; 6] = [
+pub const FILES: [&str; 7] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
     "m182_zones.json",
     "m182_teams.json",
     "m182_spawners.json",
+    "m182_data.json",
 ];
+
+pub const DATA_FILE: &str = "m182_data.json";
+const DATA_TARGET: [&str; 4] = ["mods", "zz_m182_item_stats", "src", "m182_data.lua"];
+const DATA_LIMIT: usize = 80 * 1024;
 
 const NATIVE_CONFIG: &str = "m182_native.json";
 const MAX_BUFFER: usize = 96 * 1024;
@@ -252,10 +257,31 @@ fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String,
     if body.trim().is_empty() {
         return Err("empty content".to_string());
     }
-    serde_json::from_str::<serde_json::Value>(body).map_err(|e| format!("invalid JSON for {name}: {e}"))?;
+    let value = serde_json::from_str::<serde_json::Value>(body).map_err(|e| format!("invalid JSON for {name}: {e}"))?;
+    if name == DATA_FILE {
+        return write_data(dir, &value);
+    }
     let target = destination(name, client);
     store(dir, &target, body)?;
     Ok(format!("wrote {target} ({} bytes)", body.len()))
+}
+
+fn write_data(dir: &Path, value: &serde_json::Value) -> Result<String, String> {
+    let lua = value.get("lua").and_then(|v| v.as_str()).ok_or_else(|| "m182_data.json needs a \"lua\" text".to_string())?;
+    if lua.len() > DATA_LIMIT {
+        return Err(format!("m182_data.json is too large ({} bytes)", lua.len()));
+    }
+    if !lua.trim_start().starts_with("return") || lua.contains('\0') {
+        return Err("m182_data.json does not hold a data table".to_string());
+    }
+    let mut target = dir.to_path_buf();
+    for part in &DATA_TARGET[..3] {
+        target.push(part);
+    }
+    std::fs::create_dir_all(&target).map_err(|e| format!("cannot create the mod folder: {e}"))?;
+    let name = DATA_TARGET[3];
+    store(&target, name, lua)?;
+    Ok(format!("wrote {} ({} bytes); it applies when the server starts", DATA_TARGET.join("/"), lua.len()))
 }
 
 fn store(dir: &Path, name: &str, body: &str) -> Result<(), String> {

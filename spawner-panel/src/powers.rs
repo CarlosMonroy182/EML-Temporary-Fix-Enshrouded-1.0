@@ -32,10 +32,6 @@ impl PowersState {
         if let Some(v) = std::fs::read_to_string(dir.join(POWERS_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
             s.god = v.get("god").and_then(|x| x.as_bool()).unwrap_or(false);
             s.stamina = v.get("stamina").and_then(|x| x.as_bool()).unwrap_or(false);
-            s.fly = v.get("fly").and_then(|x| x.as_bool()).unwrap_or(false);
-            if let Some(f) = v.get("fly_speed").and_then(|x| x.as_f64()) {
-                s.fly_speed = (f as f32).clamp(2.0, 60.0);
-            }
         }
         s
     }
@@ -44,7 +40,7 @@ impl PowersState {
         json!({
             "god": self.god,
             "stamina": self.stamina,
-            "fly": self.fly,
+            "fly": false,
             "fly_speed": self.fly_speed,
         })
     }
@@ -90,11 +86,6 @@ impl App {
         let mut changed = false;
         changed |= ui.checkbox(&mut self.powers.god, "Modo dios: la vida se mantiene llena").changed();
         changed |= ui.checkbox(&mut self.powers.stamina, "Stamina y maná infinitos").changed();
-        changed |= ui.checkbox(&mut self.powers.fly, "Volar: Espacio sube, Ctrl izquierdo baja").changed();
-        ui.add_enabled_ui(self.powers.fly, |ui| {
-            label_title(ui, "VELOCIDAD DE VUELO (metros por segundo)");
-            changed |= ui.add(egui::Slider::new(&mut self.powers.fly_speed, 2.0..=60.0).fixed_decimals(0)).changed();
-        });
         if changed {
             self.save_powers();
         }

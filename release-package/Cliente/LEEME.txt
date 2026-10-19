@@ -16,8 +16,9 @@ USARLO EN TU PARTIDA (local) Y EN TU SERVIDOR
 El panel detecta solo si estas en tu partida o en el servidor. No hay casillas que marcar.
 - En tu partida local todo se aplica directamente.
 - En el servidor (Dathost) debe estar instalada la carpeta "Servidor" (ver su LEEME); la clave ya coincide. El panel escribe por ti en el chat del juego (mensajes que empiezan por !m182) y el servidor los oculta al resto de jugadores. Mientras envia, no toques el teclado ni el chat; el envio de un pedido dura unos segundos.
-- Al entrar al servidor el panel reenvia solo tus poderes, zonas, equipos y spawners y pregunta quien esta conectado. El boton "Reenviar todo" (bajo el titulo) lo repite cuando quieras.
-- Teletransporte, vuelo, vida y energia infinitas actuan sobre tu personaje en pantalla; el servidor tambien aplica tu modo dios y tu energia.
+- Zonas, bases, equipos, apariciones, PvP y ajustes viven en el servidor: el panel solo le manda los cambios cuando los haces. Siguen funcionando aunque tu te desconectes. Al entrar el panel solo reenvia tus poderes personales (modo dios y energia) y pregunta quien esta conectado. El boton "Reenviar todo" (bajo el titulo) vuelve a enviar todo lo demas cuando quieras.
+- El teletransporte actua sobre tu personaje en pantalla; el servidor aplica tu modo dios y tu energia mientras estas conectado.
+- El vuelo se quito del panel por ahora.
 
 ZONAS Y BASES (pestaña "Zonas y bases")
 - Zona segura: nadie pierde vida dentro.
@@ -35,8 +36,8 @@ ARMAS UNICAS (cada arma distinta)
 LIMITES (sinceridad)
 - Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
 - Las respuestas del servidor solo llegan para la lista de jugadores. Si algo no aparece, revisa m182_spawner.log del servidor.
-- Sin confirmar todavia: el botin de enemigos invocados por comando con los niveles subidos. Si no suelta botin, mandame m182_spawner.log (cliente y servidor).
-- Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes, reinicia. Para el servidor, sube tambien la carpeta mods\zz_m182_item_stats de tu juego a la del servidor y reinicialo.
+- Botin: el control "Botin" de Criaturas define cuantos objetos suelta cada criatura invocada (0 = ninguno). Los suelta el propio M182 en el suelo, donde muere la criatura, porque el botin normal de las criaturas invocadas no se pudo abrir. Sin confirmar en el juego real: si no aparece, mandame m182_spawner.log (cliente y servidor).
+- Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. Ya no hay que subir nada por FTP.
 
 DESINSTALAR
 Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.

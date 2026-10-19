@@ -467,6 +467,7 @@ fn keeper_loop() {
     loop {
         std::thread::sleep(Duration::from_millis(150));
         let _ = std::panic::catch_unwind(keeper_pass);
+        let _ = std::panic::catch_unwind(loot_pass);
     }
 }
 
@@ -512,6 +513,198 @@ struct Request {
     item_amount: Option<u32>,
     item_guid: Option<String>,
     stats: Option<StatsPatch>,
+    loot: Option<Vec<LootEntry>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LootEntry {
+    template: String,
+    item: u32,
+    guid: String,
+    level: u32,
+    rarity: u32,
+    amount: u32,
+}
+
+const LOOT_MAX_ENTRIES: usize = 12;
+const GENERIC_PICKUP: &str = "c15a5c9d-4956-49ff-9d72-9f522229cf1c";
+
+#[derive(Debug, Clone, Copy)]
+struct LootSpec {
+    template: [u8; 16],
+    give: GiveSpec,
+}
+
+fn loot_specs(entries: &[LootEntry]) -> Vec<LootSpec> {
+    let fallback = super::config::parse_guid(GENERIC_PICKUP).unwrap_or([0u8; 16]);
+    entries
+        .iter()
+        .filter(|e| e.item != 0)
+        .take(LOOT_MAX_ENTRIES)
+        .map(|e| LootSpec {
+            template: super::config::parse_guid(e.template.trim()).unwrap_or(fallback),
+            give: GiveSpec {
+                item: e.item,
+                level: e.level.clamp(1, 255),
+                rarity: e.rarity.min(4),
+                amount: e.amount.clamp(1, 65535),
+                guid: super::config::parse_guid(e.guid.trim()).unwrap_or([0u8; 16]),
+            },
+        })
+        .collect()
+}
+
+static REQUEST_LOOT: Mutex<Vec<LootSpec>> = Mutex::new(Vec::new());
+
+struct LootWatch {
+    manager: usize,
+    id: u32,
+    drops: Vec<LootSpec>,
+    seen_alive: bool,
+    dead: u8,
+    missing: u8,
+    last: Option<[i64; 3]>,
+}
+
+struct DropJob {
+    at: [i64; 3],
+    drops: Vec<LootSpec>,
+}
+
+static LOOT_WATCHES: Mutex<Vec<LootWatch>> = Mutex::new(Vec::new());
+static DROP_JOBS: Mutex<Vec<DropJob>> = Mutex::new(Vec::new());
+static DROP_PENDING: AtomicU32 = AtomicU32::new(0);
+const LOOT_WATCH_LIMIT: usize = 400;
+
+fn set_request_loot(entries: &[LootEntry]) {
+    if let Ok(mut l) = REQUEST_LOOT.lock() {
+        *l = loot_specs(entries);
+    }
+}
+
+fn watch_loot(manager: usize, id: u32, drops: Vec<LootSpec>) {
+    if drops.is_empty() {
+        return;
+    }
+    let Ok(mut list) = LOOT_WATCHES.lock() else { return };
+    list.retain(|w| !(w.manager == manager && w.id == id));
+    list.push(LootWatch { manager, id, drops, seen_alive: false, dead: 0, missing: 0, last: None });
+    if list.len() > LOOT_WATCH_LIMIT {
+        let extra = list.len() - LOOT_WATCH_LIMIT;
+        list.drain(0..extra);
+    }
+}
+
+fn position_of(manager: usize, id: u32) -> Option<[i64; 3]> {
+    let t = transform_of(manager, id)?;
+    if t.len() < 24 {
+        return None;
+    }
+    Some([le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)])
+}
+
+pub fn loot_pass() {
+    let current = SERVER_MGR.load(Ordering::SeqCst);
+    let Ok(mut list) = LOOT_WATCHES.lock() else { return };
+    list.retain(|w| w.manager == current);
+    let mut done: Vec<usize> = Vec::new();
+    for (index, w) in list.iter_mut().enumerate() {
+        match health_now(w.manager, w.id) {
+            None => {
+                w.missing = w.missing.saturating_add(1);
+                if w.missing >= 60 {
+                    done.push(index);
+                }
+            }
+            Some(0) if w.seen_alive => {
+                w.missing = 0;
+                w.dead = w.dead.saturating_add(1);
+                if let Some(p) = position_of(w.manager, w.id) {
+                    w.last = Some(p);
+                }
+                if w.dead >= 2 {
+                    if let Some(at) = w.last {
+                        if let Ok(mut jobs) = DROP_JOBS.lock() {
+                            jobs.push(DropJob { at, drops: w.drops.clone() });
+                            DROP_PENDING.store(1, Ordering::SeqCst);
+                        }
+                        log(&format!("loot: creature {} died, {} item(s) will be dropped", w.id, w.drops.len()));
+                    } else {
+                        log(&format!("loot: creature {} died but its position is unknown", w.id));
+                    }
+                    done.push(index);
+                }
+            }
+            Some(0) => {
+                w.missing = 0;
+            }
+            Some(_) => {
+                w.missing = 0;
+                w.dead = 0;
+                w.seen_alive = true;
+                if let Some(p) = position_of(w.manager, w.id) {
+                    w.last = Some(p);
+                }
+            }
+        }
+    }
+    for index in done.into_iter().rev() {
+        list.remove(index);
+    }
+}
+
+fn create_pickup(manager: usize, template: [u8; 16], at: [i64; 3], g: &GiveSpec) -> u32 {
+    let mut transform = [0u8; TRANSFORM_SIZE];
+    write_u64(&mut transform, 0, at[0] as u64);
+    write_u64(&mut transform, 8, at[1] as u64);
+    write_u64(&mut transform, 16, at[2] as u64);
+    transform[36..40].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[40..44].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[44..48].copy_from_slice(&1.0f32.to_le_bytes());
+    transform[48..52].copy_from_slice(&1.0f32.to_le_bytes());
+    let mut pickup = [0u8; PICKUP_ITEM_SIZE];
+    pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
+    pickup[4..20].copy_from_slice(&g.guid);
+    pickup[20..24].copy_from_slice(&g.level.to_le_bytes());
+    pickup[24] = g.rarity as u8;
+    pickup[26..28].copy_from_slice(&(g.amount as u16).to_le_bytes());
+    let mut entries = Block([0u8; 0x100]);
+    write_u32(&mut entries.0, 0, HASH_CURRENT_TRANSFORM);
+    write_u64(&mut entries.0, 8, transform.as_ptr() as u64);
+    write_u64(&mut entries.0, 16, TRANSFORM_SIZE as u64);
+    write_u32(&mut entries.0, 24, HASH_PICKUP_ITEM);
+    write_u64(&mut entries.0, 32, pickup.as_ptr() as u64);
+    write_u64(&mut entries.0, 40, PICKUP_ITEM_SIZE as u64);
+    let mut desc = Block([0u8; 0x100]);
+    desc.0[4..20].copy_from_slice(&template);
+    write_u64(&mut desc.0, 0x18, entries.0.as_ptr() as u64);
+    write_u64(&mut desc.0, 0x20, 2);
+    original_create(manager, 0, desc.0.as_ptr() as usize, 0)
+}
+
+fn run_drops(manager: usize) {
+    if DROP_PENDING.swap(0, Ordering::SeqCst) == 0 {
+        return;
+    }
+    let jobs: Vec<DropJob> = match DROP_JOBS.lock() {
+        Ok(mut j) => std::mem::take(&mut *j),
+        Err(_) => return,
+    };
+    for job in jobs {
+        let n = job.drops.len().max(1);
+        for (k, spec) in job.drops.iter().enumerate() {
+            let (dx, dz) = if n == 1 {
+                (0, 0)
+            } else {
+                let angle = std::f64::consts::TAU * k as f64 / n as f64;
+                ((0.9 * angle.cos() * METERS) as i64, (0.9 * angle.sin() * METERS) as i64)
+            };
+            let at = [job.at[0].wrapping_add(dx), job.at[1].saturating_add((0.4 * METERS) as i64), job.at[2].wrapping_add(dz)];
+            let id = create_pickup(manager, spec.template, at, &spec.give);
+            log(&format!("loot: item {} x{} level {} placed as entity {id}", spec.give.item, spec.give.amount, spec.give.level));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -583,6 +776,7 @@ pub fn poll_request() {
             guid: req.item_guid.as_deref().and_then(super::config::parse_guid).unwrap_or([0u8; 16]),
         });
     }
+    set_request_loot(req.loot.as_deref().unwrap_or(&[]));
     REQUEST_OBJECT.store(req.object.unwrap_or(false), Ordering::SeqCst);
     REQUEST_FORWARD.store(req.forward.unwrap_or(false), Ordering::SeqCst);
     if let Ok(mut r) = REQUEST_AT.lock() {
@@ -1153,7 +1347,7 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && DROP_PENDING.load(Ordering::Relaxed) == 0 {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1166,6 +1360,7 @@ pub fn before(manager: usize, edx: u32) {
         spawn_now(manager);
     }
     run_aura_queue(manager);
+    run_drops(manager);
     BUSY.store(false, Ordering::SeqCst);
 }
 
@@ -1447,6 +1642,7 @@ fn spawn_now(manager: usize) {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
     }
     let give = REQUEST_GIVE.lock().ok().and_then(|mut g| g.take());
+    let loot: Vec<LootSpec> = REQUEST_LOOT.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default();
     let delivery = give.is_some();
     let mut settings = settings;
     if delivery {
@@ -1525,6 +1721,7 @@ fn spawn_now(manager: usize) {
         }
         if id != 0 && !object {
             start_stats(manager, id, settings.health, settings.damage);
+            watch_loot(manager, id, loot.clone());
             if let Some(tag) = &tag {
                 if let Ok(mut created) = CREATED.lock() {
                     created.push((tag.clone(), id));
@@ -1680,6 +1877,7 @@ struct ClientPowers {
     mana_peak: u32,
     seen: Vec<u32>,
     heal: bool,
+    absent_since: Option<Instant>,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -2809,7 +3007,34 @@ fn tp_step(st: &mut PowerState, manager: usize, id: u32) {
     }
 }
 
+static CLIENT_GONE_MS: AtomicU32 = AtomicU32::new(12_000);
+
+pub fn set_client_gone_ms(ms: u32) {
+    CLIENT_GONE_MS.store(ms, Ordering::SeqCst);
+}
+
+pub fn clear_client_power_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if super::chat::client_of_powers_file(&name).is_some() && std::fs::remove_file(entry.path()).is_ok() {
+            log(&format!("powers: removed {name} left from an earlier run"));
+        }
+    }
+}
+
 fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
+    let gone: Vec<u32> = st
+        .client_powers
+        .iter()
+        .filter(|(_, c)| c.absent_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(CLIENT_GONE_MS.load(Ordering::SeqCst) as u64)))
+        .map(|(client, _)| *client)
+        .collect();
+    for client in gone {
+        st.client_powers.remove(&client);
+        let _ = std::fs::remove_file(dir.join(super::chat::client_powers_file(client)));
+        log(&format!("powers: chat client {client} left, its powers were dropped"));
+    }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut present: Vec<u32> = Vec::new();
     for entry in entries.flatten() {
@@ -2845,8 +3070,10 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
         let id = (client & 0x3f) + 1;
         let Some(c) = st.client_powers.get_mut(&client) else { continue };
         if find_record(manager, id).is_none() {
+            c.absent_since.get_or_insert_with(Instant::now);
             continue;
         }
+        c.absent_since = None;
         if c.heal {
             c.heal = false;
             refill_health(manager, id);
@@ -3488,6 +3715,7 @@ struct SpawnerDef {
     id: String,
     name: String,
     template: String,
+    loot: Vec<LootEntry>,
     level: u32,
     count: u32,
     health: u32,
@@ -3604,6 +3832,7 @@ fn issue_spawn(rt: &SpawnerRt, need: u32) {
     if let Ok(mut g) = REQUEST_GIVE.lock() {
         *g = None;
     }
+    set_request_loot(&d.loot);
     if let Ok(mut r) = REQUEST_AT.lock() {
         *r = d.at.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() < 1.0e6));
     }
@@ -3733,6 +3962,7 @@ fn powers_loop() {
         timeBeginPeriod(1);
     }
     let mut st = new_power_state();
+    clear_client_power_files(&dir);
     let mut tick = 0u32;
     loop {
         let busy = st.powers.god
