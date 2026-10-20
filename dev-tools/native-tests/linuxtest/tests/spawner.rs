@@ -1331,6 +1331,41 @@ fn on_screen_stamina_copy_is_never_touched() {
 }
 
 #[test]
+fn a_game_that_left_its_own_world_stops_acting_as_its_host() {
+    let _g = LOCK.lock().unwrap();
+    let t0 = transform(10 << 32, 20 << 32, 30 << 32);
+    let server = world(1, 3, &t0);
+    let mut client = world(1, 2, &t0);
+    put(&mut client.mem, 8, &[1]);
+    let smgr = server.mem.as_ptr() as usize;
+    let cmgr = client.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(smgr, Ordering::SeqCst);
+    spawner::PLAYER_ID.store(1, Ordering::SeqCst);
+    spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
+    spawner::CLIENT_MGR.store(cmgr, Ordering::SeqCst);
+    spawner::CLIENT_PLAYER_ID.store(1, Ordering::SeqCst);
+    for _ in 0..30 {
+        spawner::check_hosted_world();
+    }
+    assert_eq!(spawner::SERVER_MGR.load(Ordering::SeqCst), smgr, "a world that is still there is kept");
+    let count_at = 0x148 + 0x54;
+    let mut hosted = world(1, 3, &t0);
+    let hmgr = hosted.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(hmgr, Ordering::SeqCst);
+    hosted.mem[count_at..count_at + 4].copy_from_slice(&0u32.to_le_bytes());
+    for _ in 0..9 {
+        spawner::check_hosted_world();
+    }
+    assert_eq!(spawner::SERVER_MGR.load(Ordering::SeqCst), hmgr, "a short gap is not enough");
+    spawner::check_hosted_world();
+    assert_eq!(spawner::SERVER_MGR.load(Ordering::SeqCst), 0, "the world that is gone is forgotten");
+    assert_eq!(spawner::PLAYER_ID.load(Ordering::SeqCst), 0);
+    spawner::CLIENT_MGR.store(0, Ordering::SeqCst);
+    spawner::CLIENT_PLAYER_ID.store(0, Ordering::SeqCst);
+    spawner::TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
+}
+
+#[test]
 fn stamina_follows_the_limit_the_game_sets_under_a_state_instead_of_fighting_it() {
     let _g = LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join(format!("m182_follow_{}", std::process::id()));
