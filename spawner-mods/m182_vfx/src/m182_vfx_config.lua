@@ -1,40 +1,28 @@
 -- M182 VFX - configuracion
 -- Cambia los valores, guarda el archivo y abre el juego. El cambio se aplica al iniciar.
+-- Cambia el efecto que sale al apuntar y cargar un hechizo con el baston.
 --
--- efecto: aura que aparece al cargar un ataque (baston apuntando, espadas, dagas, etc.)
---   "original"         aura original del juego (acepta color)
---   "rayos"            rayos electricos
---   "fuego"            fuego
---   "hielo"            hielo / ventisca
---   "niebla"           niebla del Shroud
---   "luz"              luz sagrada
---   "acido"            acido
---   "hueso"            magia de hueso (acepta color)
---   "llama_arcana"     llama arcana (acepta colores)
---   "curacion"         curacion (acepta colores)
---   "drenaje"          drenaje de mana (acepta colores)
---   "sangre"           magia de sangre (acepta colores)
---   "sol"              aura solar (acepta color)
---   "aura_fuego"       aura de fuego (acepta color)
---   "escudo"           escudo magico (acepta colores)
---   "implosion_rayos"  implosion de rayos (explosion al empezar a cargar)
---   "implosion_fuego"  implosion de fuego
---   "implosion_hielo"  implosion de hielo
---   "implosion_niebla" implosion de niebla
---   "implosion_hueso"  implosion de hueso
---   "explosion_fuego"  explosion de fuego
---   "bola_fuego"       bola de fuego grande
---   "meteoro"          impacto de meteoro
---   "laser"            explosion de laser
---   "artilleria"       explosion de artilleria de jefe (acepta color)
+-- efecto: efecto para todos los hechizos. "original" deja el de cada hechizo.
+--   rayos, rayos_mano, fuego, llama, hielo, escarcha, niebla, maldicion, niebla_muerte,
+--   luz, acido, veneno, hueso, curacion, drenaje, ectoplasma, tentaculos, ardiendo,
+--   aura_fuego, aura_agua, sangre, manos_brillantes, meteorico, aturdido
+--   Aceptan color: llama, escarcha, veneno, hueso, curacion, drenaje, ardiendo,
+--   aura_fuego, aura_agua, sangre, meteorico
 --
 -- color: "" deja el color del efecto. Si no, "#RRGGBB" (ej. "#9B30FF") o un nombre:
 --   rojo, naranja, amarillo, dorado, verde, cian, azul, morado, rosa, magenta, blanco
--- colores: para efectos con varios colores, una lista que reemplaza a "color",
---   ej. colores = { "#FF0000", "#FFFFFF", "#9B30FF" }
+--   Para efectos con varios colores puedes poner una lista: { "#FF0000", "#FFFFFF", "#9B30FF" }
+--   Cada efecto tiene un solo color: si dos hechizos usan el mismo efecto, comparten color.
+--
+-- intensidad: de 1 a 10. Multiplica las particulas del efecto (1 = normal).
+--
+-- hechizos: efecto distinto para cada tipo de hechizo (opcional). Tipos:
+--   fuego, llama, hielo, rayo, niebla, luz, acido, hueso, curacion, drenaje, agua
+--   ej. hechizos = { fuego = "meteorico", hielo = { efecto = "escarcha", color = "cian" } }
 
 return {
-    efecto = "original",
-    color = "morado",
-    colores = {},
+    efecto = "rayos",
+    color = "",
+    intensidad = 3,
+    hechizos = {},
 }
