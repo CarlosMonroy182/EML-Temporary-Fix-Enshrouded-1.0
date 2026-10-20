@@ -223,6 +223,8 @@ EN = {
 "Crear equipo": "Create team",
 "Equipo {}": "Team {}",
 "Esperando al juego…": "Waiting for the game…",
+"En reposo: se activa al acercarte": "Idle: wakes up when a player comes near",
+"Activa en el servidor": "Running on the server",
 "Vivo ({}/{})": "Alive ({}/{})",
 "Vivo (1/1)": "Alive (1/1)",
 "Muerto: reaparece en 3:20": "Dead: respawns in 3:20",

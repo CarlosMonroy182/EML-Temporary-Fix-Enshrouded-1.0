@@ -1054,7 +1054,9 @@ impl App {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
                     ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(14.0));
-                    ui.label(RichText::new(spawners::describe(self.spawner_status.get(&s.id))).color(GOLD_DIM).size(14.5));
+                    let live = self.spawner_status.get(&s.id);
+                    let state = if remote::connected() || (remote::active() && live.is_none()) { "Activa en el servidor".to_string() } else { spawners::describe(live) };
+                    ui.label(RichText::new(state).color(GOLD_DIM).size(14.5));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if button(ui, "Borrar", Vec2::new(70.0, 26.0), true, false) {

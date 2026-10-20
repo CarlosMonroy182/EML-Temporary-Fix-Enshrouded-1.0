@@ -19,6 +19,7 @@ You join the server with the "Client" folder installed, press INSERT and use the
 
 WHAT LIVES ON THE SERVER
 Zones, bases, teams, spawns, PvP and item/level/skill settings are saved in this folder (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json and mods\zz_m182_item_stats\src\m182_data.lua). The server reads them by itself and keeps them even when the administrator is not connected. The panel only sends the changes.
+Spawns only create creatures with a player within 150 m. If one does not show up, m182_spawner.log has "spawners: ... creature ... is at ..." lines with each creature's real position.
 Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
 Personal powers (god mode, energy) only last while that player is connected.
 

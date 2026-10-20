@@ -19,6 +19,7 @@ Tu entras al servidor con la carpeta "Cliente" instalada, pulsas INSERT y usas e
 
 QUE VIVE EN EL SERVIDOR
 Zonas, bases, equipos, apariciones, PvP y ajustes de items/niveles/habilidades se guardan en esta carpeta (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json y mods\zz_m182_item_stats\src\m182_data.lua). El servidor los lee solo y los mantiene aunque el administrador no este conectado. El panel unicamente envia los cambios.
+Las apariciones solo crean criaturas con un jugador a menos de 150 m. Si una no aparece, m182_spawner.log trae las lineas "spawners: ... creature ... is at ..." con la posicion real de cada criatura.
 Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor.
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 

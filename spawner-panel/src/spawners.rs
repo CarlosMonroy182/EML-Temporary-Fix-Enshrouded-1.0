@@ -139,6 +139,7 @@ pub fn describe(live: Option<&Live>) -> String {
         },
         "creando" => "Apareciendo…".to_string(),
         "esperando el mundo" => "Esperando a que cargue el mundo".to_string(),
+        "sin jugadores cerca" => "En reposo: se activa al acercarte".to_string(),
         _ => "Preparando…".to_string(),
     }
 }
@@ -185,6 +186,8 @@ mod tests {
         assert_eq!(describe(st.get("a")), "Vivo (1/1)");
         assert_eq!(describe(st.get("b")), "Muerto: reaparece en 3:20");
         assert_eq!(describe(st.get("c")), "Esperando al juego…");
+        let far = Live { state: "sin jugadores cerca".into(), alive: 0, want: 1, next: None, spawned: 0 };
+        assert_eq!(describe(Some(&far)), "En reposo: se activa al acercarte");
         assert!(parse_status("nonsense").is_empty());
     }
 

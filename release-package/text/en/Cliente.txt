@@ -25,6 +25,7 @@ The panel detects by itself whether you are in your own game or on the server. T
 
 TABS
 - Creatures: summon creatures or create spawns that respawn on their own (at your position or at a saved place), with the level, health and damage you want.
+- Many spawns: you can create 50 or more (up to 20 creatures each). A spawn only creates its creatures when a player is within 150 m; when nobody is near it stays idle, and when someone returns the missing creatures come back at once. That way the server does not carry them all at the same time.
 - Items: give items with level, rarity and amount, and edit their stats. Changing an item's stats changes that item for everyone (applied when the server restarts); "Restore original values" puts it back as in the game.
 - Places: save positions to use for spawns and zones.
 - Admin: god mode, infinite stamina and mana, heal yourself instantly.
