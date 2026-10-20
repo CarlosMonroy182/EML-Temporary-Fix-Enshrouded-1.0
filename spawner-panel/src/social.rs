@@ -193,6 +193,7 @@ pub struct SocialState {
     pub roster_asked: Option<Instant>,
     pub extra: Vec<String>,
     pub extra_input: String,
+    pub me: Option<crate::steam::Account>,
 }
 
 impl Default for SocialState {
@@ -215,6 +216,7 @@ impl Default for SocialState {
             roster_asked: None,
             extra: Vec::new(),
             extra_input: String::new(),
+            me: None,
         }
     }
 }
@@ -315,6 +317,7 @@ impl SocialState {
         if let Ok(text) = std::fs::read_to_string(dir.join(TEAMS_FILE)) {
             s.teams = parse_teams(&text);
         }
+        s.me = crate::steam::local_account(dir);
         s.refresh(dir);
         s
     }
@@ -328,11 +331,21 @@ impl SocialState {
             self.read_roster(dir);
             if !self.roster.is_empty() {
                 self.seen = roster_seen(&self.roster);
+                if let Some(me) = &self.me {
+                    for s in self.seen.iter_mut().filter(|s| s.member.id.is_empty() && s.member.name.trim().eq_ignore_ascii_case(me.name.trim())) {
+                        s.member.platform = "steamid".to_string();
+                        s.member.id = me.id.clone();
+                    }
+                }
             }
         }
         self.manual = crate::remote::active() && self.seen.is_empty();
         if self.manual {
             self.seen = manual_players();
+            if let Some(me) = &self.me {
+                let member = Member { slot: 0, name: me.name.clone(), platform: "steamid".to_string(), id: me.id.clone() };
+                self.seen.insert(0, Seen { member, online: None });
+            }
         }
     }
 
@@ -560,7 +573,10 @@ impl App {
                 self.social.notice = "El servidor no respondió.".to_string();
             }
             if self.social.manual {
-                ui.label(RichText::new("Pulsa «Buscar jugadores del servidor».").color(MUTED));
+                if let Some(me) = &self.social.me {
+                    ui.label(RichText::new(format!("{}  (tú)  ·  Steam {}", me.name, me.id)).font(title_font(17.0)).color(GOLD));
+                }
+                ui.label(RichText::new("Pulsa «Buscar jugadores del servidor» para ver a los demás.").color(MUTED));
             }
         }
         let manual = self.social.manual;
@@ -751,6 +767,22 @@ mod tests {
         assert_eq!(fallback.len(), 2);
         assert_eq!(fallback[0].member.name, "Tú (ID 1)");
     }
+    #[test]
+    fn alone_on_a_server_the_player_is_listed_by_the_steam_name() {
+        let mut state = SocialState::default();
+        state.me = Some(crate::steam::Account { name: "moradoox".into(), id: "76561199474170255".into() });
+        state.manual = true;
+        state.seen = manual_players();
+        let member = Member { slot: 0, name: "moradoox".into(), platform: "steamid".into(), id: "76561199474170255".into() };
+        state.seen.insert(0, Seen { member, online: None });
+        assert_eq!(state.seen[0].member.key(), "steamid:76561199474170255");
+        assert_eq!(state.seen[0].member.id_label(), "Steam 76561199474170255");
+        let teams = vec![Team { name: "Casa".into(), members: vec![state.seen[0].person()] }];
+        assert_eq!(team_numbers(&teams, &state.seen), vec![Vec::<u32>::new()]);
+        let json = teams_json(&teams, &team_numbers(&teams, &state.seen));
+        assert_eq!(json["teams"][0]["people"][0]["name"], "moradoox");
+    }
+
     #[test]
     fn manual_players_give_team_numbers_without_a_player_list() {
         let seen = manual_players();

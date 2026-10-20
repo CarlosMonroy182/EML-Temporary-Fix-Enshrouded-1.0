@@ -133,6 +133,10 @@ fn write_permissions(index: usize, value: u8) -> bool {
 /// Visitors of a protected base cannot open chests or build there. `visitors` holds the table
 /// slots that must be restricted right now; everybody else gets the permissions they came with.
 pub fn apply_visitors(visitors: &[usize]) {
+    if super::patch::permissions_hooked() {
+        hooked_visitors(visitors);
+        return;
+    }
     let current = entries();
     let Ok(mut held) = HELD.lock() else { return };
     held.retain(|(index, h)| current.iter().any(|e| e.index == *index && e.client == h.client));
@@ -168,6 +172,38 @@ pub fn apply_visitors(visitors: &[usize]) {
             (None, false) => {}
         }
     }
+}
+
+static RESTRICTED_NOW: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
+
+fn hooked_visitors(visitors: &[usize]) {
+    let current = entries();
+    let mut mask = 0u64;
+    let mut now: Vec<(usize, u32)> = Vec::new();
+    for entry in &current {
+        if visitors.contains(&entry.index) && entry.index < 64 {
+            mask |= 1u64 << entry.index;
+            now.push((entry.index, entry.client));
+        }
+    }
+    super::patch::restrict_permissions(mask);
+    let Ok(mut before) = RESTRICTED_NOW.lock() else { return };
+    for (index, client) in &now {
+        if !before.contains(&(*index, *client)) {
+            if let Some(entry) = current.iter().find(|e| e.index == *index) {
+                log(&format!("base: {} is a visitor now (chests and building closed)", label(entry)));
+            }
+        }
+    }
+    for (index, client) in before.iter() {
+        if !now.contains(&(*index, *client)) {
+            match current.iter().find(|e| e.index == *index && e.client == *client) {
+                Some(entry) => log(&format!("base: {} is no longer a visitor", label(entry))),
+                None => log(&format!("base: the visitor in slot {index} left")),
+            }
+        }
+    }
+    *before = now;
 }
 
 fn label(e: &Entry) -> String {

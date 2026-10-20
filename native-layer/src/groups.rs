@@ -97,6 +97,11 @@ pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
         .map(|t| {
             let mut names = t.names;
             let ids: Vec<String> = t.people.iter().filter(|p| p.key.starts_with("steamid:")).map(|p| p.key.trim().to_lowercase()).collect();
+            for p in &t.people {
+                if let Some(n) = p.key.strip_prefix("slot:").and_then(|n| n.trim().parse::<u32>().ok()) {
+                    names.push(format!("ID {n}"));
+                }
+            }
             names.extend(t.people.into_iter().map(|p| p.name));
             names.retain(|n| !n.trim().is_empty());
             TeamDef { members: t.members, names, ids }
@@ -109,7 +114,7 @@ pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
 pub fn team_for(teams: &[TeamDef], number: u32, name: Option<&str>, entity: u32) -> u8 {
     for (index, team) in teams.iter().enumerate() {
         let by_name = name.is_some_and(|n| team.names.iter().any(|t| super::roster::same_name(t, n)))
-            || team.names.iter().any(|t| super::roster::placeholder_number(t) == Some(entity) && name.is_none());
+            || team.names.iter().any(|t| super::roster::placeholder_number(t) == Some(entity));
         if by_name {
             return (index + 1).min(255) as u8;
         }
@@ -247,10 +252,20 @@ mod tests {
         assert_eq!(team_for(&teams, 9, Some("Luis"), 6), 2);
         assert_eq!(team_for(&teams, 1, Some("Pedro"), 7), 0, "a stale number must not put a stranger in a team");
         assert_eq!(team_for(&teams, 1, None, 4), 1, "placeholder names stand for the entity number");
+        assert_eq!(team_for(&teams, 1, Some("Pedro"), 4), 1, "a placeholder holds the place even when the real name is known");
         let numbers = parse_team_defs(r#"{"teams":[{"members":[1,3]},{"members":[2]}]}"#);
         assert_eq!(team_for(&numbers, 3, None, 9), 1);
         assert_eq!(team_for(&numbers, 2, Some("x"), 9), 2);
         assert_eq!(team_for(&numbers, 4, None, 9), 0);
+    }
+
+    #[test]
+    fn a_player_kept_by_slot_key_is_found_by_entity_or_by_name() {
+        let teams = parse_team_defs(r#"{"teams":[{"name":"M182","members":[1],"people":[{"key":"slot:1","name":"ID 1"}]},{"name":"B","people":[{"key":"slot:3","name":"moradoox"}]}]}"#);
+        assert_eq!(team_for(&teams, 9, Some("moradoox"), 1), 1);
+        assert_eq!(team_for(&teams, 9, Some("moradoox"), 5), 2);
+        assert_eq!(team_for(&teams, 9, Some("moradoox"), 3), 2);
+        assert_eq!(team_for(&teams, 9, Some("otro"), 4), 0);
     }
 
     #[test]
