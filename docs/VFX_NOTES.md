@@ -6,4 +6,5 @@
 - VFX parameter names are FNV-1a32 hashes (`color` = 1031692888). Parameter type `keen::VfxEffectParameterColor` = 1392743968; value is uint32 0xAABBGGRR.
 - VFX names come from templates: `keen::ecs::VfxComponentResource.vfx` (guid of the VfxResource) in `VFX_Ability_Casting_*`, `Explosion_*`, etc.
 - Offline check: `emm run --patch -g <dir with enshrouded.kfc, .kfc.bak, .kfc_resources, .exe, mods/>` then `kfc-parser unpack -f ba663a7a-ba30-4ed3-8ae8-c6ec1d440304_88d6b534_0`.
-- Not confirmed in the real game: look of each effect on the player Root, that looping effects stop with the charge, server-only install effect.
+- In-game test 1 (rayos, casting VFX with default params): original aura disappeared and nothing rendered. Casting VFX share bool param 422966025 (default 0); presets for casting effects now force it to 1. Notifier-proven explosions added (explosion_fuego, bola_fuego, meteoro, laser, artilleria).
+- Not confirmed in the real game: recolor of the original aura, forced casting bool, explosions through the charge notifier.
