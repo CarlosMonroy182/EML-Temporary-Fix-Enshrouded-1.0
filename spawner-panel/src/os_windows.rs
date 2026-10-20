@@ -177,6 +177,12 @@ impl Sys for Os {
         send(&scan_tap(scan));
     }
 
+    fn hold(&self, scan: u16, ms: u64) {
+        send(&[scan_down(scan)]);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        send(&[scan_up(scan)]);
+    }
+
     fn units(&self, units: &[u16]) {
         let mut batch: Vec<Input> = Vec::with_capacity(units.len() * 4);
         for unit in units {
