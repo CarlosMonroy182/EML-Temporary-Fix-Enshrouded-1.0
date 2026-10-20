@@ -1086,7 +1086,7 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
     let dir = std::env::temp_dir().join(format!("m182_spawners_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let t0 = transform(5i64 << 32, 7i64 << 32, 9i64 << 32);
+    let t0 = transform(110i64 << 32, 5i64 << 32, 205i64 << 32);
     let mut w = world(777, 3, &t0);
     add_component(&mut w, 11, 40, 0x1800);
     let health_at = 0x1800 + 40 * 3;
@@ -1148,6 +1148,66 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
     spawner::power_tick(&mut st, &dir, 128);
     let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
     assert!(!status.contains("s1"), "{status}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn spawners_are_created_only_when_a_player_is_near() {
+    let _g = LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("m182_spawners_near_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let t0 = transform(12i64 << 32, 5i64 << 32, 9i64 << 32);
+    let mut w = world(777, 3, &t0);
+    add_component(&mut w, 11, 40, 0x1800);
+    let health_at = 0x1800 + 40 * 3;
+    put(&mut w.chunk, health_at, &resource_bytes(0x8eb8_4995, [300, 0, 300, 0, 0, 0, 0, 300]));
+    let mgr = w.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawner::PLAYER_ID.store(777, Ordering::SeqCst);
+    spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
+    config::LIVE.apply(&config::NativeConfig { spawner: true, ..Default::default() });
+    spawn_probe::set_trampoline(fake_create as usize);
+    spawner::before(mgr, 7);
+    SEEN.lock().unwrap().clear();
+    spawner::PENDING.store(0, Ordering::SeqCst);
+    *spawner::REQUEST.lock().unwrap() = None;
+    std::fs::write(
+        dir.join("m182_spawners.json"),
+        r#"{"spawners":[
+            {"id":"far","template":"c3db66d6-89a5-4a6c-a8e3-d9a1f6009812","level":10,"count":1,"health":100,"at":[1000.0,5.0,2000.0],"radius":2.0,"respawn":1},
+            {"id":"near","template":"c3db66d6-89a5-4a6c-a8e3-d9a1f6009812","level":10,"count":1,"health":100,"at":[10.0,5.0,10.0],"radius":2.0,"respawn":1}
+        ]}"#,
+    )
+    .unwrap();
+    let mut st = spawner::new_power_state();
+
+    spawner::power_tick(&mut st, &dir, 16);
+    assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
+    spawner::before(mgr, 7);
+    {
+        let seen = SEEN.lock().unwrap();
+        assert_eq!(seen.len(), 1, "only the spawner next to the player is created");
+        assert_eq!(i64::from_le_bytes(seen[0].3[4..12].try_into().unwrap()), 10i64 << 32);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    spawner::power_tick(&mut st, &dir, 32);
+    let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
+    assert!(status.contains("\"id\":\"far\"") && status.contains("sin jugadores cerca"), "{status}");
+    assert!(status.contains("\"id\":\"near\"") && status.contains("\"alive\":1"), "{status}");
+    assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 0, "nothing is created far from every player");
+
+    // the player walks to the far spawner: it is created now
+    put(&mut w.chunk, 0x200 + 56 * 3, &transform(1030i64 << 32, 5i64 << 32, 2020i64 << 32));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    spawner::power_tick(&mut st, &dir, 48);
+    assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
+    spawner::before(mgr, 7);
+    {
+        let seen = SEEN.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(i64::from_le_bytes(seen[1].3[4..12].try_into().unwrap()), 1000i64 << 32);
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

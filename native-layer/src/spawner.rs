@@ -3615,6 +3615,23 @@ struct SpawnerRt {
     spawned: u32,
     manager: usize,
     state: &'static str,
+    was_active: bool,
+    check_at: Option<Instant>,
+}
+
+const SPAWNER_RANGE_METERS: f64 = 150.0;
+
+fn player_positions(manager: usize) -> Vec<(f64, f64)> {
+    let mut ids: Vec<u32> = TRACKED.lock().map(|list| list.iter().map(|p| p.id).collect()).unwrap_or_default();
+    if let Some((_, id)) = world_pair() {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.into_iter()
+        .filter_map(|id| transform_of(manager, id))
+        .map(|t| (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 16) as f64 / METERS))
+        .collect()
 }
 
 #[derive(Default)]
@@ -3680,7 +3697,7 @@ fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
                 rt.def = def;
                 next.push(rt);
             }
-            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando" }),
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None }),
         }
     }
     set.list = next;
@@ -3731,6 +3748,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         if let Some(rt) = set.list.iter_mut().find(|r| r.def.id == tag) {
             rt.ids.push(id);
             rt.spawned += 1;
+            rt.check_at = Some(now + Duration::from_secs(3));
         }
     }
     if let Some((tag, since)) = set.pending.clone() {
@@ -3755,6 +3773,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
     let ready_world = manager != 0 && player_transform().is_some();
+    let positions = if manager != 0 { player_positions(manager) } else { Vec::new() };
     let busy = set.pending.is_some() || PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true);
     let mut issued: Option<(String, u32)> = None;
     for rt in set.list.iter_mut() {
@@ -3771,14 +3790,45 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.ids.clear();
             rt.missing.clear();
         }
+        let active = match rt.def.at {
+            Some(p) if !positions.is_empty() => positions.iter().any(|(x, z)| ((x - p[0]).powi(2) + (z - p[2]).powi(2)).sqrt() <= SPAWNER_RANGE_METERS),
+            _ => true,
+        };
+        if !active {
+            rt.state = "sin jugadores cerca";
+            rt.was_active = false;
+            continue;
+        }
+        let woke = !rt.was_active;
+        rt.was_active = true;
         let before = rt.ids.len();
         let mut missing = std::mem::take(&mut rt.missing);
         rt.ids.retain(|id| creature_alive(manager, *id, &mut missing));
         rt.missing = missing;
         let respawn = Duration::from_secs(rt.def.respawn.clamp(1, 86_400) as u64);
         if rt.ids.len() < before && rt.respawn_at.is_none() {
-            rt.respawn_at = Some(now + respawn);
-            log(&format!("spawners: {} lost a creature, it comes back in {} s", rt.def.id, respawn.as_secs()));
+            if woke {
+                rt.respawn_at = Some(now);
+                log(&format!("spawners: {} lost {} creature(s) while nobody was near, they come back now", rt.def.id, before - rt.ids.len()));
+            } else {
+                rt.respawn_at = Some(now + respawn);
+                log(&format!("spawners: {} lost a creature, it comes back in {} s", rt.def.id, respawn.as_secs()));
+            }
+        }
+        if let Some(t) = rt.check_at {
+            if now >= t {
+                rt.check_at = None;
+                for id in rt.ids.iter().take(3) {
+                    match transform_of(manager, *id) {
+                        Some(tr) => {
+                            let (x, y, z) = (le_i64(&tr, 0) as f64 / METERS, le_i64(&tr, 8) as f64 / METERS, le_i64(&tr, 16) as f64 / METERS);
+                            let nearest = positions.iter().map(|(px, pz)| ((px - x).powi(2) + (pz - z).powi(2)).sqrt()).fold(f64::MAX, f64::min);
+                            log(&format!("spawners: {} creature {id} is at x={x:.1} y={y:.1} z={z:.1}, {nearest:.0} m from the nearest player", rt.def.id));
+                        }
+                        None => log(&format!("spawners: {} creature {id} position could not be read", rt.def.id)),
+                    }
+                }
+            }
         }
         let want = rt.def.count.clamp(1, 20) as usize;
         if rt.ids.len() >= want {

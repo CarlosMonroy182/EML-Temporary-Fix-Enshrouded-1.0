@@ -13,7 +13,7 @@ SPANISH_WORDS = {
     "guardado", "enviado", "borrar", "elige", "abre", "juego", "servidor", "vida", "radio",
     "nadie", "esperando", "criaturas", "lugar", "lugares", "cerrar",
 }
-PROTECTED = {"vivo", "creando", "esperando para reaparecer", "esperando el mundo", "sin foco", "/m182 k ñ", "Zona número {i} ñandú"}
+PROTECTED = {"vivo", "creando", "esperando para reaparecer", "esperando el mundo", "sin jugadores cerca", "sin foco", "/m182 k ñ", "Zona número {i} ñandú"}
 
 
 def lex(src):
