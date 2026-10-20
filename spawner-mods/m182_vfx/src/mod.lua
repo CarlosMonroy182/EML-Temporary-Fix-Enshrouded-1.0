@@ -23,6 +23,28 @@ local PRESETS = {
     implosion_hielo = "05a66c81-dda1-49fa-8db7-6cbfe40b16f3",
     implosion_niebla = "c56bb712-a73d-460d-895e-1a14cffe9dcf",
     implosion_hueso = "d0316cdf-d9f6-46dd-badf-4d3a787a2607",
+    explosion_fuego = "b0b78a7d-6ccf-4382-a2b1-2929a5505583",
+    bola_fuego = "50899bbd-9399-4387-b85b-ce4786f4af97",
+    meteoro = "8be85049-cbf5-47e4-b12a-ebf6e3fc1d1f",
+    laser = "585e557a-7e27-4e1b-91e6-702fb1140de2",
+    artilleria = "938949c5-8484-49b9-adec-22da3cfb4517",
+}
+
+local CASTING_ACTIVE = 422966025
+local RADIUS = 230313139
+
+local OVERRIDES = {
+    rayos = { [CASTING_ACTIVE] = 1 },
+    fuego = { [CASTING_ACTIVE] = 1 },
+    hielo = { [CASTING_ACTIVE] = 1 },
+    niebla = { [CASTING_ACTIVE] = 1 },
+    luz = { [CASTING_ACTIVE] = 1 },
+    acido = { [CASTING_ACTIVE] = 1 },
+    hueso = { [CASTING_ACTIVE] = 1 },
+    llama_arcana = { [CASTING_ACTIVE] = 1 },
+    curacion = { [CASTING_ACTIVE] = 1 },
+    drenaje = { [CASTING_ACTIVE] = 1 },
+    laser = { [RADIUS] = 1073741824 },
 }
 
 local ALIASES = {
@@ -119,8 +141,14 @@ local source = vd.defaultParameterData.data
 local params = {}
 for i = 1, 16 do params[i] = unsigned(hash_of(source[i]) or 0) end
 
+local forced = OVERRIDES[key] or {}
 local slots = 0
 for _, p in ipairs(vd.parameters) do
+    local name = hash_of(p.nameHash)
+    if name ~= nil and forced[unsigned(name)] ~= nil then
+        local index = math.floor((hash_of(p.dataRange.start) or 0) / 4) + 1
+        if index >= 1 and index <= 16 then params[index] = forced[unsigned(name)] end
+    end
     if hash_of(p.typeId) == COLOR_TYPE then
         local index = math.floor((hash_of(p.dataRange.start) or 0) / 4) + 1
         if index >= 1 and index <= 16 then

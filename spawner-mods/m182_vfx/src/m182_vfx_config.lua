@@ -22,6 +22,11 @@
 --   "implosion_hielo"  implosion de hielo
 --   "implosion_niebla" implosion de niebla
 --   "implosion_hueso"  implosion de hueso
+--   "explosion_fuego"  explosion de fuego
+--   "bola_fuego"       bola de fuego grande
+--   "meteoro"          impacto de meteoro
+--   "laser"            explosion de laser
+--   "artilleria"       explosion de artilleria de jefe (acepta color)
 --
 -- color: "" deja el color del efecto. Si no, "#RRGGBB" (ej. "#9B30FF") o un nombre:
 --   rojo, naranja, amarillo, dorado, verde, cian, azul, morado, rosa, magenta, blanco
@@ -29,7 +34,7 @@
 --   ej. colores = { "#FF0000", "#FFFFFF", "#9B30FF" }
 
 return {
-    efecto = "rayos",
-    color = "",
+    efecto = "original",
+    color = "morado",
     colores = {},
 }
