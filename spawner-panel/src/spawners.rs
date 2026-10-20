@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::write_atomic;
 
 pub const SPAWNERS_FILE: &str = "m182_spawners.json";
+pub const OP_FILE: &str = "m182_spawner_op.json";
 pub const STATUS_FILE: &str = "m182_spawner_status.json";
 pub const DEFAULT_RESPAWN_MINUTES: u32 = 5;
 
@@ -62,6 +63,53 @@ pub fn to_json(list: &[Spawner]) -> Value {
         })
         .collect();
     json!({ "spawners": rows })
+}
+
+fn round(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// What the server needs of one spawner, as short as it can be (it goes through the game chat).
+fn wire_row(s: &Spawner) -> Value {
+    json!({
+        "i": s.id,
+        "t": s.template.replace('-', ""),
+        "p": [round(s.at[0]), round(s.at[1]), round(s.at[2])],
+        "l": s.level,
+        "c": s.count,
+        "h": s.health,
+        "d": (f64::from(s.damage) * 100.0).round() / 100.0,
+        "r": (f64::from(s.radius) * 10.0).round() / 10.0,
+        "w": s.respawn,
+    })
+}
+
+/// The server learns about one new spawner without being sent the whole list again.
+pub fn op_add(s: &Spawner) -> String {
+    json!({ "add": wire_row(s) }).to_string()
+}
+
+pub fn op_delete(id: &str) -> String {
+    json!({ "rm": id }).to_string()
+}
+
+/// Whole list for the server: the first message replaces what it has, the rest add to it.
+pub fn op_replace_all(list: &[Spawner], per_message: usize) -> Vec<String> {
+    let rows: Vec<Value> = list.iter().map(wire_row).collect();
+    if rows.is_empty() {
+        return vec![json!({ "set": [] }).to_string()];
+    }
+    rows.chunks(per_message.max(1)).enumerate().map(|(i, part)| json!({ if i == 0 { "set" } else { "add" }: part }).to_string()).collect()
+}
+
+/// Saves the list next to the game and, when the panel drives a server, tells it only what changed.
+pub fn save_change(dir: &Path, list: &[Spawner], op: &str) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&to_json(list)).map_err(|e| e.to_string())?;
+    crate::write_local(dir, SPAWNERS_FILE, "m182_spawners.json.tmp", &text)?;
+    if crate::remote::route(SPAWNERS_FILE) != crate::remote::Route::Local {
+        crate::remote::submit(OP_FILE, op)?;
+    }
+    Ok(())
 }
 
 pub fn parse(text: &str) -> Vec<Spawner> {
@@ -128,6 +176,16 @@ pub fn clock(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+pub const RANGE_METERS: f64 = 150.0;
+
+/// How far this spawner is from the player and whether that is close enough for it to be active.
+pub fn distance_note(player: Option<[f64; 3]>, at: [f64; 3]) -> Option<String> {
+    let p = player?;
+    let d = ((p[0] - at[0]).powi(2) + (p[2] - at[2]).powi(2)).sqrt();
+    let shown = d.round() as i64;
+    Some(if d <= RANGE_METERS { format!("A {shown} m de ti: dentro del alcance") } else { format!("A {shown} m de ti: se activa a menos de 150 m") })
+}
+
 /// One short line for the list: how many are alive and when the next one comes.
 pub fn describe(live: Option<&Live>) -> String {
     let Some(l) = live else { return "Esperando al juego…".to_string() };
@@ -178,6 +236,37 @@ mod tests {
         save(&dir, &[]).unwrap();
         assert!(load(&dir).is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn distance_tells_when_a_spawner_is_in_range() {
+        assert_eq!(distance_note(None, [0.0, 0.0, 0.0]), None);
+        assert_eq!(distance_note(Some([0.0, 5.0, 0.0]), [30.0, 9.0, 40.0]).unwrap(), "A 50 m de ti: dentro del alcance");
+        assert_eq!(distance_note(Some([0.0, 5.0, 0.0]), [300.0, 9.0, 400.0]).unwrap(), "A 500 m de ti: se activa a menos de 150 m");
+    }
+
+    #[test]
+    fn a_new_spawner_costs_only_a_couple_of_chat_lines() {
+        let mut s = sample();
+        s.id = "s1792524456177".into();
+        s.template = "333ea93f-04f6-4bd2-b003-1582429dfb66".into();
+        s.at = [3722.65, 842.38, 1367.64];
+        s.count = 5;
+        s.level = 20;
+        s.health = 1800;
+        s.damage = 1.1;
+        s.radius = 4.0;
+        s.respawn = 300;
+        let op = op_add(&s);
+        assert!(!op.contains("Troll") && !op.contains("Cueva"), "{op}");
+        let lines = crate::remote_proto::compose("secret-key", OP_FILE, &op, crate::remote_proto::DEFAULT_LIMIT);
+        assert!(lines.len() <= 5, "{} lines for {op}", lines.len());
+        assert!(crate::remote_proto::compose("secret-key", OP_FILE, &op_delete("s1792524456177"), crate::remote_proto::DEFAULT_LIMIT).len() <= 2);
+        let many: Vec<Spawner> = (0..50).map(|i| Spawner { id: format!("s{i}"), ..s.clone() }).collect();
+        let all = op_replace_all(&many, 4);
+        assert_eq!(all.len(), 13);
+        assert!(all[0].starts_with(r#"{"set":"#) && all[1].starts_with(r#"{"add":"#));
+        assert_eq!(op_replace_all(&[], 4), vec![r#"{"set":[]}"#.to_string()]);
     }
 
     #[test]

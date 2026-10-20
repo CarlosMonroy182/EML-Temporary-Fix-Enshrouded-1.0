@@ -393,7 +393,7 @@ fn read_config(dir: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn write_local(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
+pub(crate) fn write_local(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
     let tmp_path = dir.join(tmp);
     std::fs::write(&tmp_path, text).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp_path, dir.join(name)).map_err(|e| e.to_string())
@@ -635,8 +635,9 @@ impl App {
             radius: if self.count > 1 { self.distance } else { 3.0 },
             respawn: self.respawn_minutes.clamp(1, 1440) * 60,
         };
+        let op = spawners::op_add(&spawner);
         self.spawners.push(spawner);
-        self.status = match spawners::save(&self.dir, &self.spawners) {
+        self.status = match spawners::save_change(&self.dir, &self.spawners, &op) {
             Ok(()) => Status::Delivered,
             Err(e) => Status::Error(e),
         };
@@ -645,7 +646,7 @@ impl App {
 
     fn delete_spawner(&mut self, id: &str) {
         self.spawners.retain(|s| s.id != id);
-        self.status = match spawners::save(&self.dir, &self.spawners) {
+        self.status = match spawners::save_change(&self.dir, &self.spawners, &spawners::op_delete(id)) {
             Ok(()) => Status::Idle,
             Err(e) => Status::Error(e),
         };
@@ -778,11 +779,16 @@ impl App {
     /// Manual button: sends the server everything the panel has configured.
     pub fn resend_state(&mut self) -> usize {
         let mut sent = 0;
-        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json", "m182_spawners.json"] {
+        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json"] {
             if let Ok(text) = std::fs::read_to_string(self.dir.join(name)) {
                 if remote::submit(name, &text).is_ok() {
                     sent += 1;
                 }
+            }
+        }
+        for op in spawners::op_replace_all(&self.spawners, 4) {
+            if remote::submit(spawners::OP_FILE, &op).is_ok() {
+                sent += 1;
             }
         }
         if remote::submit(items::DATA_MESSAGE_FILE, &self.items.data_message()).is_ok() {
@@ -1054,6 +1060,9 @@ impl App {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
                     ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(14.0));
+                    if let Some(note) = spawners::distance_note(self.player, s.at) {
+                        ui.label(RichText::new(note).color(MUTED).size(13.5));
+                    }
                     let live = self.spawner_status.get(&s.id);
                     let state = if remote::connected() || (remote::active() && live.is_none()) { "Activa en el servidor".to_string() } else { spawners::describe(live) };
                     ui.label(RichText::new(state).color(GOLD_DIM).size(14.5));

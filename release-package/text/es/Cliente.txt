@@ -25,7 +25,7 @@ El panel detecta solo si estas en tu partida o en el servidor. No hay casillas q
 
 PESTAÑAS
 - Criaturas: invoca criaturas o crea apariciones que reaparecen solas (en tu posicion o en un lugar guardado), con nivel, vida y daño a tu gusto.
-- Muchas apariciones: puedes crear 50 o mas (hasta 20 criaturas cada una). Una aparicion solo crea sus criaturas cuando hay un jugador a menos de 150 m; lejos queda en reposo y, al volver, las criaturas que falten reaparecen de inmediato. Asi el servidor no carga con todas a la vez.
+- Muchas apariciones: puedes crear 50 o mas (hasta 20 criaturas cada una). Una aparicion solo crea sus criaturas cuando hay un jugador a menos de 150 m; lejos queda en reposo y, al volver, las criaturas que falten reaparecen de inmediato. Asi el servidor no carga con todas a la vez. En la lista, cada aparicion indica a cuantos metros estas de ella. Al crear o borrar una, al servidor solo se le manda ese cambio (unos 5 mensajes de chat), no toda la lista; "Reenviar todo" si manda la lista completa (unos 3 mensajes por aparicion, tarda).
 - Ítems: entrega items con nivel, rareza y cantidad, y edita sus stats. Cambiar los stats de un item cambia ese item para todos (se aplica al reiniciar el servidor); "Restaurar valores originales" lo deja como el juego.
 - Lugares: guarda posiciones para usarlas en apariciones y zonas.
 - Admin: modo dios, stamina y mana infinitos, curarte al instante.
