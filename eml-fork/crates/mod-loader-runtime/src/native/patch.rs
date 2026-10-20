@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::{config::LIVE, faction, groups, signatures};
 
@@ -129,6 +129,73 @@ pub(super) static ADMIN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 pub(super) static PLAYERS_OBJECT: AtomicUsize = AtomicUsize::new(0);
 
 static REPLY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+static PERMISSIONS_RESTRICTED: AtomicU64 = AtomicU64::new(0);
+static PERMISSIONS_HOOKED: AtomicBool = AtomicBool::new(false);
+
+pub fn permissions_hooked() -> bool {
+    PERMISSIONS_HOOKED.load(Ordering::SeqCst)
+}
+
+/// Entities (1-based, up to 64) whose permissions the game must see without chests and building.
+pub fn restrict_permissions(entities: u64) {
+    PERMISSIONS_RESTRICTED.store(entities, Ordering::SeqCst);
+}
+
+pub fn restricted_permissions() -> u64 {
+    PERMISSIONS_RESTRICTED.load(Ordering::SeqCst)
+}
+
+extern "win64" fn filter_permissions(entity: u32, permissions: u32) -> u32 {
+    let bit = entity.wrapping_sub(1);
+    if bit < 64 && PERMISSIONS_RESTRICTED.load(Ordering::Relaxed) >> bit & 1 != 0 {
+        super::roster::visitor_permissions(permissions as u8) as u32
+    } else {
+        permissions
+    }
+}
+
+// Tail of the game's permission lookup: reads the stored byte, lets `filter_permissions` narrow it
+// for visitors and finishes the way the original did.
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_permissions() {
+    core::arch::naked_asm!(
+        "movzx eax, byte ptr [r9 + r8 + 0x9d]",
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "sub rsp, 0x88",
+        "movups [rsp + 0x20], xmm0",
+        "movups [rsp + 0x30], xmm1",
+        "movups [rsp + 0x40], xmm2",
+        "movups [rsp + 0x50], xmm3",
+        "movups [rsp + 0x60], xmm4",
+        "movups [rsp + 0x70], xmm5",
+        "mov ecx, edx",
+        "mov edx, eax",
+        "call {f}",
+        "movups xmm0, [rsp + 0x20]",
+        "movups xmm1, [rsp + 0x30]",
+        "movups xmm2, [rsp + 0x40]",
+        "movups xmm3, [rsp + 0x50]",
+        "movups xmm4, [rsp + 0x60]",
+        "movups xmm5, [rsp + 0x70]",
+        "add rsp, 0x88",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
+        "mov byte ptr [rcx], al",
+        "mov rax, rcx",
+        "ret",
+        f = sym filter_permissions,
+    );
+}
 
 /// Replaces the text of the message being queued, so the game delivers our line instead.
 fn replace_text(text: usize, line: &str) -> bool {
@@ -347,6 +414,23 @@ fn install_pump(sections: &[&'static [u8]]) {
     }
 }
 
+fn install_permissions(sections: &[&'static [u8]]) {
+    let target = match find_unique(sections, &signatures::PLAYER_PERMISSIONS) {
+        Ok(addr) => addr,
+        Err(count) => {
+            super::spawner::log(&format!("permissions: lookup signature matched {count} times; base visitors fall back to the player table"));
+            return;
+        }
+    };
+    match unsafe { write_jump(target.add(signatures::PLAYER_PERMISSIONS_AT), stub_permissions as usize) } {
+        Ok(()) => {
+            PERMISSIONS_HOOKED.store(true, Ordering::SeqCst);
+            super::spawner::log("permissions hooked");
+        }
+        Err(code) => super::spawner::log(&format!("permissions: VirtualProtect failed ({code})")),
+    }
+}
+
 fn install_chat(sections: &[&'static [u8]]) {
     if LIVE.chat_key().is_empty() {
         return;
@@ -413,6 +497,7 @@ pub fn install() -> Outcome {
     if super::config::LIVE.spawner() {
         install_pump(&sections);
         install_admin(&sections);
+        install_permissions(&sections);
     }
 
     let targets = [

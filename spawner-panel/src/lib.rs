@@ -13,6 +13,7 @@ pub mod remote_proto;
 mod session;
 mod social;
 mod spawners;
+mod steam;
 mod theme;
 mod wiki;
 

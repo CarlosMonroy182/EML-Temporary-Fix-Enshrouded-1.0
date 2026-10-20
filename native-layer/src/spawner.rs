@@ -1175,19 +1175,21 @@ pub fn before(manager: usize, edx: u32) {
 }
 
 static AURA_PENDING: AtomicU32 = AtomicU32::new(0);
-static AURA_QUEUE: Mutex<Vec<(i64, i64, i64)>> = Mutex::new(Vec::new());
+static AURA_QUEUE: Mutex<Vec<(i64, i64, i64, bool)>> = Mutex::new(Vec::new());
 static AURA_FAILED: AtomicU32 = AtomicU32::new(0);
 
 fn run_aura_queue(manager: usize) {
     if AURA_PENDING.swap(0, Ordering::SeqCst) == 0 {
         return;
     }
-    let points: Vec<(i64, i64, i64)> = match AURA_QUEUE.lock() {
+    let points: Vec<(i64, i64, i64, bool)> = match AURA_QUEUE.lock() {
         Ok(mut q) => std::mem::take(&mut *q),
         Err(_) => return,
     };
-    let Some(template) = aura_guid() else { return };
-    for (x, y, z) in points.into_iter().take(8) {
+    let Some(pulse) = aura_guid(AURA_TEMPLATE) else { return };
+    let entry = aura_guid(ENTRY_TEMPLATE).unwrap_or(pulse);
+    for (x, y, z, entering) in points.into_iter().take(8) {
+        let template = if entering { entry } else { pulse };
         if spawn_effect(manager, template, x, y, z) == 0 && AURA_FAILED.fetch_add(1, Ordering::Relaxed) == 0 {
             log("zones: the aura effect could not be created");
         }
@@ -1732,15 +1734,16 @@ fn spawn_now(manager: usize) {
 }
 
 const AURA_TEMPLATE: &str = "VFX_Resource_Increase_Health_NoSound";
+const ENTRY_TEMPLATE: &str = "VFX_Resource_Increase_Health";
 const AURA_PERIOD: Duration = Duration::from_secs(3);
 
-static AURA_GUID: Mutex<Option<[u8; 16]>> = Mutex::new(None);
-static AURA_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
+static AURA_GUIDS: Mutex<Vec<(&'static str, [u8; 16])>> = Mutex::new(Vec::new());
+static AURA_MISSING_LOGGED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-fn aura_guid() -> Option<[u8; 16]> {
-    if let Ok(known) = AURA_GUID.lock() {
-        if known.is_some() {
-            return *known;
+fn aura_guid(wanted: &'static str) -> Option<[u8; 16]> {
+    if let Ok(known) = AURA_GUIDS.lock() {
+        if let Some((_, guid)) = known.iter().find(|(n, _)| *n == wanted) {
+            return Some(*guid);
         }
     }
     let path = std::env::current_dir().ok()?.join("export").join("m182_objects.csv");
@@ -1748,17 +1751,20 @@ fn aura_guid() -> Option<[u8; 16]> {
     for line in content.lines().skip(1) {
         let mut parts = line.split(',');
         let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
-        if name == AURA_TEMPLATE {
+        if name == wanted {
             let parsed = super::config::parse_guid(guid)?;
-            if let Ok(mut known) = AURA_GUID.lock() {
-                *known = Some(parsed);
+            if let Ok(mut known) = AURA_GUIDS.lock() {
+                known.push((wanted, parsed));
             }
-            log(&format!("zones: aura effect {AURA_TEMPLATE} found"));
+            log(&format!("zones: effect {wanted} found"));
             return Some(parsed);
         }
     }
-    if !AURA_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
-        log(&format!("zones: aura effect {AURA_TEMPLATE} is not in the object list"));
+    if let Ok(mut logged) = AURA_MISSING_LOGGED.lock() {
+        if !logged.contains(&wanted) {
+            logged.push(wanted);
+            log(&format!("zones: effect {wanted} is not in the object list"));
+        }
     }
     None
 }
@@ -2281,6 +2287,12 @@ pub fn reset_teleports() {
         map.seen.clear();
         map.last = None;
     }
+    if let Ok(mut list) = MAP_ACTIONS.lock() {
+        list.clear();
+    }
+    if let Ok(mut last) = MAP_LAST_GO.lock() {
+        last.clear();
+    }
     if let Ok(mut protect) = MAP_PROTECT.lock() {
         protect.clear();
     }
@@ -2337,6 +2349,60 @@ fn set_map_travel(entities: Vec<u32>) {
     state.entities = entities;
 }
 
+const WAYPOINT_ACTION_AT: usize = 8 + 568;
+
+#[derive(Clone, Copy, PartialEq)]
+struct MapAction {
+    version: u32,
+    enable: bool,
+    ping: bool,
+    at: (f64, f64, f64),
+}
+
+fn waypoint_action(slots: &[Slot]) -> Option<MapAction> {
+    let input = slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE)?;
+    let b = read_bytes(input.addr + WAYPOINT_ACTION_AT, WAYPOINT_SIZE).filter(|b| b.len() == WAYPOINT_SIZE)?;
+    Some(MapAction {
+        version: u32_at(&b, 28),
+        enable: b[24] == 1,
+        ping: b[25] == 1,
+        at: (le_i64(&b, 0) as f64 / METERS, le_i64(&b, 8) as f64 / METERS, le_i64(&b, 16) as f64 / METERS),
+    })
+}
+
+static MAP_ACTIONS: Mutex<Vec<(u32, MapAction)>> = Mutex::new(Vec::new());
+static MAP_LAST_GO: Mutex<Vec<(u32, (f64, f64, f64), Instant)>> = Mutex::new(Vec::new());
+
+fn map_action_scan(entity: u32, slots: &[Slot]) -> Option<(f64, f64, f64)> {
+    let Some(action) = waypoint_action(slots) else {
+        if let Ok(mut list) = MAP_ACTIONS.lock() {
+            if !list.iter().any(|(e, _)| *e == entity) {
+                list.push((entity, MapAction { version: 0, enable: false, ping: false, at: (0.0, 0.0, 0.0) }));
+                log(&format!("map travel: entity {entity} has no player input to read map markers from"));
+            }
+        }
+        return None;
+    };
+    let mut list = MAP_ACTIONS.lock().ok()?;
+    let Some(slot) = list.iter_mut().find(|(e, _)| *e == entity) else {
+        log(&format!(
+            "map travel: watching entity {entity}, map marker version {} enabled={} ping={} x={:.1} y={:.1} z={:.1}",
+            action.version, action.enable, action.ping, action.at.0, action.at.1, action.at.2
+        ));
+        list.push((entity, action));
+        return None;
+    };
+    if slot.1.version == action.version && slot.1.enable == action.enable && slot.1.at == action.at {
+        return None;
+    }
+    slot.1 = action;
+    log(&format!(
+        "map travel: entity {entity} sent a map marker, version {} enabled={} ping={} x={:.1} y={:.1} z={:.1}",
+        action.version, action.enable, action.ping, action.at.0, action.at.1, action.at.2
+    ));
+    if action.enable && !action.ping && (action.at.0 != 0.0 || action.at.2 != 0.0) { Some(action.at) } else { None }
+}
+
 fn map_travel_scan(manager: usize) {
     let (entities, due) = match MAP_TRAVEL.lock() {
         Ok(mut state) => {
@@ -2353,6 +2419,9 @@ fn map_travel_scan(manager: usize) {
     }
     for entity in entities {
         let Some((_, _, slots)) = entity_layout(manager, entity) else { continue };
+        if let Some(sent) = map_action_scan(entity, &slots) {
+            map_travel_go(manager, entity, Some(sent));
+        }
         let marker = waypoint_position(&slots);
         let previous = MAP_TRAVEL.lock().ok().and_then(|mut state| match state.seen.iter_mut().find(|(e, _)| *e == entity) {
             Some(slot) => Some(std::mem::replace(&mut slot.1, marker)),
@@ -2369,6 +2438,13 @@ fn map_travel_scan(manager: usize) {
 
 fn map_travel_go(manager: usize, entity: u32, marker: Option<(f64, f64, f64)>) {
     let Some((x, y, z)) = marker else { return };
+    if let Ok(mut last) = MAP_LAST_GO.lock() {
+        last.retain(|(_, _, at)| at.elapsed() < Duration::from_secs(5));
+        if last.iter().any(|(e, p, _)| *e == entity && (p.0 - x).abs() < 1.0 && (p.2 - z).abs() < 1.0) {
+            return;
+        }
+        last.push((entity, (x, y, z), Instant::now()));
+    }
     let here = current_height(manager, entity);
     let known = y.abs() > 0.5 && here.is_none_or(|h| (y - h).abs() <= MAP_HEIGHT_REACH);
     log(&format!("map travel: entity {entity} marked x={x:.1} y={y:.1} z={z:.1}, height {}", if known { "known" } else { "unknown" }));
@@ -2379,6 +2455,7 @@ fn map_travel_go(manager: usize, entity: u32, marker: Option<(f64, f64, f64)>) {
 }
 
 static MAP_PROTECT: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
+static ADMIN_TICK_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// Runs inside the game's own admin system, on the game thread, right before the system looks for
 /// the teleport request of each player. A request the game consumed last time is put back to what
@@ -2387,6 +2464,9 @@ pub fn admin_tick() {
     let manager = SERVER_MGR.load(Ordering::SeqCst);
     if manager == 0 {
         return;
+    }
+    if !ADMIN_TICK_SEEN.swap(true, Ordering::Relaxed) {
+        log("teleport: the game's admin system is running, requests can be handed over");
     }
     map_travel_scan(manager);
     let sent: Vec<TeleportSent> = TELEPORT_SENT.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
@@ -2777,7 +2857,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     let mut shielded: Vec<usize> = Vec::new();
     let mut dead: Vec<u32> = Vec::new();
     let mut inside_ids: Vec<u32> = Vec::new();
-    let mut inside_at: Vec<(i64, i64, i64)> = Vec::new();
+    let mut inside_at: Vec<(u32, i64, i64, i64)> = Vec::new();
     let mut visitors: Vec<usize> = Vec::new();
     for p in &seen {
         let (id, number, team) = (p.id, p.number, p.team);
@@ -2797,7 +2877,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                 let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
                 if in_safe {
                     inside_ids.push(id);
-                    inside_at.push((le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
+                    inside_at.push((id, le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
                     shielded.extend(faction_addresses(manager, id));
                 }
                 for zone in st.groups.zones.iter().filter(|z| z.locks() && z.owner() != 0) {
@@ -2849,6 +2929,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             *last = listed;
         }
     }
+    let entered: Vec<u32> = inside_ids.iter().copied().filter(|id| !st.zone_ids.contains(id)).collect();
     if st.zone_ids != inside_ids {
         log(&format!("zones: {} player(s) inside a safe zone", inside_ids.len()));
         st.zone_ids = inside_ids;
@@ -2859,12 +2940,12 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     super::table::apply_visitors(&visitors);
     if !inside_at.is_empty()
         && AURA_FAILED.load(Ordering::Relaxed) < 3
-        && st.groups.aura_last.map(|t| now.duration_since(t) >= AURA_PERIOD).unwrap_or(true)
+        && (!entered.is_empty() || st.groups.aura_last.map(|t| now.duration_since(t) >= AURA_PERIOD).unwrap_or(true))
     {
         st.groups.aura_last = Some(now);
         if let Ok(mut q) = AURA_QUEUE.lock() {
             q.clear();
-            q.extend(inside_at.into_iter().take(8).map(|(x, y, z)| (x, y.saturating_add(metres(0.3)), z)));
+            q.extend(inside_at.into_iter().take(8).map(|(id, x, y, z)| (x, y.saturating_add(metres(0.3)), z, entered.contains(&id))));
             AURA_PENDING.store(1, Ordering::SeqCst);
         }
     }
