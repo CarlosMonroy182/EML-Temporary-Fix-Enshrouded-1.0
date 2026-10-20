@@ -32,3 +32,8 @@ Unique weapon copies (custom item pools) and panel teleport / map travel were re
 
 ## Not confirmed in the real game
 Chest/building block for visitors, safe zone entry cue, solo-player roster by Steam name. Ask for `m182_spawner.log` (server) and the EML log when something fails.
+
+## Mode detection (hosting vs connected)
+- `m182_mode.json` {"hosting":bool} decides whether the panel applies commands locally or types them into the chat. A game that first loaded its own world and then joined a server kept the old server manager (the client manager address is reused, so the "client manager changed" check never fired) and stayed on hosting=true: commands were applied locally, nothing reached the chat. `check_hosted_world()` (1 Hz) now forgets the hosted world once its player cannot be read for 10 checks while a client manager exists. Symptom in logs: "spawn requested from the panel" with no "chat:" lines on the server and no "mode: connected to a remote server" on the client.
+- Spawner changes travel as `m182_spawner_op.json` ({"add":row}/{"rm":id}/{"set":[rows]}, short keys i,t,p,l,c,h,d,r,w) merged by the server into m182_spawners.json.
+

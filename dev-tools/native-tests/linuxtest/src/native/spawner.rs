@@ -184,6 +184,7 @@ fn key_loop() {
 
         if last_file.elapsed() >= Duration::from_secs(1) {
             last_file = Instant::now();
+            check_hosted_world();
             write_mode();
             if remote_world() && CLIENT_TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 {
                 if let Some((m, id)) = world_pair() {
@@ -827,6 +828,28 @@ const WORLD_PAIR_MS: u64 = 45_000;
 
 pub fn drop_stale_world(client_manager: usize, previous_client: usize, now: u64, server_player_ms: u64) -> bool {
     previous_client != client_manager && server_player_ms.saturating_add(WORLD_PAIR_MS) < now
+}
+
+const HOSTED_WORLD_GONE_CHECKS: u32 = 10;
+
+/// A game that hosted a world and is now connected to a server keeps pointing at the world it
+/// left, and would go on applying the panel's commands to it: forget that world once the player
+/// of it can no longer be read for a while.
+pub fn check_hosted_world() {
+    static GONE: AtomicU32 = AtomicU32::new(0);
+    let (sm, sid) = (SERVER_MGR.load(Ordering::SeqCst), PLAYER_ID.load(Ordering::SeqCst));
+    if sm == 0 || CLIENT_MGR.load(Ordering::SeqCst) == 0 || TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 || transform_of(sm, sid).is_some() {
+        GONE.store(0, Ordering::SeqCst);
+        return;
+    }
+    if GONE.fetch_add(1, Ordering::SeqCst) + 1 < HOSTED_WORLD_GONE_CHECKS {
+        return;
+    }
+    GONE.store(0, Ordering::SeqCst);
+    if SERVER_MGR.compare_exchange(sm, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        PLAYER_ID.store(0, Ordering::SeqCst);
+        log("the world this game hosted is gone; now connected to a remote server");
+    }
 }
 
 fn write_mode() {
