@@ -1,0 +1,11 @@
+{
+    "id": "m182_vfx",
+    "name": "M182 VFX",
+    "description": "Replaces the charge aura of staffs and charged attacks with magic effects from the game, with custom colors.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}
