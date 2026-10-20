@@ -141,6 +141,16 @@ pub fn team_for_player(teams: &[TeamDef], number: u32, name: Option<&str>, entit
     team_for(teams, number, name, entity)
 }
 
+/// The locked, owned zone that rules at a point. Where several overlap, the smallest one wins
+/// (a small base inside a big town), and on equal sizes the one whose centre is nearer.
+pub fn ruling_zone(zones: &[Zone], x: f64, z: f64) -> Option<&Zone> {
+    let dist = |zone: &Zone| ((x - zone.x).powi(2) + (z - zone.z).powi(2)).sqrt();
+    zones
+        .iter()
+        .filter(|zone| zone.locks() && zone.owner() != 0 && inside(std::slice::from_ref(zone), x, z))
+        .min_by(|a, b| a.radius.total_cmp(&b.radius).then(dist(a).total_cmp(&dist(b))))
+}
+
 pub fn parse_teams(text: &str) -> Vec<Vec<u32>> {
     let Ok(file) = serde_json::from_str::<TeamsFile>(text) else { return Vec::new() };
     file.teams.into_iter().map(|t| t.members).collect()
@@ -222,6 +232,17 @@ mod tests {
         assert!(inside(&zones, 120.0, -30.0));
         assert!(!inside(&zones, 140.0, -50.0));
         assert!(parse_zones("nonsense").is_empty());
+    }
+
+    #[test]
+    fn overlapping_locked_zones_have_one_ruler() {
+        let zones = parse_zones(r#"{"zones":[{"name":"Base","x":2993.62,"z":1622.21,"radius":40,"team":2,"lock":true},{"name":"Mercado","x":2995.19,"z":1607.67,"radius":40,"team":1,"lock":true}]}"#);
+        assert_eq!(ruling_zone(&zones, 2993.0, 1630.0).map(|z| z.owner()), Some(2));
+        assert_eq!(ruling_zone(&zones, 2995.0, 1600.0).map(|z| z.owner()), Some(1));
+        assert!(ruling_zone(&zones, 3500.0, 1600.0).is_none());
+        let nested = parse_zones(r#"{"zones":[{"name":"Town","x":0,"z":0,"radius":100,"team":1,"lock":true},{"name":"Casa","x":10,"z":0,"radius":10,"team":2,"lock":true}]}"#);
+        assert_eq!(ruling_zone(&nested, 12.0, 0.0).map(|z| z.owner()), Some(2));
+        assert_eq!(ruling_zone(&nested, -50.0, 0.0).map(|z| z.owner()), Some(1));
     }
 
     #[test]

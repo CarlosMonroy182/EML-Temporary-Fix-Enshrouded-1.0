@@ -2500,17 +2500,15 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     inside_at.push((id, le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
                     shielded.extend(faction_addresses(manager, id));
                 }
-                for zone in st.groups.zones.iter().filter(|z| z.locks() && z.owner() != 0) {
-                    if !groups::inside(std::slice::from_ref(zone), x, z) || team == zone.owner() as u8 {
-                        continue;
-                    }
-                    let entry = table.iter().find(|e| e.entity() == id);
-                    let admin = entry.map(|e| roster::is_admin(e.permissions)).unwrap_or(false);
-                    if admin && !zone.lock_admins.unwrap_or(false) {
-                        continue;
-                    }
-                    if let Some(e) = entry {
-                        visitors.push(e.index);
+                if let Some(zone) = groups::ruling_zone(&st.groups.zones, x, z) {
+                    if team != zone.owner() as u8 {
+                        let entry = table.iter().find(|e| e.entity() == id);
+                        let admin = entry.map(|e| roster::is_admin(e.permissions)).unwrap_or(false);
+                        if !admin || zone.lock_admins.unwrap_or(false) {
+                            if let Some(e) = entry {
+                                visitors.push(e.index);
+                            }
+                        }
                     }
                 }
                 let wanted = if team != 0 { lent.get(team as usize - 1).copied().unwrap_or(super::faction::PLAYER) } else { super::faction::PLAYER };
