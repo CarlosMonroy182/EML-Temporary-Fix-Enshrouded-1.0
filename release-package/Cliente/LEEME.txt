@@ -30,8 +30,8 @@ EQUIPOS
 
 ARMAS UNICAS (cada arma distinta)
 - Al editar un arma y entregarla, el panel crea una COPIA propia con tus stats: es un item distinto al del botin normal del juego, que no cambia. Asi puedes dar armas mejores como recompensa sin romper el juego.
-- La primera vez que editas un arma el panel reserva sus copias y te avisa: reinicia el juego (y el servidor) UNA vez; despues puedes entregar hasta 8 copias distintas de esa arma sin reiniciar mas.
-- Tus 3 ediciones anteriores "para todos" siguen cambiando el arma normal del juego. Si no las quieres asi, restablecelas en la pestaña de items. Los cambios nuevos ya se hacen en copias; la casilla "Cambiar el ítem para todos" sigue disponible si quieres cambiar el arma normal a proposito.
+- Todas las armas, escudos y arcos ya traen 8 copias preparadas: no hay que reiniciar para entregar un arma editada. Si entregas el mismo arma con los mismos stats a 15 jugadores, todos reciben la misma copia (una sola ocupa un espacio). Los 8 espacios son para 8 variantes distintas del mismo tipo de arma a la vez; con "Liberar copias" los reutilizas.
+- Tus ediciones anteriores "para todos" siguen cambiando el arma normal del juego. Si no las quieres asi, restablecelas en la pestaña de items. Los cambios nuevos ya se hacen en copias; la casilla "Cambiar el ítem para todos" sigue disponible si quieres cambiar el arma normal a proposito.
 - Proteccion: si el juego se cierra mientras crea las copias, el siguiente arranque las omite solo (aparece el archivo mods\zz_m182_item_stats\m182_custom.skipped) para que el juego abra. Para reintentar, borra ese archivo y manda el log de EML.
 
 LIMITES (sinceridad)

@@ -14,7 +14,7 @@ pub const ENABLED: bool = true;
 pub const FILE: &str = "m182_copies.json";
 pub const READY_FILE: &str = "export/m182_custom_items.csv";
 pub const SLOTS: u32 = 8;
-pub const PREBUILT_SLOTS: u32 = 4;
+pub const PREBUILT_SLOTS: u32 = 8;
 const PREBUILT: &str = include_str!("prebuilt_pools.txt");
 
 pub fn prebuilt() -> impl Iterator<Item = u32> {
@@ -319,14 +319,32 @@ mod tests {
     }
 
     #[test]
-    fn no_copies_exist_until_an_item_is_edited() {
+    fn shipped_weapons_are_ready_without_a_restart() {
         let dir = temp("prebuilt");
-        assert_eq!(prebuilt().count(), 0);
+        let base = prebuilt().next().unwrap();
+        assert!(prebuilt().count() > 500);
         let mut book = Book::load(&dir);
         assert_eq!(book.pending_count(), 0);
-        assert_eq!(book.plan(10, &stats(5.0), None), Plan::NoPool);
-        assert!(book.register(10, 4));
-        assert_eq!(book.pending_count(), 1);
+        assert_eq!(book.plan(base, &stats(5.0), None), Plan::Use { slot: 1, fresh: true });
+        assert!(!book.register(base, PREBUILT_SLOTS));
+        assert!(book.register(base, PREBUILT_SLOTS + 1));
+        let mut old = Book::default();
+        old.register(base, PREBUILT_SLOTS);
+        old.save(&dir).unwrap();
+        assert_eq!(Book::load(&dir).pending_count(), 0);
+    }
+
+    #[test]
+    fn a_reward_given_to_many_players_uses_one_copy() {
+        let dir = temp("reward");
+        let base = prebuilt().next().unwrap();
+        let mut book = Book::load(&dir);
+        let Plan::Use { slot, fresh: true } = book.plan(base, &stats(5.0), None) else { panic!() };
+        book.mark_used(base, slot, stats(5.0));
+        for _ in 0..15 {
+            assert_eq!(book.plan(base, &stats(5.0), None), Plan::Use { slot, fresh: false });
+        }
+        assert_eq!(book.active_count(base), 1);
     }
 
     #[test]
