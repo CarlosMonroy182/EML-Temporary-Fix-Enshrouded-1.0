@@ -5,7 +5,7 @@ INSTALAR
 1. Cierra Enshrouded.
 2. Abre la carpeta del juego (Steam > Enshrouded > Administrar > Ver archivos locales). Es la carpeta donde esta enshrouded.exe.
 3. Copia y pega TODO el contenido de esta carpeta "Cliente" dentro de la carpeta del juego. Si Windows pregunta, elige "Reemplazar".
-   Se copian: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json, y la carpeta mods. Tus ajustes de items (m182_item_stats.json y mods\zz_m182_item_stats) NO vienen en este paquete: se conservan los tuyos.
+   Se copian: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json, y la carpeta mods. Tus ajustes de items (m182_item_stats.json y mods\zz_m182_item_stats\src\m182_data.lua) NO vienen en este paquete: se conservan los tuyos.
 4. Abre el juego. Cuando estes dentro del mundo, pulsa la tecla INSERT: se abre el panel M182. Vuelve a pulsar INSERT (o cierra la ventana) para esconderlo.
 
 IMPORTANTE
@@ -17,7 +17,7 @@ El panel detecta solo si estas en tu partida o en el servidor. No hay casillas q
 - En tu partida local todo se aplica directamente.
 - En el servidor (Dathost) debe estar instalada la carpeta "Servidor" (ver su LEEME); la clave ya coincide. El panel escribe por ti en el chat del juego (mensajes que empiezan por !m182) y el servidor los oculta al resto de jugadores. Mientras envia, no toques el teclado ni el chat; el envio de un pedido dura unos segundos.
 - Zonas, bases, equipos, apariciones, PvP y ajustes viven en el servidor: el panel solo le manda los cambios cuando los haces. Siguen funcionando aunque tu te desconectes. Al entrar el panel solo reenvia tus poderes personales (modo dios y energia) y pregunta quien esta conectado. El boton "Reenviar todo" (bajo el titulo) vuelve a enviar todo lo demas cuando quieras.
-- Teletransporte (sin confirmar en el juego real: si no te mueve, mandame m182_spawner.log): usa el propio sistema de teletransporte del juego (sin limite de altares). Puedes escribir coordenadas, copiar las de un lugar guardado, usar tu posicion o ir al marcador que pongas en el mapa del juego. En el servidor lo ejecuta el servidor sobre tu personaje. El servidor aplica tu modo dios y tu energia mientras estas conectado.
+- Teletransporte (sin confirmar en el juego real: si no te mueve, mandame m182_spawner.log): usa el propio sistema de teletransporte del juego (sin limite de altares). Puedes escribir coordenadas, copiar las de un lugar guardado, usar tu posicion o ir al marcador que pongas en el mapa del juego. Para viajar directo desde el mapa del juego activa "Viaje por el mapa" en Teletransporte: al poner un marcador en el mapa, viajas ahi. En el servidor lo ejecuta el servidor sobre tu personaje. El servidor aplica tu modo dios y tu energia mientras estas conectado.
 - El vuelo se quito del panel por ahora.
 
 ZONAS Y BASES (pestaña "Zonas y bases")
@@ -29,12 +29,13 @@ EQUIPOS
 - Velocidad de escritura del chat: si el servidor pierde letras, en m182_panel.json añade "typing_burst": 1 y "typing_gap_ms": 4.
 
 ARMAS UNICAS (cada arma distinta)
-- Al editar un arma y entregarla, el panel crea una COPIA propia con tus stats. Las demas armas del mismo tipo no cambian.
-- Las copias vienen ya preparadas para todas las armas, escudos y arcos: no hay que reiniciar nada. Cada arma tiene 4 copias propias listas. Si necesitas mas copias de un arma, el panel las reserva y te avisa de reiniciar una vez.
-- Si quieres cambiar un item para todos a la vez, marca "Cambiar el ítem para todos" en la pestaña de items.
+- Al editar un arma y entregarla, el panel crea una COPIA propia con tus stats: es un item distinto al del botin normal del juego, que no cambia. Asi puedes dar armas mejores como recompensa sin romper el juego.
+- La primera vez que editas un arma el panel reserva sus copias y te avisa: reinicia el juego (y el servidor) UNA vez; despues puedes entregar hasta 8 copias distintas de esa arma sin reiniciar mas.
+- Tus 3 ediciones anteriores "para todos" siguen cambiando el arma normal del juego. Si no las quieres asi, restablecelas en la pestaña de items. Los cambios nuevos ya se hacen en copias; la casilla "Cambiar el ítem para todos" sigue disponible si quieres cambiar el arma normal a proposito.
+- Proteccion: si el juego se cierra mientras crea las copias, el siguiente arranque las omite solo (aparece el archivo mods\zz_m182_item_stats\m182_custom.skipped) para que el juego abra. Para reintentar, borra ese archivo y manda el log de EML.
 
 LIMITES (sinceridad)
-- Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
+- Las copias unicas, el viaje por el mapa, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
 - Las respuestas del servidor solo llegan para la lista de jugadores. Si algo no aparece, revisa m182_spawner.log del servidor.
 - Botin: las criaturas invocadas sueltan su botin normal del juego (ya no hay control de botin). Sin confirmar en el juego real: si no se pueden abrir o sueltan algo raro, mandame m182_spawner.log (cliente y servidor).
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. Ya no hay que subir nada por FTP.

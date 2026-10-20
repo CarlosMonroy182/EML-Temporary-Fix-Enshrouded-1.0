@@ -22,10 +22,10 @@ Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servi
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
 REINICIOS
-Las copias de armas unicas ya vienen preparadas en mods\zz_m182_item_stats\m182_custom.txt (el mismo archivo que en la carpeta Cliente). No hace falta reiniciar para usarlas.
+Las copias de armas unicas se crean al arrancar a partir de mods\zz_m182_item_stats\m182_custom.txt, que el servidor escribe solo cuando editas un arma por primera vez en el panel: entonces reinicia el servidor una vez. Si el servidor se cierra mientras crea las copias, el siguiente arranque las omite (aparece m182_custom.skipped en esa carpeta); borra ese archivo para reintentar.
 
 LIMITES (sinceridad)
-- Las ediciones "para todos" de armas concretas hechas en tu cliente viajan con los ajustes; las copias unicas las entrega el panel.
+- Las ediciones "para todos" de armas concretas hechas en tu cliente viajan con los ajustes; las copias unicas son items distintos del botin normal y los entrega el panel.
 - Si algo falla, mandame m182_spawner.log y el log de EML del servidor (aparece "chat: client ..." por cada mensaje recibido).
 
 Hecho por M182.

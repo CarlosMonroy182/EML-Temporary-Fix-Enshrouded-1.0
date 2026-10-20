@@ -150,9 +150,12 @@ pub fn apply_visitors(visitors: &[usize]) {
                 }
             }
             (Some(at), true) => {
-                let restricted = roster::visitor_permissions(held[at].1.original);
-                if entry.permissions != restricted {
-                    write_permissions(entry.index, restricted);
+                if entry.permissions != roster::visitor_permissions(held[at].1.original) {
+                    held[at].1.original = entry.permissions;
+                    let restricted = roster::visitor_permissions(entry.permissions);
+                    if restricted != entry.permissions && write_permissions(entry.index, restricted) {
+                        log(&format!("base: {} is a visitor (permissions {:#04x} -> {:#04x})", label(entry), entry.permissions, restricted));
+                    }
                 }
             }
             (Some(at), false) => {

@@ -1471,10 +1471,10 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     loot_container_check(manager, desc, ret);
     harvest_loot_node(manager, edx, desc);
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
-    if settled && edx != 1 {
+    let server = is_server(manager);
+    if settled && edx != 1 && !server {
         return;
     }
-    let server = is_server(manager);
 
     let Some(head) = read_bytes(desc, 0x30) else { return };
     if head.len() < 0x30 {
@@ -1502,6 +1502,11 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
                 }
             }
         }
+        return;
+    }
+    if head[4..20] == GUID_PLAYER && settled && edx != 1 {
+        track_player(manager, ret);
+        log(&format!("player entity id={ret} mgr={manager:#x} created with kind {edx}"));
         return;
     }
     if head[4..20] == GUID_PLAYER && edx == 1 {
@@ -1785,6 +1790,7 @@ struct Powers {
     stamina: bool,
     fly: bool,
     fly_speed: Option<f32>,
+    map_travel: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2225,8 +2231,8 @@ fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
                 st.hover = None;
             }
             log(&format!(
-                "powers: god={} stamina={} fly={}",
-                p.god, p.stamina, p.fly
+                "powers: god={} stamina={} fly={} map_travel={}",
+                p.god, p.stamina, p.fly, p.map_travel
             ));
             st.powers = p;
         }
@@ -2263,6 +2269,23 @@ struct TeleportSent {
 static TELEPORT_JOBS: Mutex<Vec<TeleportJob>> = Mutex::new(Vec::new());
 static TELEPORT_SENT: Mutex<Vec<TeleportSent>> = Mutex::new(Vec::new());
 
+pub fn reset_teleports() {
+    if let Ok(mut jobs) = TELEPORT_JOBS.lock() {
+        jobs.clear();
+    }
+    if let Ok(mut sent) = TELEPORT_SENT.lock() {
+        sent.clear();
+    }
+    if let Ok(mut map) = MAP_TRAVEL.lock() {
+        map.entities.clear();
+        map.seen.clear();
+        map.last = None;
+    }
+    if let Ok(mut protect) = MAP_PROTECT.lock() {
+        protect.clear();
+    }
+}
+
 fn queue_teleport(job: TeleportJob) {
     if let Ok(mut jobs) = TELEPORT_JOBS.lock() {
         jobs.retain(|j| j.entity != job.entity);
@@ -2298,6 +2321,65 @@ fn current_height(manager: usize, entity: u32) -> Option<f64> {
     transform_of(manager, entity).map(|t| le_i64(&t, 8) as f64 / METERS)
 }
 
+struct MapTravel {
+    entities: Vec<u32>,
+    seen: Vec<(u32, Option<(f64, f64, f64)>)>,
+    last: Option<Instant>,
+}
+
+static MAP_TRAVEL: Mutex<MapTravel> = Mutex::new(MapTravel { entities: Vec::new(), seen: Vec::new(), last: None });
+const MAP_TRAVEL_PERIOD: Duration = Duration::from_millis(100);
+const MAP_HEIGHT_REACH: f64 = 600.0;
+
+fn set_map_travel(entities: Vec<u32>) {
+    let Ok(mut state) = MAP_TRAVEL.lock() else { return };
+    state.seen.retain(|(entity, _)| entities.contains(entity));
+    state.entities = entities;
+}
+
+fn map_travel_scan(manager: usize) {
+    let (entities, due) = match MAP_TRAVEL.lock() {
+        Ok(mut state) => {
+            let due = state.last.map(|t| t.elapsed() >= MAP_TRAVEL_PERIOD).unwrap_or(true);
+            if due && !state.entities.is_empty() {
+                state.last = Some(Instant::now());
+            }
+            (state.entities.clone(), due)
+        }
+        Err(_) => return,
+    };
+    if !due {
+        return;
+    }
+    for entity in entities {
+        let Some((_, _, slots)) = entity_layout(manager, entity) else { continue };
+        let marker = waypoint_position(&slots);
+        let previous = MAP_TRAVEL.lock().ok().and_then(|mut state| match state.seen.iter_mut().find(|(e, _)| *e == entity) {
+            Some(slot) => Some(std::mem::replace(&mut slot.1, marker)),
+            None => {
+                state.seen.push((entity, marker));
+                None
+            }
+        });
+        if previous.is_some_and(|before| before != marker) && marker.is_some() {
+            map_travel_go(manager, entity, marker);
+        }
+    }
+}
+
+fn map_travel_go(manager: usize, entity: u32, marker: Option<(f64, f64, f64)>) {
+    let Some((x, y, z)) = marker else { return };
+    let here = current_height(manager, entity);
+    let known = y.abs() > 0.5 && here.is_none_or(|h| (y - h).abs() <= MAP_HEIGHT_REACH);
+    log(&format!("map travel: entity {entity} marked x={x:.1} y={y:.1} z={z:.1}, height {}", if known { "known" } else { "unknown" }));
+    queue_teleport(TeleportJob { entity, at: [Some(x), if known { Some(y) } else { None }, Some(z)], waypoint: false, queued: Instant::now(), tries: 0 });
+    if let Ok(mut protect) = MAP_PROTECT.lock() {
+        protect.push((entity, Instant::now() + TELEPORT_PROTECTION));
+    }
+}
+
+static MAP_PROTECT: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
+
 /// Runs inside the game's own admin system, on the game thread, right before the system looks for
 /// the teleport request of each player. A request the game consumed last time is put back to what
 /// the player's own game sent, then the pending requests are handed to the game.
@@ -2306,6 +2388,7 @@ pub fn admin_tick() {
     if manager == 0 {
         return;
     }
+    map_travel_scan(manager);
     let sent: Vec<TeleportSent> = TELEPORT_SENT.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
     let mut again = Vec::new();
     for item in sent {
@@ -2513,6 +2596,7 @@ static LISTED: Mutex<String> = Mutex::new(String::new());
 static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
 static TRACKED_MGR: AtomicUsize = AtomicUsize::new(0);
 static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
+const PLAYER_SLOTS: u32 = 17;
 
 fn track_player(manager: usize, id: u32) {
     let Ok(mut list) = TRACKED.lock() else { return };
@@ -2523,7 +2607,7 @@ fn track_player(manager: usize, id: u32) {
     if list.iter().any(|p| p.id == id) {
         return;
     }
-    let number = NEXT_NUMBER.fetch_add(1, Ordering::SeqCst);
+    let number = if id <= PLAYER_SLOTS { id } else { NEXT_NUMBER.fetch_add(1, Ordering::SeqCst).max(PLAYER_SLOTS + 1) };
     list.push(Tracked { id, number, misses: 0 });
     log(&format!("players: entity {id} is player {number}"));
 }
@@ -2607,6 +2691,20 @@ fn team_factions(present: &[usize], pvp: bool) -> Vec<u8> {
         }
     }
     by_team
+}
+
+static NO_FACTION: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn note_faction(id: u32, missing: bool) {
+    let Ok(mut noted) = NO_FACTION.lock() else { return };
+    let was = noted.contains(&id);
+    if missing && !was {
+        noted.push(id);
+        log(&format!("teams: entity {id} is in a team but its faction cannot be found, so teammates may still hurt it"));
+    } else if !missing && was {
+        noted.retain(|i| *i != id);
+        log(&format!("teams: the faction of entity {id} is found now"));
+    }
 }
 
 fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
@@ -2716,7 +2814,9 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     }
                 }
                 let wanted = if team != 0 { lent.get(team as usize - 1).copied().unwrap_or(super::faction::PLAYER) } else { super::faction::PLAYER };
-                for addr in faction_addresses(manager, id) {
+                let addresses = faction_addresses(manager, id);
+                note_faction(id, team != 0 && addresses.is_empty());
+                for addr in addresses {
                     if team != 0 {
                         map.push((addr, team));
                     }
@@ -3103,7 +3203,7 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
         match serde_json::from_str::<Powers>(&text) {
             Ok(p) => {
-                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly));
+                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={} map_travel={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly, p.map_travel));
                 let slot = st.client_powers.entry(client).or_default();
                 slot.powers = p;
                 slot.mtime = mtime;
@@ -3171,6 +3271,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
     }
     let now = Instant::now();
+    if let Ok(mut asked) = MAP_PROTECT.lock() {
+        for (entity, until) in asked.drain(..) {
+            st.entity_protect.insert(entity, until);
+        }
+    }
     st.entity_protect.retain(|_, until| now < *until);
     for entity in st.entity_protect.keys() {
         let pair = (SERVER_MGR.load(Ordering::SeqCst), *entity);
@@ -3179,6 +3284,16 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
         }
     }
     teleport_watchdog();
+    let mut travellers: Vec<u32> = Vec::new();
+    if st.powers.map_travel && hosting {
+        travellers.push(id);
+    }
+    for (client_number, c) in &st.client_powers {
+        if c.powers.map_travel {
+            travellers.push((client_number & 0x3f) + 1);
+        }
+    }
+    set_map_travel(travellers);
     for (client_number, c) in &st.client_powers {
         if c.powers.god {
             let entity = (client_number & 0x3f) + 1;
@@ -3695,6 +3810,53 @@ fn def_is_player(manager: usize, id: u32, p: &Placement) -> bool {
     verdict
 }
 
+static TABLE_NOTES: Mutex<Vec<(usize, u32, &'static str)>> = Mutex::new(Vec::new());
+
+fn table_note(index: usize, client: u32, reason: &'static str, detail: &str) {
+    let Ok(mut notes) = TABLE_NOTES.lock() else { return };
+    if notes.iter().any(|(i, c, r)| *i == index && *c == client && *r == reason) {
+        return;
+    }
+    notes.retain(|(i, c, _)| !(*i == index && *c == client));
+    notes.push((index, client, reason));
+    log(&format!("players: connected slot {index} (client {client}) is not tracked yet: {reason}{detail}"));
+}
+
+/// Every connected player of the server's table gets tracked as soon as an entity of the right
+/// kind exists for its slot, whatever the way the game created it.
+pub fn track_table_players(manager: usize) -> usize {
+    if manager == 0 {
+        return 0;
+    }
+    let known = tracked_ids();
+    let mut found = 0;
+    for entry in super::table::entries() {
+        let id = entry.entity();
+        if known.contains(&id) {
+            continue;
+        }
+        let Some(record) = find_record(manager, id) else {
+            table_note(entry.index, entry.client, "its entity does not exist yet", "");
+            continue;
+        };
+        let Some(p) = placement(record) else {
+            table_note(entry.index, entry.client, "its entity has no readable layout", "");
+            continue;
+        };
+        if transform_of(manager, id).is_none() {
+            table_note(entry.index, entry.client, "its entity has no position yet", "");
+            continue;
+        }
+        if !def_is_player(manager, id, &p) {
+            table_note(entry.index, entry.client, "the entity of its slot is not a player", &format!(" (entity {id})"));
+            continue;
+        }
+        track_player(manager, id);
+        found += 1;
+    }
+    found
+}
+
 /// Looks through the whole entity table once and tracks every player-like entity. Returns how many
 /// new players were found.
 pub fn scan_players_once(manager: usize) -> usize {
@@ -3758,6 +3920,7 @@ fn players_loop() {
         if manager == 0 || PLAYER_ID.load(Ordering::SeqCst) == 0 {
             continue;
         }
+        let _ = std::panic::catch_unwind(|| track_table_players(manager));
         let _ = std::panic::catch_unwind(|| scan_players_once(manager));
     }
 }
