@@ -14,7 +14,7 @@ pub const PREFIXES: [&str; 2] = ["/m182", "!m182"];
 pub const MIN_KEY_LEN: usize = 6;
 
 /// Files a chat command may write; each one is polled by the native layer.
-pub const FILES: [&str; 7] = [
+pub const FILES: [&str; 8] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -22,7 +22,12 @@ pub const FILES: [&str; 7] = [
     "m182_teams.json",
     "m182_spawners.json",
     "m182_data.json",
+    "m182_spawner_op.json",
 ];
+
+pub const SPAWNER_OP_FILE: &str = "m182_spawner_op.json";
+const SPAWNERS_FILE: &str = "m182_spawners.json";
+const MAX_SPAWNERS: usize = 1000;
 
 pub const DATA_FILE: &str = "m182_data.json";
 const DATA_TARGET: [&str; 4] = ["mods", "zz_m182_item_stats", "src", "m182_data.lua"];
@@ -261,9 +266,89 @@ fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String,
     if name == DATA_FILE {
         return write_data(dir, &value);
     }
+    if name == SPAWNER_OP_FILE {
+        return apply_spawner_op(dir, &value);
+    }
     let target = destination(name, client);
     store(dir, &target, body)?;
     Ok(format!("wrote {target} ({} bytes)", body.len()))
+}
+
+fn spawner_field<'a>(row: &'a serde_json::Value, short: &str, long: &str) -> Option<&'a serde_json::Value> {
+    row.get(short).or_else(|| row.get(long))
+}
+
+/// One spawner as the panel sends it (short keys, template without dashes) turned into the row
+/// the spawner file holds.
+fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::{json, Map, Value};
+    let id = spawner_field(row, "i", "id").and_then(Value::as_str).filter(|s| !s.is_empty() && s.len() <= 40).ok_or("spawner without id")?;
+    let raw = spawner_field(row, "t", "template").and_then(Value::as_str).ok_or("spawner without template")?;
+    let hex: String = raw.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("spawner {id}: bad template"));
+    }
+    let template = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
+    let at = spawner_field(row, "p", "at").and_then(Value::as_array).filter(|a| a.len() == 3 && a.iter().all(|n| n.as_f64().is_some_and(f64::is_finite))).ok_or_else(|| format!("spawner {id}: bad position"))?;
+    let mut out = Map::new();
+    out.insert("id".into(), json!(id));
+    out.insert("template".into(), json!(template));
+    out.insert("at".into(), json!(at));
+    for (short, long) in [("l", "level"), ("c", "count"), ("h", "health"), ("d", "damage"), ("r", "radius"), ("w", "respawn")] {
+        if let Some(v) = spawner_field(row, short, long).filter(|v| v.is_number()) {
+            out.insert(long.into(), v.clone());
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Changes the spawner list without resending it: `{"add":{..}}`, `{"rm":"id"}` or
+/// `{"set":[..]}` (replace everything), applied in the order set, add, del.
+fn apply_spawner_op(dir: &Path, op: &serde_json::Value) -> Result<String, String> {
+    use serde_json::{json, Value};
+    let path = dir.join(SPAWNERS_FILE);
+    let mut rows: Vec<Value> = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("spawners").and_then(Value::as_array).cloned())
+            .ok_or_else(|| format!("{SPAWNERS_FILE} is not readable; send the whole list instead"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("cannot read {SPAWNERS_FILE}: {e}")),
+    };
+    let id_of = |r: &Value| r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let many = |v: &Value| -> Vec<Value> { v.as_array().cloned().unwrap_or_else(|| vec![v.clone()]) };
+    let (mut added, mut removed) = (0usize, 0usize);
+    if let Some(set) = op.get("set") {
+        rows.clear();
+        for row in many(set) {
+            rows.push(expand_spawner(&row)?);
+            added += 1;
+        }
+    }
+    if let Some(add) = op.get("add") {
+        for row in many(add) {
+            let row = expand_spawner(&row)?;
+            let id = id_of(&row);
+            match rows.iter().position(|r| id_of(r) == id) {
+                Some(i) => rows[i] = row,
+                None => rows.push(row),
+            }
+            added += 1;
+        }
+    }
+    if let Some(del) = op.get("rm").or_else(|| op.get("del")) {
+        for id in many(del).iter().filter_map(Value::as_str) {
+            let before = rows.len();
+            rows.retain(|r| id_of(r) != id);
+            removed += before - rows.len();
+        }
+    }
+    if rows.len() > MAX_SPAWNERS {
+        return Err(format!("too many spawners ({})", rows.len()));
+    }
+    let text = json!({ "spawners": rows }).to_string();
+    store(dir, SPAWNERS_FILE, &text)?;
+    Ok(format!("{SPAWNERS_FILE}: {} spawner(s) now ({added} added or replaced, {removed} removed)", rows.len()))
 }
 
 fn write_data(dir: &Path, value: &serde_json::Value) -> Result<String, String> {
@@ -338,6 +423,43 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("m182_teams.json")).unwrap(), body);
         let Verdict::Swallowed(line) = run(&mut s, &dir, "!m182 secret-key setx m182_powers.json zz") else { panic!() };
         assert!(line.contains("rejected"));
+    }
+
+    #[test]
+    fn spawner_changes_arrive_one_at_a_time() {
+        let dir = scratch("ops");
+        let mut s = Session::default();
+        let send = |s: &mut Session, body: &str| {
+            let hex: String = body.bytes().map(|b| format!("{b:02x}")).collect();
+            run(s, &dir, &format!("!m182 secret-key setx m182_spawner_op.json {hex}"))
+        };
+        let list = |dir: &Path| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(dir.join("m182_spawners.json")).unwrap()).unwrap() };
+        let a = r#"{"add":{"i":"s1","t":"333ea93f04f64bd2b0031582429dfb66","p":[10.5,20.0,30.25],"l":20,"c":5,"h":1800,"d":1.1,"r":4.0,"w":300}}"#;
+        assert!(matches!(send(&mut s, a), Verdict::Swallowed(ref l) if l.contains("1 spawner(s) now")));
+        let v = list(&dir);
+        let row = &v["spawners"][0];
+        assert_eq!(row["id"], "s1");
+        assert_eq!(row["template"], "333ea93f-04f6-4bd2-b003-1582429dfb66");
+        assert_eq!(row["at"], serde_json::json!([10.5, 20.0, 30.25]));
+        assert_eq!((row["level"].as_u64(), row["count"].as_u64(), row["health"].as_u64(), row["respawn"].as_u64()), (Some(20), Some(5), Some(1800), Some(300)));
+        assert_eq!(row["radius"].as_f64(), Some(4.0));
+        send(&mut s, r#"{"add":{"i":"s2","t":"c3db66d6-89a5-4a6c-a8e3-d9a1f6009812","p":[1,2,3]}}"#);
+        send(&mut s, r#"{"add":{"i":"s1","t":"333ea93f04f64bd2b0031582429dfb66","p":[11,20,30],"l":21}}"#);
+        let v = list(&dir);
+        assert_eq!(v["spawners"].as_array().unwrap().len(), 2);
+        assert_eq!(v["spawners"][0]["level"], 21);
+        assert!(matches!(send(&mut s, r#"{"del":"s1"}"#), Verdict::Swallowed(ref l) if l.contains("1 removed")));
+        assert_eq!(list(&dir)["spawners"].as_array().unwrap().len(), 1);
+        send(&mut s, r#"{"set":[{"i":"a","t":"333ea93f04f64bd2b0031582429dfb66","p":[0,0,0]},{"i":"b","t":"333ea93f04f64bd2b0031582429dfb66","p":[0,0,0]}]}"#);
+        send(&mut s, r#"{"add":[{"i":"c","t":"333ea93f04f64bd2b0031582429dfb66","p":[0,0,0]}],"del":["a"]}"#);
+        let ids: Vec<String> = list(&dir)["spawners"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, ["b", "c"]);
+        let Verdict::Swallowed(line) = send(&mut s, r#"{"add":{"i":"x","t":"nothex","p":[0,0,0]}}"#) else { panic!() };
+        assert!(line.contains("rejected") && line.contains("bad template"));
+        std::fs::write(dir.join("m182_spawners.json"), "not json").unwrap();
+        let Verdict::Swallowed(line) = send(&mut s, r#"{"del":"b"}"#) else { panic!() };
+        assert!(line.contains("rejected"), "{line}");
+        assert_eq!(std::fs::read_to_string(dir.join("m182_spawners.json")).unwrap(), "not json");
     }
 
     #[test]
