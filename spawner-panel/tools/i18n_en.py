@@ -223,6 +223,7 @@ EN = {
 "Crear equipo": "Create team",
 "Equipo {}": "Team {}",
 "Esperando al juego…": "Waiting for the game…",
+"El juego no confirmó el mensaje: el chat no respondió. Envío detenido para no dejar teclas sueltas en el juego. Mira que el chat esté cerrado y vuelve a intentarlo.": "The game did not confirm the message: the chat did not respond. Sending stopped so no stray keys are left in the game. Check that the chat is closed and try again.",
 "A {shown} m de ti: dentro del alcance": "{shown} m from you: in range",
 "A 50 m de ti: dentro del alcance": "50 m from you: in range",
 "A 500 m de ti: se activa a menos de 150 m": "500 m from you: wakes up within 150 m",

@@ -337,7 +337,9 @@ fn worker() {
         } else {
             note(&format!("failed {}: {error}", job.file));
         }
-        let retry = !error.is_empty() && job.tries < RETRIES;
+        let stopped = error.starts_with(crate::host::STOP_MARK);
+        let error = error.strip_prefix(crate::host::STOP_MARK).map(|e| e.trim().to_string()).unwrap_or(error);
+        let retry = !error.is_empty() && !stopped && job.tries < RETRIES;
         let mut s = state();
         s.typist = Some(typist);
         s.status.sending = false;

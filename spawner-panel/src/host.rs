@@ -20,6 +20,10 @@ pub trait Sys: Send + Sync + 'static {
     fn hide(&self, hwnd: usize);
     fn focus(&self, hwnd: usize) -> bool;
     fn tap(&self, scan: u16);
+    /// Key kept down for `ms` milliseconds, so a game that samples its keys once per frame sees it.
+    fn hold(&self, scan: u16, _ms: u64) {
+        self.tap(scan);
+    }
     fn unit(&self, unit: u16);
     /// Several characters handed to the keyboard queue in one go.
     fn units(&self, units: &[u16]) {
@@ -144,11 +148,13 @@ pub struct Pace {
     pub after_send: u64,
     pub window_lines: usize,
     pub window_ms: u64,
+    pub hold: u64,
+    pub confirm_ms: u64,
 }
 
 impl Default for Pace {
     fn default() -> Self {
-        Self { burst: 2, gap: 3, opened: 150, before_send: 80, after_send: 180, window_lines: 12, window_ms: 15_000 }
+        Self { burst: 2, gap: 3, opened: 300, before_send: 80, after_send: 120, window_lines: 12, window_ms: 15_000, hold: 120, confirm_ms: 3_000 }
     }
 }
 
@@ -170,25 +176,105 @@ impl Pace {
         if let Some(n) = get("typing_window_s") {
             pace.window_ms = n.clamp(1, 120) * 1000;
         }
+        if let Some(n) = get("typing_hold_ms") {
+            pace.hold = n.clamp(20, 500);
+        }
         pace
     }
 }
+
+/// Tells how many chat lines the game has finished sending since the last question.
+pub trait Acks: Send {
+    fn fresh(&mut self) -> usize;
+}
+
+/// The game writes `closeVirtualKeyboard` to its own log every time the chat closes after a message.
+pub struct LogAcks {
+    path: std::path::PathBuf,
+    pos: u64,
+}
+
+const ACK_MARK: &str = "closeVirtualKeyboard";
+
+impl LogAcks {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        let pos = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self { path, pos }
+    }
+}
+
+impl Acks for LogAcks {
+    fn fresh(&mut self) -> usize {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(&self.path) else { return 0 };
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return 0 };
+        if len < self.pos {
+            self.pos = 0;
+        }
+        if len == self.pos || file.seek(SeekFrom::Start(self.pos)).is_err() {
+            return 0;
+        }
+        let mut bytes = Vec::new();
+        if file.take((len - self.pos).min(1 << 20)).read_to_end(&mut bytes).is_err() {
+            return 0;
+        }
+        let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { return 0 };
+        self.pos += end as u64 + 1;
+        String::from_utf8_lossy(&bytes[..=end]).matches(ACK_MARK).count()
+    }
+}
+
+/// Starts the error text of a failure after which the same job must not be typed again.
+pub const STOP_MARK: &str = "[stop]";
 
 pub struct ChatTypist<S: Sys> {
     host: Arc<Host<S>>,
     open_scan: u16,
     pace: Pace,
     sent: std::collections::VecDeque<std::time::Instant>,
+    acks: Option<Box<dyn Acks>>,
+    proven: bool,
+    lag: u64,
 }
 
 impl<S: Sys> ChatTypist<S> {
     pub fn new(host: Arc<Host<S>>, open_key: &str) -> Self {
-        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER), pace: Pace::default(), sent: std::collections::VecDeque::new() }
+        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER), pace: Pace::default(), sent: std::collections::VecDeque::new(), acks: None, proven: false, lag: 0 }
     }
 
     pub fn with_pace(mut self, pace: Pace) -> Self {
         self.pace = pace;
         self
+    }
+
+    pub fn with_acks(mut self, acks: Box<dyn Acks>) -> Self {
+        self.acks = Some(acks);
+        self
+    }
+
+    /// Waits for the game to say the line left. Before the first confirmation of the session a
+    /// missing answer only switches the check off; afterwards it stops the sending.
+    fn confirm(&mut self) -> Result<(), String> {
+        let Some(acks) = self.acks.as_mut() else { return Ok(()) };
+        let mut waited = 0u64;
+        loop {
+            if acks.fresh() > 0 {
+                self.proven = true;
+                self.lag = waited.saturating_sub(self.pace.after_send).min(1_500);
+                return Ok(());
+            }
+            if waited >= self.pace.confirm_ms {
+                break;
+            }
+            self.host.sys.sleep(40);
+            waited += 40;
+        }
+        if !self.proven {
+            self.acks = None;
+            return Ok(());
+        }
+        Err(format!("{STOP_MARK} {}", "El juego no confirmó el mensaje: el chat no respondió. Envío detenido para no dejar teclas sueltas en el juego. Mira que el chat esté cerrado y vuelve a intentarlo."))
     }
 
     fn game_has_focus(&self, game: usize) -> bool {
@@ -234,18 +320,21 @@ impl<S: Sys> Typist for ChatTypist<S> {
             return Err("El juego perdió el control mientras se escribía. No toques el teclado ni el ratón durante el envío.".to_string());
         }
         self.throttle();
-        let sys = &self.host.sys;
-        sys.tap(self.open_scan);
-        sys.sleep(self.pace.opened);
+        if let Some(acks) = self.acks.as_mut() {
+            acks.fresh();
+        }
+        let sys = self.host.sys.clone();
+        sys.hold(self.open_scan, self.pace.hold + self.lag / 2);
+        sys.sleep(self.pace.opened + self.lag);
         let units: Vec<u16> = text.encode_utf16().collect();
         for burst in units.chunks(self.pace.burst) {
             sys.units(burst);
             sys.sleep(self.pace.gap);
         }
         sys.sleep(self.pace.before_send);
-        sys.tap(ENTER);
+        sys.hold(ENTER, 50);
         sys.sleep(self.pace.after_send);
-        Ok(())
+        self.confirm()
     }
 
     fn end(&mut self) {
@@ -310,6 +399,9 @@ mod tests {
         }
         fn tap(&self, scan: u16) {
             self.note(format!("tap {scan:#x}"));
+        }
+        fn hold(&self, scan: u16, _ms: u64) {
+            self.note(format!("hold {scan:#x}"));
         }
         fn unit(&self, unit: u16) {
             self.note(format!("char {}", char::from_u32(unit as u32).unwrap()));
@@ -379,11 +471,77 @@ mod tests {
         typist.end();
         let log = sys.take();
         assert_eq!(log.first().unwrap(), "focus 100");
-        assert_eq!(log[1], "tap 0x1c");
+        assert_eq!(log[1], "hold 0x1c");
         let typed: String = log.iter().filter_map(|l| l.strip_prefix("char ")).collect();
         assert_eq!(typed, "/m182 k ñ");
-        assert_eq!(log[log.len() - 2], "tap 0x1c");
+        assert_eq!(log[log.len() - 2], "hold 0x1c");
         assert_eq!(log.last().unwrap(), "focus 200");
+    }
+
+    struct Script(Arc<Mutex<Vec<usize>>>);
+
+    impl Acks for Script {
+        fn fresh(&mut self) -> usize {
+            let mut v = self.0.lock().unwrap();
+            if v.is_empty() { 0 } else { v.remove(0) }
+        }
+    }
+
+    fn ready(sys: &Arc<Mock>) -> Arc<Host<Mock>> {
+        let host = Host::new(sys.clone());
+        sys.foreground.store(100, Ordering::SeqCst);
+        host.poll(&mut || {});
+        sys.insert.store(true, Ordering::SeqCst);
+        host.poll(&mut || {});
+        sys.insert.store(false, Ordering::SeqCst);
+        host
+    }
+
+    #[test]
+    fn a_line_the_game_does_not_confirm_stops_the_typing_once_confirmations_work() {
+        let sys = Arc::new(Mock::default());
+        let host = ready(&sys);
+        // answers: the pre-line drain (0), the first line is confirmed (1), the second drain (0) then silence
+        let script = Arc::new(Mutex::new(vec![0, 1, 0]));
+        let mut typist = ChatTypist::new(host, "Enter").with_acks(Box::new(Script(script)));
+        typist.begin().unwrap();
+        typist.line("one").unwrap();
+        let err = typist.line("two").unwrap_err();
+        assert!(err.starts_with(STOP_MARK), "{err}");
+        let typed: String = sys.take().iter().filter_map(|l| l.strip_prefix("char ")).map(str::to_string).collect();
+        assert_eq!(typed, "onetwo", "the failing line was typed, nothing after it");
+    }
+
+    #[test]
+    fn without_any_confirmation_the_check_switches_itself_off() {
+        let sys = Arc::new(Mock::default());
+        let host = ready(&sys);
+        let script = Arc::new(Mutex::new(Vec::new()));
+        let mut typist = ChatTypist::new(host, "Enter").with_acks(Box::new(Script(script)));
+        typist.begin().unwrap();
+        typist.line("one").unwrap();
+        typist.line("two").unwrap();
+        typist.line("three").unwrap();
+    }
+
+    #[test]
+    fn the_game_log_tells_how_many_lines_left() {
+        let dir = std::env::temp_dir().join(format!("m182_acks_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("enshrouded.log");
+        std::fs::write(&path, "[I 00:00:01,000] [input] closeVirtualKeyboard for user 0(1)\n").unwrap();
+        let mut acks = LogAcks::new(&path);
+        assert_eq!(acks.fresh(), 0, "what was there before does not count");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("[I 00:00:02,000] [input] closeVirtualKeyboard for user 0(1)\n[I 00:00:02,000] [GameUi] toggleHudScreen to InGame\n[I 00:00:03,000] [input] closeVirtualKey");
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(acks.fresh(), 1, "a half written line waits");
+        text.push_str("board for user 0(1)\n");
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(acks.fresh(), 1);
+        assert_eq!(acks.fresh(), 0);
+        assert_eq!(LogAcks::new(dir.join("missing.log")).fresh(), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
