@@ -1,56 +1,59 @@
-local CHARGE_NOTIFIER = "ba663a7a-ba30-4ed3-8ae8-c6ec1d440304"
-local COLOR_TYPE = 1392743968
 local TAG = "[m182-vfx]"
+local VFX_TYPE = "keen::VfxResource"
+local COLOR_TYPE = 1392743968
 
-local PRESETS = {
-    original = "8822f231-cfdc-493e-94da-dcb68762ef11",
+local EFFECTS = {
     rayos = "df4962ec-1eaa-4c23-a8c1-0e5ac994f275",
+    rayos_mano = "65d48539-68c2-4086-9669-82c0a135ca8f",
     fuego = "f850bc76-0efb-4c80-a77e-da0fd5dffd60",
+    llama = "334d5410-faa3-4152-927b-98a64c2c992f",
     hielo = "8617bf03-e195-445e-9409-c89ff6a8a5f9",
+    escarcha = "c9f7b398-169c-4a56-9495-750c35fc53a1",
     niebla = "8685a499-da08-4290-8f1c-686e34c85699",
+    maldicion = "c5e00d19-2899-4832-9c4e-3d7b439049b0",
+    niebla_muerte = "872542d9-4e97-47fa-a2aa-407a4a8479ac",
     luz = "86962dd8-fc0c-425a-a9d3-2495fd7029a4",
     acido = "a4898fc5-e1a3-475c-b7dc-688e35401f07",
+    veneno = "d4ab4201-92bc-4323-9acd-b2f5dc583dc2",
     hueso = "fc09f4cf-2b3f-4ef4-b257-1cd1cdd4239f",
-    llama_arcana = "334d5410-faa3-4152-927b-98a64c2c992f",
     curacion = "a3d8af6b-d34f-4b1a-b633-a0a02a3b3c30",
     drenaje = "87c8d367-7684-4d8e-9a78-a25a59cc269e",
-    sangre = "df1647ca-ea1f-4d6e-bb7f-2c8bf27a7381",
-    sol = "db2ea485-9605-49a8-90e9-c84c5d881b5c",
-    aura_fuego = "2232ae40-60be-4e08-b653-f13ac50522a0",
-    escudo = "a7935575-4f91-4664-9ca7-81b3f353352e",
-    implosion_rayos = "05cb2c93-b7fe-4f82-bfac-2196e99b8307",
-    implosion_fuego = "ae3ec4fb-a3fb-4e97-97be-459e1d7f51ed",
-    implosion_hielo = "05a66c81-dda1-49fa-8db7-6cbfe40b16f3",
-    implosion_niebla = "c56bb712-a73d-460d-895e-1a14cffe9dcf",
-    implosion_hueso = "d0316cdf-d9f6-46dd-badf-4d3a787a2607",
-    explosion_fuego = "b0b78a7d-6ccf-4382-a2b1-2929a5505583",
-    bola_fuego = "50899bbd-9399-4387-b85b-ce4786f4af97",
-    meteoro = "8be85049-cbf5-47e4-b12a-ebf6e3fc1d1f",
-    laser = "585e557a-7e27-4e1b-91e6-702fb1140de2",
-    artilleria = "938949c5-8484-49b9-adec-22da3cfb4517",
+    ectoplasma = "0fd40c96-e14c-4d61-ab15-b061394bbb30",
+    tentaculos = "f29d3a6f-8a2b-4f18-9aa8-95ad1645198e",
+    ardiendo = "85e60392-52e2-4488-8653-2d539c18c80c",
+    aura_fuego = "0b12c979-65b2-43e1-80ab-e3bddb8f2f3e",
+    aura_agua = "15736b49-aed2-4c9c-b147-bdbfd5eff580",
+    sangre = "1603d364-10c1-4623-8c35-ba64884dd4eb",
+    manos_brillantes = "54347d4a-6815-4ffc-a9f7-25f96ae6f41e",
+    meteorico = "0f775769-5792-4db0-9f9c-2cbb92015073",
+    aturdido = "6ab9bfa1-8849-4b64-9fb1-f240882c26e2",
 }
 
-local CASTING_ACTIVE = 422966025
-local RADIUS = 230313139
-
-local OVERRIDES = {
-    rayos = { [CASTING_ACTIVE] = 1 },
-    fuego = { [CASTING_ACTIVE] = 1 },
-    hielo = { [CASTING_ACTIVE] = 1 },
-    niebla = { [CASTING_ACTIVE] = 1 },
-    luz = { [CASTING_ACTIVE] = 1 },
-    acido = { [CASTING_ACTIVE] = 1 },
-    hueso = { [CASTING_ACTIVE] = 1 },
-    llama_arcana = { [CASTING_ACTIVE] = 1 },
-    curacion = { [CASTING_ACTIVE] = 1 },
-    drenaje = { [CASTING_ACTIVE] = 1 },
-    laser = { [RADIUS] = 1073741824 },
-}
-
-local ALIASES = {
-    lightning = "rayos", rayo = "rayos", fire = "fuego", ice = "hielo", fog = "niebla", shroud = "niebla",
-    light = "luz", acid = "acido", bone = "hueso", arcane = "llama_arcana", heal = "curacion",
-    drain = "drenaje", blood = "sangre", sun = "sol", fire_aura = "aura_fuego", shield = "escudo",
+local SPELLS = {
+    VFX_Ability_Casting_Fire = "fuego",
+    VFX_Ability_Casting_Fire_Small = "fuego",
+    VFX_Ability_Casting_Fire_Flamethrower_TEST = "fuego",
+    VFX_Ability_Casting_The_Flame = "llama",
+    VFX_Ability_Casting_Summon_Skeleton = "llama",
+    VFX_Ability_Casting_Ice = "hielo",
+    VFX_Ability_Casting_Ice_Blizzard = "hielo",
+    VFX_Ability_Casting_Lightning = "rayo",
+    VFX_Ability_Casting_Lightning_Ball = "rayo",
+    VFX_pvp_tnt2_laser_terraformer_casting = "rayo",
+    VFX_Ability_Casting_Fog = "niebla",
+    VFX_Ability_Fog_Meteor_Level_01 = "niebla",
+    VFX_Ability_Casting_Light = "luz",
+    VFX_Ability_Eternal_Lightburst = "luz",
+    VFX_Ability_Casting_Acid = "acido",
+    VFX_Ability_Casting_Acid_Eternal = "acido",
+    VFX_Ability_Casting_Root_placeholder = "acido",
+    VFX_Ability_Casting_Bone = "hueso",
+    VFX_Ability_Bone_Channel_Level_2 = "hueso",
+    VFX_Ability_Casting_Heal_Channel = "curacion",
+    VFX_Ability_Casting_Heal_Channel_Eternal = "curacion",
+    VFX_Ability_Casting_Chain_Heal_Eternal = "curacion",
+    VFX_Ability_Casting_ManaDrain = "drenaje",
+    VFX_Ability_Casting_Water = "agua",
 }
 
 local NAMED_COLORS = {
@@ -66,18 +69,11 @@ local function try(f)
     return nil
 end
 
-local function hash_of(v)
-    if v == nil then return nil end
+local function num(v)
     if type(v) == "number" then return v end
     local inner = try(function() return v.value end)
     if type(inner) == "number" then return inner end
     return tonumber(tostring(v))
-end
-
-local function unsigned(n)
-    n = math.floor(n)
-    if n < 0 then n = n + 4294967296 end
-    return n
 end
 
 local function parse_color(text)
@@ -86,11 +82,25 @@ local function parse_color(text)
     if s == "" then return nil end
     s = NAMED_COLORS[s] or s
     s = s:gsub("^#", "")
-    if not s:match("^%x%x%x%x%x%x$") then return false end
-    local r = tonumber(s:sub(1, 2), 16)
-    local g = tonumber(s:sub(3, 4), 16)
-    local b = tonumber(s:sub(5, 6), 16)
-    return 0xFF000000 + b * 65536 + g * 256 + r
+    if not s:match("^%x%x%x%x%x%x$") then
+        print(TAG .. " invalid color '" .. text .. "' ignored")
+        return nil
+    end
+    return 0xFF000000 + tonumber(s:sub(5, 6), 16) * 65536 + tonumber(s:sub(3, 4), 16) * 256 + tonumber(s:sub(1, 2), 16)
+end
+
+local function color_list(entry)
+    local out = {}
+    if type(entry) == "table" then
+        for _, c in ipairs(entry) do
+            local v = parse_color(c)
+            if v then out[#out + 1] = v end
+        end
+    else
+        local v = parse_color(entry)
+        if v then out[1] = v end
+    end
+    return out
 end
 
 local loaded, CONFIG = pcall(require, "m182_vfx_config")
@@ -99,80 +109,99 @@ if not loaded or type(CONFIG) ~= "table" then
     CONFIG = {}
 end
 
-local key = string.lower(tostring(CONFIG.efecto or "rayos"))
-key = ALIASES[key] or key
-local target = PRESETS[key]
-if target == nil then
-    local names = {}
-    for name in pairs(PRESETS) do names[#names + 1] = name end
-    table.sort(names)
-    print(TAG .. " unknown effect '" .. key .. "', available: " .. table.concat(names, ", "))
-    return
-end
+local INTENSITY = tonumber(CONFIG.intensidad) or 1
+if INTENSITY < 1 then INTENSITY = 1 end
+if INTENSITY > 10 then INTENSITY = 10 end
+local DEFAULT_EFFECT = string.lower(tostring(CONFIG.efecto or "original"))
+local DEFAULT_COLORS = color_list(CONFIG.color)
+local PER_SPELL = type(CONFIG.hechizos) == "table" and CONFIG.hechizos or {}
 
-local colors = {}
-if type(CONFIG.colores) == "table" then
-    for _, c in ipairs(CONFIG.colores) do
-        local v = parse_color(c)
-        if v then colors[#colors + 1] = v
-        elseif v == false then print(TAG .. " invalid color '" .. tostring(c) .. "' ignored") end
+local function choice_for(spell)
+    local own = PER_SPELL[spell]
+    if type(own) == "table" then
+        local key = string.lower(tostring(own.efecto or DEFAULT_EFFECT))
+        local colors = color_list(own.color)
+        if #colors == 0 then colors = DEFAULT_COLORS end
+        return key, colors
+    elseif type(own) == "string" and own ~= "" then
+        return string.lower(own), DEFAULT_COLORS
     end
-end
-if #colors == 0 then
-    local v = parse_color(CONFIG.color)
-    if v then colors[1] = v
-    elseif v == false then print(TAG .. " invalid color '" .. tostring(CONFIG.color) .. "' ignored") end
+    return DEFAULT_EFFECT, DEFAULT_COLORS
 end
 
-local notifier = try(function() return game.assets.get_resource(CHARGE_NOTIFIER, "keen::NotifierResource") end)
-if notifier == nil then
-    print(TAG .. " charge notifier not found, nothing changed")
-    return
-end
-local vfx = try(function() return game.assets.get_resource(target, "keen::VfxResource") end)
-if vfx == nil then
-    print(TAG .. " effect " .. key .. " (" .. target .. ") not found, nothing changed")
-    return
-end
+local prepared = {}
+local prepared_count = 0
 
-local nd = notifier.data
-local vd = vfx.data
-local source = vd.defaultParameterData.data
-local params = {}
-for i = 1, 16 do params[i] = unsigned(hash_of(source[i]) or 0) end
-
-local forced = OVERRIDES[key] or {}
-local slots = 0
-for _, p in ipairs(vd.parameters) do
-    local name = hash_of(p.nameHash)
-    if name ~= nil and forced[unsigned(name)] ~= nil then
-        local index = math.floor((hash_of(p.dataRange.start) or 0) / 4) + 1
-        if index >= 1 and index <= 16 then params[index] = forced[unsigned(name)] end
+local function prepare(source_guid, key, colors)
+    if prepared[source_guid] then return source_guid end
+    local resource = try(function() return game.assets.get_resource(source_guid, VFX_TYPE, 0) end)
+    if resource == nil then
+        print(TAG .. " effect " .. key .. " (" .. source_guid .. ") not found")
+        return nil
     end
-    if hash_of(p.typeId) == COLOR_TYPE then
-        local index = math.floor((hash_of(p.dataRange.start) or 0) / 4) + 1
-        if index >= 1 and index <= 16 then
-            slots = slots + 1
-            if #colors > 0 then
-                params[index] = colors[((slots - 1) % #colors) + 1]
+    prepared[source_guid] = true
+    prepared_count = prepared_count + 1
+    local d = resource.data
+    local amplified, painted = 0, 0
+    if INTENSITY > 1 then
+        for _, p in ipairs(d.particles) do
+            local count = num(p.maxCount)
+            if count and count > 0 then
+                local target = math.floor(count * INTENSITY)
+                if target > count and pcall(function() p.maxCount = target end) then amplified = amplified + 1 end
+            end
+        end
+    end
+    if #colors > 0 then
+        local block = d.defaultParameterData.data
+        for _, p in ipairs(d.parameters) do
+            if num(p.typeId) == COLOR_TYPE then
+                local index = math.floor((num(p.dataRange.start) or 0) / 4) + 1
+                if index >= 1 and index <= 16 then
+                    painted = painted + 1
+                    block[index] = colors[((painted - 1) % #colors) + 1]
+                end
+            end
+        end
+    end
+    print(string.format("%s effect %s (%s) particles x%s: %d, colors: %d", TAG, key, source_guid, tostring(INTENSITY), amplified, painted))
+    return source_guid
+end
+
+local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end) or {}
+local patched, kept = 0, 0
+for _, resource in ipairs(templates) do
+    local data = resource.data
+    local name = try(function() return data.name end)
+    local spell = name and SPELLS[name]
+    if spell then
+        local key, colors = choice_for(spell)
+        for _, component in ipairs(data.components) do
+            if component.type == "keen::ecs::VfxComponentResource" and component.value ~= nil then
+                local current = try(function() return component.value.vfx end)
+                local source
+                if key == "original" or key == "" then
+                    source = current
+                else
+                    source = EFFECTS[key]
+                    if source == nil then
+                        print(TAG .. " unknown effect '" .. key .. "' for " .. spell .. ", keeping the original")
+                        source = current
+                        key = "original"
+                    end
+                end
+                if source ~= nil and (key ~= "original" or INTENSITY > 1 or #colors > 0) then
+                    local guid = prepare(source, key, colors)
+                    if guid and pcall(function() component.value.vfx = guid end) then
+                        patched = patched + 1
+                        print(TAG .. " " .. name .. " (" .. spell .. ") = " .. key)
+                    end
+                else
+                    kept = kept + 1
+                end
             end
         end
     end
 end
 
-local ok, err = pcall(function()
-    nd.defaultVfx = target
-    local block = nd.defaultVfxInitParameters.data
-    for i = 1, 16 do block[i] = params[i] end
-end)
-if not ok then
-    print(TAG .. " could not write the charge aura: " .. tostring(err))
-    return
-end
-
-local written = try(function() return nd.defaultVfx end)
-print(string.format("%s charge aura = %s (%s) written=%s color slots=%d colors applied=%s",
-    TAG, key, target, tostring(written == target), slots, tostring(#colors > 0 and slots > 0)))
-if #colors > 0 and slots == 0 then
-    print(TAG .. " effect " .. key .. " has no color option, its own colors are used")
-end
+print(string.format("%s done: spell visuals changed=%d unchanged=%d effects prepared=%d", TAG, patched, kept, prepared_count))
