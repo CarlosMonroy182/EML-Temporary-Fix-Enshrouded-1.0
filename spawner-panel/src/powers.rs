@@ -15,6 +15,7 @@ pub struct PowersState {
     pub stamina: bool,
     pub fly: bool,
     pub fly_speed: f32,
+    pub map_travel: bool,
     pub unknown_height: bool,
     pub teleport: [f64; 3],
     pub notice: String,
@@ -22,7 +23,7 @@ pub struct PowersState {
 
 impl Default for PowersState {
     fn default() -> Self {
-        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, unknown_height: true, teleport: [0.0; 3], notice: String::new() }
+        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, map_travel: false, unknown_height: true, teleport: [0.0; 3], notice: String::new() }
     }
 }
 
@@ -32,6 +33,7 @@ impl PowersState {
         if let Some(v) = std::fs::read_to_string(dir.join(POWERS_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
             s.god = v.get("god").and_then(|x| x.as_bool()).unwrap_or(false);
             s.stamina = v.get("stamina").and_then(|x| x.as_bool()).unwrap_or(false);
+            s.map_travel = v.get("map_travel").and_then(|x| x.as_bool()).unwrap_or(false);
         }
         s
     }
@@ -42,6 +44,7 @@ impl PowersState {
             "stamina": self.stamina,
             "fly": false,
             "fly_speed": self.fly_speed,
+            "map_travel": self.map_travel,
         })
     }
 }
@@ -94,6 +97,10 @@ impl App {
         divider(ui);
 
         heading(ui, "Teletransporte", 18.0);
+        if ui.checkbox(&mut self.powers.map_travel, "Viaje por el mapa: al poner un marcador en el mapa del juego viajas hasta ahí").changed() {
+            self.save_powers();
+        }
+        ui.add_space(4.0);
         if !self.places.is_empty() {
             let mut picked = None;
             egui::ComboBox::from_id_salt("tp_place").selected_text("Copiar coordenadas de un lugar guardado…").show_ui(ui, |ui| {
@@ -159,5 +166,20 @@ mod tests {
         assert_eq!(unknown["at"][2], 3.0);
         assert!(unknown.get("ground").is_none());
         assert_eq!(marker_body(), json!({"cmd": "teleport", "to": "waypoint"}));
+    }
+
+    #[test]
+    fn map_travel_is_written_with_the_other_powers_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("m182_map_travel_panel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = PowersState::default();
+        assert_eq!(state.to_json()["map_travel"], false);
+        state.map_travel = true;
+        save(&dir, &state).unwrap();
+        let text = std::fs::read_to_string(dir.join(POWERS_FILE)).unwrap();
+        assert!(text.contains("\"map_travel\":true"), "{text}");
+        assert!(PowersState::load(&dir).map_travel);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

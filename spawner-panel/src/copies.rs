@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-pub const ENABLED: bool = false;
+pub const ENABLED: bool = true;
 pub const FILE: &str = "m182_copies.json";
 pub const READY_FILE: &str = "export/m182_custom_items.csv";
 pub const SLOTS: u32 = 8;
@@ -319,18 +319,14 @@ mod tests {
     }
 
     #[test]
-    fn shipped_weapons_are_ready_without_a_restart() {
+    fn no_copies_exist_until_an_item_is_edited() {
         let dir = temp("prebuilt");
-        let base = prebuilt().next().unwrap();
-        assert!(prebuilt().count() > 500);
+        assert_eq!(prebuilt().count(), 0);
         let mut book = Book::load(&dir);
         assert_eq!(book.pending_count(), 0);
-        assert_eq!(book.plan(base, &stats(5.0), None), Plan::Use { slot: 1, fresh: true });
-        assert!(!book.register(base, 4));
-        let mut old = Book::default();
-        old.register(base, 4);
-        old.save(&dir).unwrap();
-        assert_eq!(Book::load(&dir).pending_count(), 0);
+        assert_eq!(book.plan(10, &stats(5.0), None), Plan::NoPool);
+        assert!(book.register(10, 4));
+        assert_eq!(book.pending_count(), 1);
     }
 
     #[test]
