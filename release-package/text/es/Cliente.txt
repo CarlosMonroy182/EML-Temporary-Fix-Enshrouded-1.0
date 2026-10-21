@@ -25,7 +25,7 @@ El panel detecta solo si estas en tu partida o en el servidor. No hay casillas q
 
 PESTAÑAS
 - Criaturas: invoca criaturas o crea apariciones que reaparecen solas (en tu posicion o en un lugar guardado), con nivel, vida y daño a tu gusto.
-- Muchas apariciones: puedes crear 50 o mas (hasta 20 criaturas cada una). Una aparicion solo crea sus criaturas cuando hay un jugador a menos de 150 m; lejos queda en reposo y, al volver, las criaturas que falten reaparecen de inmediato. Asi el servidor no carga con todas a la vez. En la lista, cada aparicion indica a cuantos metros estas de ella. Al crear o borrar una, al servidor solo se le manda ese cambio (unos 5 mensajes de chat), no toda la lista; "Reenviar todo" si manda la lista completa (unos 3 mensajes por aparicion, tarda).
+- Muchas apariciones: puedes crear 50 o mas (hasta 20 criaturas cada una). Puedes poner varias en el mismo lugar. Una aparicion solo crea sus criaturas cuando hay un jugador a menos de 150 m; lejos queda en reposo y, al volver, las criaturas que falten reaparecen de inmediato. Asi el servidor no carga con todas a la vez. En la lista, cada aparicion indica a cuantos metros estas de ella. Al crear o borrar una, al servidor solo se le manda ese cambio (unos 5 mensajes de chat), no toda la lista; "Reenviar todo" si manda la lista completa (unos 3 mensajes por aparicion, tarda).
 - Ítems: entrega items con nivel, rareza y cantidad, y edita sus stats. Cambiar los stats de un item cambia ese item para todos (se aplica al reiniciar el servidor); "Restaurar valores originales" lo deja como el juego.
 - Lugares: guarda posiciones para usarlas en apariciones y zonas.
 - Admin: modo dios, stamina y mana infinitos, curarte al instante.
@@ -35,15 +35,13 @@ PESTAÑAS
 
 ZONAS Y BASES
 - Zona segura: nadie pierde vida dentro. Al entrar suena y se ve el efecto de curacion del juego sobre el jugador, y mientras siga dentro se repite un destello suave cada pocos segundos.
-- Base protegida: crea la zona donde esta la base, elige el "Equipo dueño" y marca "Base protegida". Quien no sea de ese equipo es visitante dentro: el juego le niega abrir cofres y construir o editar (se aplica donde el servidor revisa los permisos del jugador; m182_spawner.log del servidor dice "permissions hooked" al arrancar y "is a visitor now" cuando alguien queda restringido). Los administradores quedan exentos (marca "tambien a los administradores" solo para probarlo).
+- Base protegida: crea la zona donde esta la base, elige el "Equipo dueño" y marca "Base protegida". Quien no sea de ese equipo es visitante dentro: el juego le niega abrir cofres y construir o editar. Los administradores quedan exentos (marca "tambien a los administradores" solo para probarlo). Si dos bases se traslapan, en la parte comun manda la mas pequeña (si miden igual, la que tenga el centro mas cerca del jugador).
 
 EQUIPOS
 - En el servidor pulsa "Buscar jugadores del servidor": el servidor contesta en el chat con los nombres conectados (lo ven todos, es una linea corta). Si no pudo leer algun nombre aparece como "ID N". Si estas tu solo en el servidor, te lista con tu nombre y tu ID de Steam (los toma de Steam en tu PC) y el servidor te reconoce por ese nombre. Tambien puedes añadir un nombre a mano.
 - Velocidad de escritura del chat: si el servidor pierde letras, en m182_panel.json añade "typing_burst": 1 y "typing_gap_ms": 4.
 
-LIMITES (sinceridad)
-- Sin confirmar en el juego real: el bloqueo de cofres y construccion para visitantes de una base protegida, el destello al entrar a una zona segura y el reconocimiento por nombre cuando estas solo en el servidor. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
-- Las respuestas del servidor solo llegan para la lista de jugadores. Si algo no aparece, revisa m182_spawner.log del servidor.
+NOTAS
 - Botin: las criaturas invocadas sueltan su botin normal del juego.
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. No hay que subir nada por FTP.
 
