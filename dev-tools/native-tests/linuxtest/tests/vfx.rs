@@ -122,7 +122,7 @@ fn elements_follow_the_damage_columns() {
 #[test]
 fn burst_points_form_a_ring_in_front() {
     let m = 4294967296.0f64;
-    let b = vfx::Burst { effects: vec!["x".into()], scale: 2.0, height: 1.0, distance: 2.0, ring: 4, radius: 1.0 };
+    let b = vfx::Burst { life_ms: None, effects: vec!["x".into()], scale: 2.0, height: 1.0, distance: 2.0, ring: 4, radius: 1.0 };
     let pts = vfx::burst_points((10.0 * m) as i64, (5.0 * m) as i64, (20.0 * m) as i64, (0.0, 1.0), &b);
     assert_eq!(pts.len(), 4);
     for (x, y, z) in &pts {
@@ -220,6 +220,7 @@ fn queued_bursts_are_created_from_the_spawn_hook_with_scale() {
     SEEN.lock().unwrap().clear();
 
     let b = vfx::Burst {
+        life_ms: None,
         effects: vec!["VFX_Trap_Electro_Impact".into(), "VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion".into(), "missing_effect".into()],
         scale: 4.0,
         height: 0.0,
@@ -259,7 +260,7 @@ fn server_tick_creates_queued_effects_without_waiting_for_the_game() {
     SEEN.lock().unwrap().clear();
     vfx::server_tick();
     assert_eq!(SEEN.lock().unwrap().len(), 0);
-    let b = vfx::Burst { effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
+    let b = vfx::Burst { life_ms: None, effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
     vfx::queue_burst((1 << 32, 2 << 32, 3 << 32), (0.0, 1.0), &b);
     vfx::server_tick();
     assert!(!vfx::pending());
@@ -287,7 +288,7 @@ fn pump_hook_keeps_arguments_and_runs_the_queue() {
     SEEN.lock().unwrap().clear();
     PUMPED.lock().unwrap().clear();
     patch::PUMP_TRAMPOLINE.store(fake_pump as usize, Ordering::SeqCst);
-    let b = vfx::Burst { effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
+    let b = vfx::Burst { life_ms: None, effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
     vfx::queue_burst((0, 0, 0), (0.0, 1.0), &b);
     let stub: extern "win64" fn(usize, usize, usize, usize) -> usize = unsafe { std::mem::transmute(patch::stub_pump as usize) };
     let r = stub(0x1111, 0x2222, 0x3333, 0x4444);
@@ -366,37 +367,56 @@ fn hand_glow_is_created_glued_to_the_players_right_hand() {
 }
 
 #[test]
-fn crouch_gestures_toggle_and_switch_the_aura() {
+fn crouch_toggles_and_victory_switches_the_aura() {
     let sneak = READY | 1 << vfx::FLAG_SNEAK;
+    let v = vfx::EMOTE_VICTORY;
     let mut st = vfx::AuraState::default();
-    let mut t = 0u64;
-    let mut feed = |st: &mut vfx::AuraState, f: u64, t: &mut u64, dt: u64| { *t += dt; vfx::gesture_step(st, f, *t) };
-    assert_eq!(feed(&mut st, READY, &mut t, 10), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, READY, &mut t, 200), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, READY, &mut t, 300), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, READY, &mut t, 400), vfx::Gesture::Toggle);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((5, 99)), 0), vfx::Gesture::None);
+    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((5, 99)), 10), vfx::Gesture::Toggle);
     assert!(st.on);
-    assert_eq!(st.index, 0);
-    for f in [sneak, READY, sneak, READY] {
-        assert_eq!(feed(&mut st, f, &mut t, 150), vfx::Gesture::None);
-    }
-    assert_eq!(feed(&mut st, READY, &mut t, 700), vfx::Gesture::Next);
-    assert!(st.on);
+    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((5, 99)), 20), vfx::Gesture::None);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((5, 99)), 30), vfx::Gesture::None, "standing up does nothing");
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, v)), 40), vfx::Gesture::Next);
     assert_eq!(st.index, 1);
-    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, sneak, &mut t, 3000), vfx::Gesture::None, "one crouch is not a gesture");
-    assert_eq!(feed(&mut st, READY, &mut t, 100), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
-    assert_eq!(feed(&mut st, sneak, &mut t, 700), vfx::Gesture::Toggle);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, v)), 50), vfx::Gesture::None, "same emote seen again");
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((7, 1773809286)), 60), vfx::Gesture::None, "another emote");
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((8, v)), 70), vfx::Gesture::Next);
+    assert_eq!(st.index, 2);
+    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((8, v)), 80), vfx::Gesture::Toggle);
     assert!(!st.on);
-    for f in [READY, sneak, READY, sneak] {
-        feed(&mut st, f, &mut t, 100);
-    }
-    assert_eq!(feed(&mut st, sneak, &mut t, 700), vfx::Gesture::Next);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((9, v)), 90), vfx::Gesture::Next);
     assert!(st.on);
-    assert_eq!(st.index, 1, "turning on with the switch gesture keeps the last effect");
+    assert_eq!(st.index, 2, "turning on with victory keeps the last effect");
+    let mut fresh = vfx::AuraState::default();
+    assert_eq!(vfx::gesture_step(&mut fresh, sneak, Some((3, v)), 0), vfx::Gesture::None, "state already present when first seen");
     for a in vfx::AURAS.iter() {
-        assert!(!a.effects.is_empty());
+        assert!(!a.effects.is_empty() || a.body.is_some());
     }
+}
+
+#[test]
+fn lingering_effects_carry_a_longer_life_and_daggers_are_found_in_any_hand() {
+    let _g = LOCK.lock().unwrap();
+    let mut equipment = vec![0u8; 1380];
+    equipment[16..20].copy_from_slice(&1u32.to_le_bytes());
+    equipment[8 + 72 + 8..8 + 72 + 12].copy_from_slice(&2222u32.to_le_bytes());
+    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56]), (40, 1380, 0x2000, equipment)]);
+    let mgr = w.mem.as_ptr() as usize;
+    let mut items = std::collections::HashMap::new();
+    items.insert(2222u32, vfx::ItemKind { element: vfx::Element::Poison, wand: false, weapon: true });
+    vfx::set_items(items);
+    assert_eq!(vfx::main_hand(mgr, 1).map(|(_, i)| i), Some(2222));
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    let b = vfx::Burst { life_ms: Some(1200), effects: vec!["VFX_Spell_ManaDrain_Mana_OnPlayer".into()], scale: 1.5, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
+    vfx::queue_burst((0, 0, 0), (0.0, 1.0), &b);
+    vfx::server_tick();
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (_, desc, data) = &seen[0];
+    assert_eq!(u64::from_le_bytes(desc[0x20..0x28].try_into().unwrap()), 2);
+    assert_eq!(&data[60..64], &0xf22c_253cu32.to_le_bytes());
+    assert_eq!(u64::from_le_bytes(data[64..72].try_into().unwrap()), 1_200_000_000);
+    vfx::set_items(std::collections::HashMap::new());
 }
