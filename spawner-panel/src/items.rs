@@ -566,7 +566,10 @@ pub fn lua_data(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, le
 pub fn lua_code() -> String {
     let mut s = String::new();
     s.push_str(
-        r#"local loaded, DATA = pcall(require, "m182_data")
+        r#"local loaded, DATA = false, nil
+if io.exists("src/m182_data.lua") == true then
+    loaded, DATA = pcall(require, "m182_data")
+end
 if not loaded or type(DATA) ~= "table" then DATA = {} end
 local OVERRIDES = type(DATA.overrides) == "table" and DATA.overrides or {}
 local LEVELS = type(DATA.levels) == "table" and DATA.levels or {}
@@ -589,6 +592,10 @@ local FREE_SKILLS = BALANCE["freeSkills"] == 1
 BALANCE["freeSkills"] = nil
 local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
 if WIDEN <= 55 then WIDEN = 0 end
+if next(OVERRIDES) == nil and next(LEVELS) == nil and next(BALANCE) == nil and not FREE_SKILLS and WIDEN == 0 then
+    print("[m182-item-stats] no item settings saved, nothing to apply")
+    do return end
+end
 
 local function try(f)
     local ok, r = pcall(f)
