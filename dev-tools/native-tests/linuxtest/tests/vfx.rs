@@ -420,3 +420,20 @@ fn lingering_effects_carry_a_longer_life_and_daggers_are_found_in_any_hand() {
     assert_eq!(u64::from_le_bytes(data[64..72].try_into().unwrap()), 1_200_000_000);
     vfx::set_items(std::collections::HashMap::new());
 }
+
+#[test]
+fn installed_by_config_in_any_case_or_by_the_lua_mod() {
+    let base = std::env::temp_dir().join(format!("m182vfx{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    assert!(!vfx::installed(&base));
+    std::fs::write(base.join("M182_VFX.json"), "{}").unwrap();
+    assert!(vfx::installed(&base));
+    assert_eq!(vfx::config_path(&base).unwrap().file_name().unwrap(), "M182_VFX.json");
+    std::fs::remove_file(base.join("M182_VFX.json")).unwrap();
+    std::fs::create_dir_all(base.join("mods").join("m182_vfx")).unwrap();
+    std::fs::write(base.join("mods").join("m182_vfx").join("mod.json"), "{}").unwrap();
+    assert!(vfx::installed(&base));
+    assert!(vfx::config_path(&base).is_none());
+    let _ = std::fs::remove_dir_all(&base);
+}

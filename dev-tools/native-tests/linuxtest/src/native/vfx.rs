@@ -882,8 +882,26 @@ fn position_of(manager: usize, id: u32) -> Option<((i64, i64, i64), (f64, f64))>
     Some((at, spawner::facing_direction(&t)))
 }
 
+/// `m182_vfx.json` next to the game, matched without regard to letter case.
+pub fn config_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let exact = dir.join(CONFIG_FILE);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| {
+        p.is_file() && p.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case(CONFIG_FILE)).unwrap_or(false)
+    })
+}
+
+/// The module is installed when its config or its Lua mod folder is next to the game.
+pub fn installed(dir: &std::path::Path) -> bool {
+    config_path(dir).is_some() || dir.join("mods").join("m182_vfx").join("mod.json").is_file()
+}
+
 fn load(dir: &std::path::Path) -> Option<(VfxConfig, Option<SystemTime>)> {
-    let path = dir.join(CONFIG_FILE);
+    let Some(path) = config_path(dir) else {
+        return Some((VfxConfig::default(), None));
+    };
     let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
     let text = std::fs::read_to_string(&path).ok()?;
     match parse_config(&text) {
@@ -898,10 +916,15 @@ fn load(dir: &std::path::Path) -> Option<(VfxConfig, Option<SystemTime>)> {
 /// Starts the effect thread when `m182_vfx.json` exists next to the game.
 pub fn start() {
     let Ok(dir) = std::env::current_dir() else { return };
-    if !dir.join(CONFIG_FILE).exists() || STARTED.swap(true, Ordering::SeqCst) {
+    if !installed(&dir) {
+        tracing::info!(target: "m182::vfx", dir = ?dir, "M182 VFX not installed (no m182_vfx.json and no mods/m182_vfx), effects off");
+        return;
+    }
+    if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     let _ = CLOCK.get_or_init(Instant::now);
+    tracing::info!(target: "m182::vfx", dir = ?dir, log = LOG_FILE, "M182 VFX started");
     log("vfx: started");
     if let Err(e) = std::thread::Builder::new().name("m182-vfx".into()).spawn(move || run_loop(dir)) {
         tracing::warn!(target: "m182::vfx", error = %e, "could not start vfx thread");
@@ -922,7 +945,7 @@ fn run_loop(dir: std::path::PathBuf) {
         std::thread::sleep(Duration::from_millis(60));
         if checked.elapsed() >= Duration::from_secs(2) {
             checked = Instant::now();
-            let stamp = std::fs::metadata(dir.join(CONFIG_FILE)).and_then(|m| m.modified()).ok();
+            let stamp = config_path(&dir).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
             if stamp != modified || CONFIG.lock().map(|c| c.is_none()).unwrap_or(false) {
                 if let Some((cfg, m)) = load(&dir) {
                     modified = m;
