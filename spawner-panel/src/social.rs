@@ -164,6 +164,33 @@ pub fn roster_seen(list: &[(u32, String)]) -> Vec<Seen> {
         .collect()
 }
 
+/// Entity number of this account in the server's player list: by Steam id when the list has it,
+/// otherwise by name when exactly one player has that name.
+pub fn own_entity(list: &[(u32, String)], me: &crate::steam::Account) -> Option<u32> {
+    let wanted = format!("steamid:{}", me.id.trim()).to_lowercase();
+    let parts = |label: &str| -> (String, String) {
+        match label.split_once('~') {
+            Some((name, id)) => (name.trim().to_lowercase(), id.trim().to_lowercase()),
+            None => (label.trim().to_lowercase(), String::new()),
+        }
+    };
+    if !me.id.trim().is_empty() {
+        let by_id: Vec<u32> = list.iter().filter(|(_, label)| parts(label).1 == wanted).map(|(n, _)| *n).collect();
+        if let [n] = by_id.as_slice() {
+            return Some(*n);
+        }
+    }
+    let name = me.name.trim().to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let by_name: Vec<u32> = list.iter().filter(|(_, label)| parts(label).0 == name).map(|(n, _)| *n).collect();
+    match by_name.as_slice() {
+        [n] => Some(*n),
+        _ => None,
+    }
+}
+
 pub const MANUAL_PLAYERS: u32 = 8;
 
 pub fn manual_players() -> Vec<Seen> {
@@ -357,6 +384,12 @@ impl SocialState {
         if let Some(list) = parse_roster(&text, self.roster_seq) {
             self.roster = list;
             self.roster_asked = None;
+            if let Some(n) = self.me.as_ref().and_then(|me| own_entity(&self.roster, me)) {
+                let text = json!({"entity": n}).to_string();
+                if write_atomic(dir, "m182_self.json", "m182_self.json.tmp", &text).is_ok() {
+                    crate::remote::note(&format!("your character in the server's player list is entity {n}"));
+                }
+            }
             self.notice = format!("{} jugador(es) conectado(s) al servidor.", self.roster.len());
         }
     }
@@ -767,6 +800,20 @@ mod tests {
         assert_eq!(fallback.len(), 2);
         assert_eq!(fallback[0].member.name, "Tú (ID 1)");
     }
+    #[test]
+    fn the_own_character_is_found_in_the_server_list() {
+        let me = crate::steam::Account { name: "moradoox".into(), id: "76561199474170255".into() };
+        let list = vec![(1, "Heindallr~steamid:76561190000000001".to_string()), (5, "moradoox~steamid:76561199474170255".to_string())];
+        assert_eq!(own_entity(&list, &me), Some(5));
+        let renamed = vec![(1, "Heindallr~steamid:76561190000000001".to_string()), (4, "Otro~steamid:76561199474170255".to_string())];
+        assert_eq!(own_entity(&renamed, &me), Some(4));
+        let by_name = vec![(1, "Heindallr".to_string()), (3, "MORADOOX".to_string())];
+        assert_eq!(own_entity(&by_name, &me), Some(3));
+        let twins = vec![(2, "moradoox".to_string()), (3, "moradoox".to_string())];
+        assert_eq!(own_entity(&twins, &me), None);
+        assert_eq!(own_entity(&[(1, "Heindallr".to_string())], &me), None);
+    }
+
     #[test]
     fn alone_on_a_server_the_player_is_listed_by_the_steam_name() {
         let mut state = SocialState::default();
