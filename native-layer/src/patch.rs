@@ -234,7 +234,7 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
             1
         }
         super::chat::Verdict::Roster(seq) => {
-            let line = super::spawner::roster_line(seq);
+            let line = super::spawner::roster_line(seq, client as u32);
             let sent = replace_text(text, &line);
             super::spawner::log(&format!("chat: client {} asked for the player list ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
             if sent { 0 } else { 1 }

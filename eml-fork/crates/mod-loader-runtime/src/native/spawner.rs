@@ -2631,7 +2631,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     }
 }
 
-pub fn roster_line(seq: u32) -> String {
+pub fn roster_line(seq: u32, client: u32) -> String {
     let table = super::table::entries();
     let mut ids: Vec<u32> = tracked_ids();
     for e in &table {
@@ -2648,7 +2648,12 @@ pub fn roster_line(seq: u32) -> String {
             (id, roster::label_with_id(&name, entry.and_then(|e| e.id.as_deref())))
         })
         .collect();
-    super::roster::reply_text(seq, &entries)
+    // Chat client 64 is entity 1, 65 entity 2, ...: the asking player is known for certain.
+    let asking = (client & 0x3f) + 1;
+    let own = transform_of(SERVER_MGR.load(Ordering::SeqCst), asking).map(|t| {
+        (asking, [le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS])
+    });
+    super::roster::reply_text_with_own(seq, &entries, own)
 }
 
 fn record_trail(pos: (i64, i64, i64)) {
@@ -3282,7 +3287,7 @@ fn decode_after(bytes: &[u8], wide: bool) -> String {
     }
 }
 
-fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<Vec<(u32, String)>> {
+fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String)>, Option<(u32, [f64; 3])>)> {
     let marker = roster::tag(seq);
     let narrow = marker.as_bytes().to_vec();
     let wide = utf16le(&marker);
@@ -3303,7 +3308,7 @@ fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<Vec<(u32, String)
                     let tail = &b[hit..b.len().min(hit + 2200)];
                     let text = decode_after(tail, is_wide);
                     if let Some(list) = roster::parse_reply(&text, seq) {
-                        return Some(list);
+                        return Some((list, roster::parse_own(&text, seq)));
                     }
                 }
             }
@@ -3319,8 +3324,8 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
     let found = loop {
         passes += 1;
         let regions = data_regions();
-        if let Some(list) = find_roster(&regions, seq) {
-            break Some(list);
+        if let Some(found) = find_roster(&regions, seq) {
+            break Some(found);
         }
         if started.elapsed() > Duration::from_secs(60) {
             break None;
@@ -3328,12 +3333,16 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
         std::thread::sleep(Duration::from_millis(400));
     };
     match found {
-        Some(list) => {
+        Some((list, own)) => {
             let players: Vec<String> = list
                 .iter()
                 .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
                 .collect();
-            let text = format!("{{\"seq\":{seq},\"players\":[{}]}}", players.join(","));
+            let me = match own {
+                Some((n, p)) => format!(",\"me\":{{\"n\":{n},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1}}}", p[0], p[1], p[2]),
+                None => String::new(),
+            };
+            let text = format!("{{\"seq\":{seq},\"players\":[{}]{me}}}", players.join(","));
             let tmp = dir.join("m182_online.json.tmp");
             if std::fs::write(&tmp, text).is_ok() {
                 let _ = std::fs::rename(&tmp, dir.join(ONLINE_FILE));

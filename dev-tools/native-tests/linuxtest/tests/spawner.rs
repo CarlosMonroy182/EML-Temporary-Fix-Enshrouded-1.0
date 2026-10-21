@@ -1848,7 +1848,7 @@ fn a_table_player_whose_entity_is_not_a_player_is_not_tracked() {
 fn the_player_list_is_read_back_from_wherever_the_chat_left_it() {
     use linuxtest::native::roster;
     let _g = LOCK.lock().unwrap();
-    let line = roster::reply_text(41, &[(1, "Carlos".into()), (2, "Ñandú".into())]);
+    let line = roster::reply_text_with_own(41, &[(1, "Carlos".into()), (2, "Ñandú".into())], Some((2, [2995.1, 895.0, 1607.7])));
     let mut narrow = vec![0u8; 5000];
     narrow[1000..1000 + line.len()].copy_from_slice(line.as_bytes());
     let mut wide = vec![0u8; 5000];
@@ -1860,7 +1860,8 @@ fn the_player_list_is_read_back_from_wherever_the_chat_left_it() {
     for (memory, label) in [(&narrow, "utf-8"), (&wide, "utf-16")] {
         let region = [(memory.as_ptr() as usize, memory.as_ptr() as usize + memory.len())];
         let found = spawner::find_roster(&region, 41).unwrap_or_else(|| panic!("{label}: not found"));
-        assert_eq!(found, vec![(1, "Carlos".to_string()), (2, "Ñandú".to_string())], "{label}");
+        assert_eq!(found.0, vec![(1, "Carlos".to_string()), (2, "Ñandú".to_string())], "{label}");
+        assert_eq!(found.1, Some((2, [2995.1, 895.0, 1607.7])), "{label}");
     }
     let region = [(old.as_ptr() as usize, old.as_ptr() as usize + old.len())];
     assert!(spawner::find_roster(&region, 41).is_none(), "an answer to an older question is not the answer");

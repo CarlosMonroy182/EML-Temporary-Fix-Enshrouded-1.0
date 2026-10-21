@@ -231,15 +231,20 @@ pub fn label_with_id(name: &str, id: Option<&str>) -> String {
     }
 }
 
-/// `[M182#7] 1=Ana|2=Luis`: one chat line that tells the admin's panel who is connected.
+/// `[M182#7] 1=Ana|2=Luis ^2@2995.1,895.0,1607.7`: one chat line that tells the admin's panel who
+/// is connected and, after the `^`, which entity asked and where it is standing.
 pub fn reply_text(seq: u32, entries: &[(u32, String)]) -> String {
+    reply_text_with_own(seq, entries, None)
+}
+
+pub fn reply_text_with_own(seq: u32, entries: &[(u32, String)], own: Option<(u32, [f64; 3])>) -> String {
     let mut out = tag(seq);
     out.push(' ');
     let mut first = true;
     for (number, name) in entries {
-        let safe: String = name.chars().filter(|c| *c != '|' && *c != '=' && !c.is_control()).collect();
+        let safe: String = name.chars().filter(|c| *c != '|' && *c != '=' && *c != '^' && !c.is_control()).collect();
         let part = format!("{}{number}={safe}", if first { "" } else { "|" });
-        if out.len() + part.len() > 900 {
+        if out.len() + part.len() > 800 {
             break;
         }
         out.push_str(&part);
@@ -248,14 +253,23 @@ pub fn reply_text(seq: u32, entries: &[(u32, String)]) -> String {
     if first {
         out.push('-');
     }
+    if let Some((entity, p)) = own {
+        if p.iter().all(|v| v.is_finite()) {
+            out.push_str(&format!(" ^{entity}@{:.1},{:.1},{:.1}", p[0], p[1], p[2]));
+        }
+    }
     out
 }
 
-pub fn parse_reply(text: &str, seq: u32) -> Option<Vec<(u32, String)>> {
+fn reply_line(text: &str, seq: u32) -> Option<&str> {
     let marker = tag(seq);
     let start = text.find(&marker)? + marker.len();
-    let body = text[start..].trim_start();
-    let line = body.lines().next().unwrap_or("").trim();
+    Some(text[start..].trim_start().lines().next().unwrap_or("").trim())
+}
+
+pub fn parse_reply(text: &str, seq: u32) -> Option<Vec<(u32, String)>> {
+    let line = reply_line(text, seq)?;
+    let line = line.split(" ^").next().unwrap_or("").trim();
     let mut out = Vec::new();
     if line == "-" {
         return Some(out);
@@ -265,6 +279,18 @@ pub fn parse_reply(text: &str, seq: u32) -> Option<Vec<(u32, String)>> {
         out.push((n.trim().parse().ok()?, name.trim().to_string()));
     }
     Some(out)
+}
+
+/// The asking entity and its position, when the server added them to the list.
+pub fn parse_own(text: &str, seq: u32) -> Option<(u32, [f64; 3])> {
+    let line = reply_line(text, seq)?;
+    let (_, tail) = line.split_once(" ^")?;
+    let (entity, pos) = tail.trim().split_once('@')?;
+    let values: Vec<f64> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    if values.len() != 3 || values.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some((entity.trim().parse().ok()?, [values[0], values[1], values[2]]))
 }
 
 /// Start of every place where `needle` occurs in `hay`.
@@ -429,6 +455,20 @@ mod tests {
         let wide: Vec<u8> = "[M182#9] 1=Ana".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let marker: Vec<u8> = "[M182#9]".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         assert_eq!(find_all(&wide, &marker), vec![0]);
+    }
+
+    #[test]
+    fn the_list_carries_the_asking_player_and_its_position() {
+        let text = reply_text_with_own(9, &[(1, "Ana".into()), (5, "Carlos".into())], Some((5, [2995.14, 895.0, 1607.66])));
+        assert_eq!(text, "[M182#9] 1=Ana|5=Carlos ^5@2995.1,895.0,1607.7");
+        assert_eq!(parse_reply(&text, 9).unwrap(), vec![(1, "Ana".to_string()), (5, "Carlos".to_string())]);
+        assert_eq!(parse_own(&format!("Server: {text}"), 9), Some((5, [2995.1, 895.0, 1607.7])));
+        assert_eq!(parse_own(&reply_text(9, &[(1, "Ana".into())]), 9), None);
+        assert_eq!(parse_own(&text, 8), None);
+        let tricky = reply_text_with_own(3, &[(2, "a ^ b".into())], Some((2, [1.0, 2.0, 3.0])));
+        assert_eq!(parse_reply(&tricky, 3).unwrap(), vec![(2, "a  b".to_string())]);
+        let broken = reply_text_with_own(3, &[(2, "x".into())], Some((2, [f64::NAN, 0.0, 0.0])));
+        assert_eq!(parse_own(&broken, 3), None);
     }
 
     #[test]
