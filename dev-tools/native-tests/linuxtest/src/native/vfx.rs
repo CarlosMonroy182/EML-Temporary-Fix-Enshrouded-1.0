@@ -563,6 +563,12 @@ pub fn staff_scale(e: Element) -> f32 {
 
 /// Template made by the M182 VFX Lua mod: the element's glow, attached on the server to the
 /// player's weapon hand.
+pub fn glow_template(n: u8) -> [u8; 16] {
+    let mut g = super::config::parse_guid("182e1e00-0000-4000-8000-000000000000").unwrap_or([0; 16]);
+    g[15] = n;
+    g
+}
+
 pub fn hand_template(e: Element) -> [u8; 16] {
     let n: u8 = match e {
         Element::Lightning => 1,
@@ -785,22 +791,34 @@ pub struct Aura {
     pub name: &'static str,
     pub effects: &'static [&'static str],
     pub scale: f32,
-    pub body: Option<Element>,
+    pub glow: Option<u8>,
     pub life_ms: Option<u64>,
     pub every_ms: u64,
 }
 
 pub const LINGER_MS: u64 = 1200;
 
-pub const AURAS: [Aura; 8] = [
-    Aura { name: "fire", effects: &[], scale: 1.0, body: Some(Element::Fire), life_ms: None, every_ms: HAND_EVERY_MS },
-    Aura { name: "lightning", effects: &["VFX_Trap_Electro_Impact"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
-    Aura { name: "ice", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
-    Aura { name: "shroud", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"], scale: 1.0, body: None, life_ms: None, every_ms: 400 },
-    Aura { name: "holy light", effects: &["VFX_Resource_Increase_Health_NoSound"], scale: 1.5, body: None, life_ms: Some(LINGER_MS), every_ms: 250 },
-    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5, body: None, life_ms: Some(LINGER_MS), every_ms: 150 },
-    Aura { name: "blood", effects: &["VFX_Skill_BloodMagic_Trigger"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
-    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0, body: None, life_ms: None, every_ms: 400 },
+const fn glow(name: &'static str, n: u8) -> Aura {
+    Aura { name, effects: &[], scale: 1.0, glow: Some(n), life_ms: None, every_ms: HAND_EVERY_MS }
+}
+
+pub const AURAS: [Aura; 16] = [
+    glow("fire", 2),
+    glow("lightning", 1),
+    glow("frost", 3),
+    glow("shroud", 4),
+    glow("holy glow", 5),
+    glow("poison", 6),
+    glow("ectoplasm tendrils", 7),
+    glow("arcane", 8),
+    glow("blood rage", 9),
+    glow("water", 10),
+    glow("death fog", 11),
+    glow("ectoplasm", 12),
+    glow("stars", 13),
+    glow("fire ring", 14),
+    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5, glow: None, life_ms: Some(LINGER_MS), every_ms: 150 },
+    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0, glow: None, life_ms: None, every_ms: 400 },
 ];
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -1038,16 +1056,16 @@ fn run_loop(dir: std::path::PathBuf) {
             }
             match gesture_step(aura, flags, last_emote(manager, id), now) {
                 Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, AURAS[aura.index].name)),
-                Gesture::Next => log(&format!("vfx: entity {id} aura {}", AURAS[aura.index].name)),
+                Gesture::Next => log(&format!("vfx: entity {id} aura {}/{} {}", aura.index + 1, AURAS.len(), AURAS[aura.index].name)),
                 Gesture::None => {}
             }
             let a = &AURAS[aura.index % AURAS.len()];
             if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
                 aura.last_spawn = now;
                 if let Some((at, facing)) = position_of(manager, id) {
-                    if let Some(element) = a.body {
+                    if let Some(n) = a.glow {
                         let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
-                        queue_slot(hand_template(element), id, SLOT_CHEST, chest, HAND_LIFE_MS);
+                        queue_slot(glow_template(n), id, SLOT_CHEST, chest, HAND_LIFE_MS);
                     }
                     if !a.effects.is_empty() {
                         let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), life_ms: a.life_ms, scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };

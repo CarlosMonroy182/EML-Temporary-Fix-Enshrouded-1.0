@@ -390,7 +390,7 @@ fn crouch_toggles_and_victory_switches_the_aura() {
     let mut fresh = vfx::AuraState::default();
     assert_eq!(vfx::gesture_step(&mut fresh, sneak, Some((3, v)), 0), vfx::Gesture::None, "state already present when first seen");
     for a in vfx::AURAS.iter() {
-        assert!(!a.effects.is_empty() || a.body.is_some());
+        assert!(!a.effects.is_empty() || a.glow.is_some());
     }
 }
 

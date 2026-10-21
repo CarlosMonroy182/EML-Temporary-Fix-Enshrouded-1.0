@@ -13,6 +13,11 @@ local ELEMENTS = {
     { n = 7, name = "Bone", vfx = "f29d3a6f-8a2b-4f18-9aa8-95ad1645198e" },
     { n = 8, name = "Arcane", vfx = "0f775769-5792-4db0-9f9c-2cbb92015073" },
     { n = 9, name = "Physical", vfx = "1603d364-10c1-4623-8c35-ba64884dd4eb" },
+    { n = 10, name = "Water", vfx = "15736b49-aed2-4c9c-b147-bdbfd5eff580" },
+    { n = 11, name = "Deathfog", vfx = "872542d9-4e97-47fa-a2aa-407a4a8479ac" },
+    { n = 12, name = "Ectoplasm", vfx = "0fd40c96-e14c-4d61-ab15-b061394bbb30" },
+    { n = 13, name = "Stun", vfx = "6ab9bfa1-8849-4b64-9fb1-f240882c26e2" },
+    { n = 14, name = "FireRing", vfx = "0b12c979-65b2-43e1-80ab-e3bddb8f2f3e" },
 }
 
 local function try(f)
@@ -36,7 +41,7 @@ end
 
 local base = try(function() return game.assets.get_resource(BASE, TEMPLATE_TYPE, 0) end)
 if base == nil then
-    print(TAG .. " base effect template not found, hand effects off")
+    print(TAG .. " base effect template not found, glow effects off")
     return
 end
 
@@ -50,7 +55,7 @@ for _, e in ipairs(ELEMENTS) do
         local existing = try(function() return game.assets.get_resource(guid, TEMPLATE_TYPE, 0) end)
         local copy = existing or game.assets.create_resource(base.data, TEMPLATE_TYPE, guid, 0)
         local data = copy.data
-        data.name = "M182_VFX_Hand_" .. e.name
+        data.name = "M182_VFX_Glow_" .. e.name
         for _, c in ipairs(data.components) do
             local t = tostring(c.type)
             if t == "keen::ecs::VfxComponentResource" then
@@ -65,8 +70,8 @@ for _, e in ipairs(ELEMENTS) do
         created = created + 1
     else
         failed = failed + 1
-        print(TAG .. " hand effect " .. e.name .. " failed: " .. tostring(err))
+        print(TAG .. " glow effect " .. e.name .. " failed: " .. tostring(err))
     end
 end
 
-print(string.format("%s hand effects ready=%d failed=%d", TAG, created, failed))
+print(string.format("%s glow effects ready=%d failed=%d", TAG, created, failed))
