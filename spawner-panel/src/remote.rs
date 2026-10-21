@@ -58,6 +58,7 @@ pub struct Status {
 struct Job {
     file: String,
     lines: Vec<String>,
+    tries: u8,
 }
 
 struct State {
@@ -266,23 +267,23 @@ pub fn submit(name: &str, text: &str) -> Result<(), String> {
     };
     let body = serde_json::from_str::<Value>(text).map_err(|e| format!("{name}: {e}"))?.to_string();
     let replace = !REMOTE_ONLY.contains(&name);
-    push(Job { file: name.to_string(), lines: proto::compose(&key, name, &body, limit) }, replace);
+    push(Job { file: name.to_string(), lines: proto::compose(&key, name, &body, limit), tries: 0 }, replace);
     Ok(())
 }
 
 pub fn submit_pvp(on: bool) {
     let key = state().settings.key.clone();
-    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)] }, true);
+    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)], tries: 0 }, true);
 }
 
 pub fn submit_players(seq: u32) {
     let key = state().settings.key.clone();
-    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)] }, true);
+    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0 }, true);
 }
 
 pub fn submit_ping() {
     let key = state().settings.key.clone();
-    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)] }, true);
+    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0 }, true);
 }
 
 pub fn status() -> Status {
@@ -297,6 +298,9 @@ pub fn clear_queue() {
     s.queue.clear();
     s.status.queued = 0;
 }
+
+const RETRIES: u8 = 2;
+const RETRY_PAUSE: Duration = Duration::from_millis(1500);
 
 fn worker() {
     loop {
@@ -336,12 +340,19 @@ fn worker() {
         } else {
             note(&format!("failed {}: {error}", job.file));
         }
+        let retry = !error.is_empty() && job.tries < RETRIES;
         let mut s = state();
         s.typist = Some(typist);
         s.status.sending = false;
         s.status.sent_lines += sent;
         if error.is_empty() {
             s.status.last = format!("{} enviado ({} mensaje{}, {:.1} s)", job.file, job.lines.len(), if job.lines.len() == 1 { "" } else { "s" }, started.elapsed().as_secs_f32());
+        } else if retry {
+            note(&format!("retrying {} (attempt {})", job.file, job.tries + 2));
+            s.queue.push_front(Job { tries: job.tries + 1, ..job });
+            s.status.queued = s.queue.len();
+            drop(s);
+            std::thread::sleep(RETRY_PAUSE);
         } else {
             s.status.error = format!("{}: {error}", job.file);
             s.queue.clear();

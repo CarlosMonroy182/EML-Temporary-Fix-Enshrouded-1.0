@@ -57,6 +57,7 @@ struct Team {
 #[serde(default)]
 struct Person {
     name: String,
+    key: String,
 }
 
 /// A team as the native layer needs it: the old player numbers plus the names of its people.
@@ -64,6 +65,7 @@ struct Person {
 pub struct TeamDef {
     pub members: Vec<u32>,
     pub names: Vec<String>,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -94,9 +96,10 @@ pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
         .into_iter()
         .map(|t| {
             let mut names = t.names;
+            let ids: Vec<String> = t.people.iter().filter(|p| p.key.starts_with("steamid:")).map(|p| p.key.trim().to_lowercase()).collect();
             names.extend(t.people.into_iter().map(|p| p.name));
             names.retain(|n| !n.trim().is_empty());
-            TeamDef { members: t.members, names }
+            TeamDef { members: t.members, names, ids }
         })
         .collect()
 }
@@ -120,6 +123,17 @@ pub fn team_for(teams: &[TeamDef], number: u32, name: Option<&str>, entity: u32)
         }
     }
     0
+}
+
+/// Like `team_for`, but a platform id read from the server's player table decides first.
+pub fn team_for_player(teams: &[TeamDef], number: u32, name: Option<&str>, entity: u32, id: Option<&str>) -> u8 {
+    if let Some(id) = id {
+        let id = id.trim().to_lowercase();
+        if let Some(index) = teams.iter().position(|t| t.ids.contains(&id)) {
+            return (index + 1).min(255) as u8;
+        }
+    }
+    team_for(teams, number, name, entity)
 }
 
 pub fn parse_teams(text: &str) -> Vec<Vec<u32>> {
@@ -237,6 +251,15 @@ mod tests {
         assert_eq!(team_for(&numbers, 3, None, 9), 1);
         assert_eq!(team_for(&numbers, 2, Some("x"), 9), 2);
         assert_eq!(team_for(&numbers, 4, None, 9), 0);
+    }
+
+    #[test]
+    fn a_platform_id_places_a_player_whatever_the_name_says() {
+        let teams = parse_team_defs(r#"{"teams":[{"name":"Rojo","people":[{"key":"steamid:76561199474170255","name":"Nacht"}]},{"name":"Azul","people":[{"key":"name:luis","name":"luis"}]}]}"#);
+        assert_eq!(team_for_player(&teams, 9, None, 5, Some("steamid:76561199474170255")), 1);
+        assert_eq!(team_for_player(&teams, 9, Some("Otro"), 5, Some("STEAMID:76561199474170255")), 1);
+        assert_eq!(team_for_player(&teams, 9, Some("Luis"), 5, Some("steamid:1")), 2);
+        assert_eq!(team_for_player(&teams, 9, Some("Nadie"), 5, None), 0);
     }
 
     #[test]

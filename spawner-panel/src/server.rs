@@ -15,7 +15,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("SERVIDOR").color(GOLD).size(14.5));
             if status.sending {
-                ui.label(RichText::new("escribiendo en el chat del juego… no toques el teclado").color(GOLD_DIM).size(14.5));
+                ui.label(RichText::new("escribiendo… no toques el teclado").color(GOLD_DIM).size(14.5));
             } else if !status.error.is_empty() {
                 ui.label(RichText::new(status.error.clone()).color(BAD).size(14.5));
             } else if status.queued > 0 {
@@ -23,7 +23,7 @@ impl App {
             } else if !status.last.is_empty() {
                 ui.label(RichText::new(status.last.clone()).color(GOOD).size(14.5));
             } else {
-                ui.label(RichText::new("listo: lo que hagas aquí se envía al servidor").color(MUTED).size(14.5));
+                ui.label(RichText::new("listo").color(MUTED).size(14.5));
             }
             if button(ui, "Reenviar todo", Vec2::new(130.0, 24.0), remote::connected() && !status.sending, false) {
                 self.resend_state();

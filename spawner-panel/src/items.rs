@@ -345,6 +345,8 @@ pub fn load_generic_pickup(dir: &Path) -> String {
 
 /// The level caps the game ships with. Earlier versions of this mod raised them, and EML keeps
 /// whatever a patched game file contained, so the exported values cannot be trusted for these two.
+pub const FREE_SKILLS_KEY: &str = "freeSkills";
+
 pub const VANILLA_CAPS: [(&str, f64); 2] = [("itemLevelCap", 55.0), ("playerLevelCap", 50.0)];
 
 pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
@@ -573,7 +575,12 @@ pub fn lua_source(items: &BTreeMap<u32, Edit>, balance: &BTreeMap<String, f64>, 
     }
     s.push_str("}\n\n");
     s.push_str(
-        r#"local function try(f)
+        r#"local FREE_SKILLS = BALANCE["freeSkills"] == 1
+BALANCE["freeSkills"] = nil
+local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
+if WIDEN <= 55 then WIDEN = 0 end
+
+local function try(f)
     local ok, r = pcall(f)
     if ok then return r end
     return nil
@@ -649,6 +656,7 @@ end
 
 local found = {}
 local levelsDone = {}
+local widened = 0
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 if items ~= nil then
     pcall(function()
@@ -657,6 +665,14 @@ if items ~= nil then
                 local data = resource.data
                 local id = unsigned(hash_of(data.itemId))
                 local range = id and LEVELS[id]
+                if WIDEN > 0 then
+                    local wspan = try(function() return data.itemLevelRange end)
+                    local wlo = try(function() return wspan.minLevel end)
+                    local whi = try(function() return wspan.maxLevel end)
+                    if type(wlo) == "number" and type(whi) == "number" and whi > wlo and whi < WIDEN and put(wspan, "maxLevel", WIDEN) then
+                        widened = widened + 1
+                    end
+                end
                 if range ~= nil then
                     local span = try(function() return data.itemLevelRange end)
                     local lo = try(function() return span.minLevel end)
@@ -693,7 +709,23 @@ for id in pairs(LEVELS) do
     if levelsDone[id] == nil then print(string.format("[m182-item-stats] item %d (level range) not found in the game data", id)) end
 end
 
-print(string.format("[m182-item-stats] items done applied=%d failed=%d", applied, failed))
+print(string.format("[m182-item-stats] items done applied=%d failed=%d widened=%d", applied, failed, widened))
+
+if FREE_SKILLS then
+    local nodes, freed = 0, 0
+    local trees = try(function() return game.assets.get_resources_by_type("keen::SkillTreeResource") end)
+    if type(trees) == "table" then
+        for _, tree in ipairs(trees) do
+            pcall(function()
+                for _, node in ipairs(tree.data.nodes) do
+                    nodes = nodes + 1
+                    if put(node, "costs", 0) then freed = freed + 1 end
+                end
+            end)
+        end
+    end
+    print(string.format("[m182-item-stats] skills free of cost: %d of %d nodes", freed, nodes))
+end
 
 local tables = try(function() return game.assets.get_resources_by_type("keen::BalancingTable") end)
 if type(tables) == "table" and #tables > 0 then
@@ -1030,6 +1062,9 @@ impl ItemsState {
             let value = self.balance.get(key).copied().unwrap_or(vanilla);
             out.insert(key.to_string(), balance_normalize(key, value));
         }
+        if self.balance.get(FREE_SKILLS_KEY).copied().unwrap_or(0.0) > 0.5 {
+            out.insert(FREE_SKILLS_KEY.to_string(), 1.0);
+        }
         out
     }
 
@@ -1048,7 +1083,7 @@ impl App {
             };
             let dir = self.dir.clone();
             self.items.notice = match self.items.apply_item(&dir, &item) {
-                Ok(()) => "Guardado automáticamente. Pulsa ENTREGAR para recibir el ítem con estos stats.".to_string(),
+                Ok(()) => "Guardado.".to_string(),
                 Err(e) => format!("Error: {e}"),
             };
         }
@@ -1058,7 +1093,7 @@ impl App {
             }
             let Some((_, cmd)) = self.items.outbox.pop_front() else { break };
             self.items.notice = match powers::command(&self.dir, &cmd) {
-                Ok(()) => "Cambio enviado al juego. Se aplica en unos segundos y queda guardado para la próxima vez que abras el juego.".to_string(),
+                Ok(()) => "Enviado.".to_string(),
                 Err(e) => format!("Error: {e}"),
             };
         }
@@ -1066,7 +1101,7 @@ impl App {
 
     pub fn item_controls(&mut self, ui: &mut egui::Ui, selected: Option<usize>) {
         let Some(index) = selected.filter(|i| *i < self.items.rows.len()) else {
-            ui.label(RichText::new("Aquí puedes entregarte armas, armaduras, comida, pociones y más, con el nivel, la rareza y los stats que quieras.").color(MUTED));
+            ui.label(RichText::new("Elige un ítem.").color(MUTED));
             return;
         };
         let item = self.items.rows[index].clone();
@@ -1087,9 +1122,6 @@ impl App {
         let cap = self.items.item_level_cap();
         self.items.level = self.items.level.clamp(1, cap);
         ui.add(egui::Slider::new(&mut self.items.level, 1..=cap));
-        if self.items.level > item.level_max && item.level_max > 0 {
-            ui.label(RichText::new(format!("Por encima del máximo normal ({}). Se amplía el rango del ítem al entregarlo.", item.level_max)).color(MUTED).size(14.5));
-        }
         label_title(ui, "RAREZA");
         egui::ComboBox::from_id_salt("item_rarity").selected_text(RARITIES[self.items.rarity.min(4) as usize]).show_ui(ui, |ui| {
             for (i, name) in RARITIES.iter().enumerate() {
@@ -1104,8 +1136,6 @@ impl App {
         } else {
             self.items.amount = 1;
         }
-        divider(ui);
-        ui.label(RichText::new("Va directo a tu inventario: aparece a tus pies y se recoge solo. Para eso activa en las opciones del juego la recogida automática de botín suelto.").color(MUTED).size(15.0));
         divider(ui);
         self.item_stats_ui(ui, index);
         if !self.items.notice.is_empty() {
@@ -1122,9 +1152,7 @@ impl App {
             self.items.notice.clear();
         }
         if self.items.global {
-            ui.label(RichText::new("Los cambios valen para todas las copias de este ítem en el mundo y piden reiniciar el juego para quedarse.").color(GOLD_DIM).size(14.5));
         } else {
-            ui.label(RichText::new("Los cambios solo valen para la copia que te entregues: cada arma sale distinta y las demás no cambian.").color(MUTED).size(14.5));
             let used = self.items.book.active_count(item.id);
             if let Some(pool) = self.items.book.pools.get(&item.id) {
                 ui.label(RichText::new(format!("Copias únicas de este ítem: {used} en uso de {}.", pool.slots)).color(MUTED).size(14.5));
@@ -1139,7 +1167,7 @@ impl App {
             }
         }
         if modified {
-            ui.label(RichText::new(if self.items.global { "Este ítem ya tiene valores personalizados guardados." } else { "Stats pendientes: se aplican a una copia nueva al ENTREGAR." }).color(GOOD));
+            ui.label(RichText::new(if self.items.global { "Personalizado." } else { "Personalizado." }).color(GOOD));
         }
         let mut changed = false;
         let show_dmg = item.dmg_set || item.category == "Weapons" || item.dmg.iter().any(|v| *v != 0.0);
@@ -1175,7 +1203,7 @@ impl App {
             edit.arm = Some(values);
         }
         if !show_dmg && !show_arm {
-            ui.label(RichText::new("Este ítem no tiene daño ni armadura propios. Sus modificadores son nivel, rareza y cantidad (arriba).").color(MUTED));
+            ui.label(RichText::new("Sin stats propios.").color(MUTED));
         }
         if changed {
             self.items.set_edit(&item, edit.clone());
@@ -1195,9 +1223,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("×2, ×5 y ×10 multiplican el daño total o toda la armadura. Todo se guarda solo.").color(MUTED).size(14.5));
             if matches!(item.slot.as_str(), "RangedWeapon") || item.category == "Ammunition" {
-                ui.label(RichText::new("Los bastones y arcos hacen el daño de su munición o hechizo: para subirlo, edita también la munición.").color(MUTED).size(14.5));
             }
             if button(ui, "Restaurar valores originales", Vec2::new(ui.available_width(), 30.0), modified, false) {
                 self.items.set_edit(&item, ItemsState::base_edit(&item));
@@ -1207,44 +1233,40 @@ impl App {
     }
 
     pub fn balance_ui(&mut self, ui: &mut egui::Ui) {
-        {
-            ui.label(RichText::new("Se guardan en el mod zz_m182_item_stats y se aplican al abrir el juego de nuevo.").color(MUTED).size(14.5));
-            if self.items.balance.is_empty() {
-                ui.label(RichText::new("Aún no hay valores. Abre el juego una vez con el mod m182_spawn_variants actualizado.").color(MUTED));
-                return;
+        let mut changed = false;
+        let mut free = self.items.balance.get(FREE_SKILLS_KEY).copied().unwrap_or(0.0) > 0.5;
+        if ui.checkbox(&mut free, "Habilidades sin costo").changed() {
+            self.items.balance.insert(FREE_SKILLS_KEY.to_string(), if free { 1.0 } else { 0.0 });
+            changed = true;
+        }
+        if BALANCE_LABELS.iter().all(|(k, _)| !self.items.balance.contains_key(*k)) {
+            ui.label(RichText::new("Sin valores todavía.").color(MUTED));
+        }
+        for (key, label) in BALANCE_LABELS {
+            if let Some(value) = self.items.balance.get_mut(*key) {
+                ui.horizontal(|ui| {
+                    ui.label(*label);
+                    if balance_is_integer(key) {
+                        changed |= ui.add(egui::DragValue::new(value).speed(1.0).max_decimals(0).range(0.0..=1_000_000.0)).changed();
+                        *value = value.round();
+                    } else {
+                        changed |= ui.add(egui::DragValue::new(value).speed(0.05).max_decimals(3)).changed();
+                    }
+                });
             }
-            let mut changed = false;
-            if self.items.balance.iter().any(|(k, v)| (k == "itemLevelCap" || k == "playerLevelCap") && self.items.balance_base.get(k).map(|b| *v > *b + 0.5).unwrap_or(false)) {
-                ui.label(RichText::new("Aviso: por encima de los máximos normales (ítems 55, jugador 50) el botín de las criaturas puede dejar de poder recogerse. Si te pasa, pulsa Restaurar.").color(GOLD_DIM).size(14.5));
-            }
-            for (key, label) in BALANCE_LABELS {
-                if let Some(value) = self.items.balance.get_mut(*key) {
-                    ui.horizontal(|ui| {
-                        ui.label(*label);
-                        if balance_is_integer(key) {
-                            changed |= ui.add(egui::DragValue::new(value).speed(1.0).max_decimals(0).range(0.0..=1_000_000.0)).changed();
-                            *value = value.round();
-                        } else {
-                            changed |= ui.add(egui::DragValue::new(value).speed(0.05).max_decimals(3)).changed();
-                        }
-                    });
-                }
-            }
-            if changed {
-                let dir = self.dir.clone();
-                self.items.notice = match self.items.persist(&dir) {
-                    Ok(()) => "Ajustes globales guardados. Reinicia el juego para aplicarlos.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                };
-            }
-            ui.horizontal(|ui| {
-                if button(ui, "Restaurar", Vec2::new(110.0, 32.0), true, false) {
-                    self.items.balance = self.items.balance_base.clone();
-                    let dir = self.dir.clone();
-                    let _ = self.items.persist(&dir);
-                    self.items.notice = "Ajustes globales restaurados. Reinicia el juego.".to_string();
-                }
-            });
+        }
+        if changed {
+            let dir = self.dir.clone();
+            self.items.notice = match self.items.persist(&dir) {
+                Ok(()) => "Guardado. Se aplica al reiniciar.".to_string(),
+                Err(e) => format!("Error: {e}"),
+            };
+        }
+        if button(ui, "Restaurar", Vec2::new(110.0, 32.0), true, false) {
+            self.items.balance = self.items.balance_base.clone();
+            let dir = self.dir.clone();
+            let _ = self.items.persist(&dir);
+            self.items.notice = "Restaurado. Se aplica al reiniciar.".to_string();
         }
     }
 
@@ -1252,15 +1274,16 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(12.0);
             ui.label(RichText::new("AJUSTES GLOBALES").font(title_font(22.0)).color(GOLD));
-            ui.label(RichText::new("Durabilidad, vida base del jugador, niveles máximos… Afectan a todo el juego, no a un ítem concreto.").color(MUTED));
             divider(ui);
             self.balance_ui(ui);
             divider(ui);
-            ui.label(RichText::new("Los ajustes globales valen para todas las armas y todos los jugadores de ese mundo, y piden reiniciar el juego.").color(MUTED).size(14.5));
+            if crate::remote::active() {
+                ui.label(RichText::new("Servidor: sube mods\\zz_m182_item_stats por FTP y reinicia.").color(GOLD_DIM).size(14.5));
+            }
             if button(ui, "RESTAURAR TODO A VALORES DEL JUEGO", Vec2::new(ui.available_width().min(360.0), 34.0), true, false) {
                 let dir = self.dir.clone();
                 self.items.notice = match self.items.reset_all(&dir) {
-                    Ok(n) => format!("Todo restaurado ({n} ítems y los ajustes globales). Reinicia el juego para que los ajustes globales vuelvan a su valor."),
+                    Ok(n) => format!("Restaurado ({n} ítems). Se aplica al reiniciar."),
                     Err(e) => format!("Error: {e}"),
                 };
             }

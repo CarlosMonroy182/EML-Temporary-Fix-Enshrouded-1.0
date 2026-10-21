@@ -78,7 +78,7 @@ pub fn pair_players(log: &[Member], online: &[Online]) -> Vec<Seen> {
         return online
             .iter()
             .map(|p| Seen {
-                member: Member { slot: p.number, name: if p.me { format!("Tú (jugador {})", p.number) } else { format!("Jugador {}", p.number) }, platform: String::new(), id: String::new() },
+                member: Member { slot: p.number, name: if p.me { format!("Tú (ID {})", p.number) } else { format!("ID {}", p.number) }, platform: String::new(), id: String::new() },
                 online: Some(p.clone()),
             })
             .collect();
@@ -125,9 +125,9 @@ impl Online {
 
 pub fn player_label(p: &Online) -> String {
     if p.me {
-        format!("Tú (jugador {})", p.number)
+        format!("Tú (ID {})", p.number)
     } else {
-        format!("Jugador {}", p.number)
+        format!("ID {}", p.number)
     }
 }
 
@@ -150,9 +150,16 @@ pub fn parse_roster(text: &str, seq: u32) -> Option<Vec<(u32, String)>> {
 
 pub fn roster_seen(list: &[(u32, String)]) -> Vec<Seen> {
     list.iter()
-        .map(|(n, name)| Seen {
-            member: Member { slot: *n, name: name.clone(), platform: String::new(), id: String::new() },
-            online: Some(Online { number: *n, x: f64::NAN, y: f64::NAN, z: f64::NAN, me: false }),
+        .map(|(n, label)| {
+            let (name, id) = match label.split_once('~') {
+                Some((name, id)) => (name.trim(), id.trim()),
+                None => (label.trim(), ""),
+            };
+            let (platform, id) = id.split_once(':').map(|(p, d)| (p.to_string(), d.to_string())).unwrap_or_default();
+            Seen {
+                member: Member { slot: *n, name: if name.is_empty() { format!("ID {n}") } else { name.to_string() }, platform, id },
+                online: Some(Online { number: *n, x: f64::NAN, y: f64::NAN, z: f64::NAN, me: false }),
+            }
         })
         .collect()
 }
@@ -162,7 +169,7 @@ pub const MANUAL_PLAYERS: u32 = 8;
 pub fn manual_players() -> Vec<Seen> {
     (1..=MANUAL_PLAYERS)
         .map(|n| Seen {
-            member: Member { slot: n, name: format!("Jugador {n}"), platform: "slot".to_string(), id: n.to_string() },
+            member: Member { slot: n, name: format!("ID {n}"), platform: "slot".to_string(), id: n.to_string() },
             online: Some(Online { number: n, x: 0.0, y: 0.0, z: 0.0, me: false }),
         })
         .collect()
@@ -422,7 +429,6 @@ impl App {
 
     pub fn zones_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Zonas y bases", 22.0);
-        ui.label(RichText::new("Una zona segura protege de monstruos y jugadores. Una base protegida pertenece a un equipo: los demás son visitantes dentro y no pueden abrir cofres ni construir.").color(MUTED));
         divider(ui);
         match self.player {
             Some(p) => {
@@ -432,7 +438,7 @@ impl App {
                 }
             }
             None => {
-                ui.label(RichText::new("Sin posición: abre el juego y carga tu mundo.").color(MUTED));
+                ui.label(RichText::new("Sin posición.").color(MUTED));
             }
         }
         label_title(ui, "NUEVA ZONA");
@@ -503,7 +509,7 @@ impl App {
                     });
                     if z.team != 0 {
                         ui.horizontal_wrapped(|ui| {
-                            changed |= ui.checkbox(&mut z.lock, "Base protegida: quien no sea de ese equipo es visitante y no puede abrir cofres ni construir").changed();
+                            changed |= ui.checkbox(&mut z.lock, "Base protegida").changed();
                             if z.lock {
                                 changed |= ui.checkbox(&mut z.lock_admins, "También a los administradores (para probarlo)").changed();
                             }
@@ -512,7 +518,7 @@ impl App {
                 });
             }
             if self.social.zones.is_empty() {
-                ui.label(RichText::new("Aún no hay zonas.").color(MUTED));
+                ui.label(RichText::new("Sin zonas.").color(MUTED));
             }
         });
         if let Some(i) = remove {
@@ -530,7 +536,6 @@ impl App {
 
     pub fn teams_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Equipos", 22.0);
-        ui.label(RichText::new("Los jugadores del mismo equipo no se pueden dañar entre sí cuando el PvP está activo. Los cofres no se pueden proteger.").color(MUTED));
         divider(ui);
         let mut pvp_changed = false;
         pvp_changed |= ui.checkbox(&mut self.pvp, "PvP activo (necesario para que los equipos tengan efecto)").changed();
@@ -543,7 +548,7 @@ impl App {
         divider(ui);
         label_title(ui, "JUGADORES CONECTADOS");
         if self.social.seen.is_empty() {
-            ui.label(RichText::new("Nadie conectado todavía: abre el juego y carga el mundo.").color(MUTED));
+            ui.label(RichText::new("Nadie conectado.").color(MUTED));
         }
         if crate::remote::active() {
             let dir = self.dir.clone();
@@ -557,10 +562,10 @@ impl App {
                 }
             });
             if self.social.roster_failed() {
-                self.social.notice = "El servidor no respondió. Revisa la clave y que hayas subido los archivos nuevos al servidor.".to_string();
+                self.social.notice = "El servidor no respondió.".to_string();
             }
             if self.social.manual {
-                ui.label(RichText::new("Pulsa «Buscar jugadores del servidor». Mientras no responda se muestran 8 jugadores numerados; también puedes añadir nombres a mano abajo.").color(MUTED));
+                ui.label(RichText::new("Pulsa «Buscar jugadores del servidor».").color(MUTED));
             }
         }
         let manual = self.social.manual;
@@ -584,7 +589,6 @@ impl App {
                 ui.label(team);
             });
         }
-        ui.label(RichText::new("Los nombres y los ID de Steam o PS5 los toma el panel del registro del propio juego. Cada jugador queda en su equipo aunque se desconecte y vuelva a entrar.").color(MUTED).size(15.0));
         divider(ui);
 
         let seen: Vec<Seen> = self.social.seen.clone();
@@ -617,14 +621,16 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         for person in &candidates {
                             let mut on = team.members.iter().any(|m| m.key == person.key);
-                            let connected = seen.iter().any(|s| s.member.key() == person.key);
-                            let label = if connected { person.name.clone() } else { format!("{} (desconectado)", person.name) };
+                            let found = seen.iter().find(|s| s.member.key() == person.key);
+                            let tag = found.map(|s| s.member.id_label()).unwrap_or_default();
+                            let shown = if tag.is_empty() { person.name.clone() } else { format!("{} · {}", person.name, tag) };
+                            let label = if found.is_some() { shown } else { format!("{} (desconectado)", person.name) };
                             if ui.checkbox(&mut on, label).changed() {
                                 membership.push((i, person.clone(), on));
                             }
                         }
                         if candidates.is_empty() {
-                            ui.label(RichText::new("No hay jugadores conectados todavía.").color(MUTED));
+                            ui.label(RichText::new("Sin jugadores.").color(MUTED));
                         }
                     });
                 });
@@ -748,7 +754,7 @@ mod tests {
         // without a readable log the characters of the world are listed by number
         let fallback = pair_players(&[], &online);
         assert_eq!(fallback.len(), 2);
-        assert_eq!(fallback[0].member.name, "Tú (jugador 1)");
+        assert_eq!(fallback[0].member.name, "Tú (ID 1)");
     }
     #[test]
     fn manual_players_give_team_numbers_without_a_player_list() {
@@ -775,6 +781,22 @@ mod tests {
     }
 
     #[test]
+    fn players_without_a_readable_name_are_listed_by_their_id() {
+        let text = r#"{"seq":5,"players":[{"n":3,"name":"ID 3~steamid:76561199474170255"},{"n":1,"name":"Ana~steamid:76561190000000001"},{"n":2,"name":"ID 2"}]}"#;
+        let list = parse_roster(text, 5).unwrap();
+        let seen = roster_seen(&list);
+        assert_eq!(seen[0].member.name, "Ana");
+        assert_eq!(seen[0].member.id_label(), "Steam 76561190000000001");
+        assert_eq!(seen[1].member.name, "ID 2");
+        assert_eq!(seen[1].member.key(), "name:ID 2");
+        assert_eq!(seen[2].member.name, "ID 3");
+        assert_eq!(seen[2].member.key(), "steamid:76561199474170255");
+        let manual = manual_players();
+        assert_eq!(manual[2].member.name, "ID 3");
+        assert_eq!(manual[2].member.id_label(), "");
+    }
+
+    #[test]
     fn deleting_a_team_releases_or_shifts_the_bases_it_owned() {
         let mut zones = vec![Zone::new("A".into(), 0.0, 0.0, 10.0), Zone::new("B".into(), 0.0, 0.0, 10.0), Zone::new("C".into(), 0.0, 0.0, 10.0)];
         zones[0].team = 1;
@@ -797,7 +819,7 @@ mod tests {
         assert_eq!(list[0].number, 1);
         let me = parse_online(r#"[{"n":3,"x":0,"y":0,"z":0,"me":true}]"#);
         assert!(me[0].me);
-        assert_eq!(player_label(&me[0]), "Tú (jugador 3)");
+        assert_eq!(player_label(&me[0]), "Tú (ID 3)");
         assert!(parse_online("[").is_empty());
     }
 

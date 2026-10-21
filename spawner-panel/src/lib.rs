@@ -648,7 +648,7 @@ impl App {
             Ok(()) => Status::Delivered,
             Err(e) => Status::Error(e),
         };
-        self.spawner_notice = format!("Aparición creada en «{}». Aparecerá en unos segundos y reaparecerá cada {} min si la matan.", place.name, self.respawn_minutes);
+        self.spawner_notice = format!("Aparición creada en «{}» (cada {} min).", place.name, self.respawn_minutes);
     }
 
     fn delete_spawner(&mut self, id: &str) {
@@ -657,7 +657,7 @@ impl App {
             Ok(()) => Status::Idle,
             Err(e) => Status::Error(e),
         };
-        self.spawner_notice = "Aparición borrada: ya no reaparecerá. Si ahora hay criaturas vivas, se quedan hasta que las mates.".to_string();
+        self.spawner_notice = "Aparición borrada.".to_string();
     }
 
     fn spawn(&mut self, mode: Mode) {
@@ -828,7 +828,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.label(RichText::new("M182  ADMIN  PANEL").font(title_font(26.0)).color(GOLD));
-                ui.label(RichText::new("Herramientas de administración para Enshrouded").color(MUTED));
                 self.server_strip(ui);
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1035,9 +1034,9 @@ impl App {
         match &self.status {
             Status::Idle => (String::new(), MUTED),
             Status::Waiting(_) => ("Enviando al juego…".to_string(), MUTED),
-            Status::Delivered if remote::active() => ("Pedido enviado al servidor por el chat. Aparecerá junto a ti en unos segundos.".to_string(), GOOD),
-            Status::Delivered => ("El juego recibió el pedido. Si no aparece, revisa que el mundo esté cargado.".to_string(), GOOD),
-            Status::NoAnswer => ("El juego no respondió. Revisa que esté abierto con el DLL de M182 y con el mundo cargado.".to_string(), BAD),
+            Status::Delivered if remote::active() => ("Enviado al servidor.".to_string(), GOOD),
+            Status::Delivered => ("Enviado.".to_string(), GOOD),
+            Status::NoAnswer => ("El juego no respondió.".to_string(), BAD),
             Status::Error(e) => (format!("Error: {e}"), BAD),
         }
     }
@@ -1055,7 +1054,7 @@ impl App {
             }
             Target::Place => {
                 if self.places.is_empty() {
-                    ui.label(RichText::new("Aún no tienes lugares. Guárdalos en la pestaña Mapa.").color(MUTED));
+                    ui.label(RichText::new("Sin lugares.").color(MUTED));
                 } else {
                     self.place_index = self.place_index.min(self.places.len() - 1);
                     let current = self.places[self.place_index].name.clone();
@@ -1070,7 +1069,6 @@ impl App {
                     }
                     ui.label("Reaparece cada (minutos)");
                     ui.add(egui::Slider::new(&mut self.respawn_minutes, 1..=120));
-                    ui.label(RichText::new("Queda guardado: vuelve a aparecer ahí cuando lo matan y cada vez que abres el juego.").color(MUTED).size(14.5));
                 }
             }
         }
@@ -1079,7 +1077,7 @@ impl App {
     fn spawner_list(&mut self, ui: &mut egui::Ui) {
         label_title(ui, &format!("APARICIONES ACTIVAS ({})", self.spawners.len()));
         if self.spawners.is_empty() {
-            ui.label(RichText::new("Ninguna todavía.").color(MUTED).size(14.5));
+            ui.label(RichText::new("Ninguna.").color(MUTED).size(14.5));
             return;
         }
         let mut remove: Option<String> = None;
@@ -1221,14 +1219,13 @@ impl App {
 
     fn places_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Lugares guardados", 22.0);
-        ui.label(RichText::new("Guarda puntos del mundo para invocar criaturas u objetos ahí.").color(MUTED));
         divider(ui);
         match self.player {
             Some(p) => {
                 ui.label(format!("Tu posición actual:  X {:.1}   Y {:.1}   Z {:.1}", p[0], p[1], p[2]));
             }
             None => {
-                ui.label(RichText::new("Sin posición: abre el juego y carga tu mundo.").color(MUTED));
+                ui.label(RichText::new("Sin posición.").color(MUTED));
             }
         }
         ui.horizontal(|ui| {
@@ -1255,7 +1252,7 @@ impl App {
                 });
             }
             if self.places.is_empty() {
-                ui.label(RichText::new("No hay lugares guardados todavía.").color(MUTED));
+                ui.label(RichText::new("Sin lugares.").color(MUTED));
             }
         });
         if let Some(i) = remove {
@@ -1266,7 +1263,6 @@ impl App {
 
     fn pvp_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Combate entre jugadores", 22.0);
-        ui.label(RichText::new("Los cambios se aplican en el juego en unos 2 segundos, sin reiniciar.").color(MUTED));
         divider(ui);
         let mut changed = false;
         changed |= ui.checkbox(&mut self.pvp, "Activar PvP: los jugadores se pueden atacar entre sí").changed();

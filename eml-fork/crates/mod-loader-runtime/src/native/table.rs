@@ -22,6 +22,7 @@ pub struct Entry {
     pub state: u8,
     pub permissions: u8,
     pub name: Option<String>,
+    pub id: Option<String>,
 }
 
 impl Entry {
@@ -37,6 +38,28 @@ fn object() -> Option<usize> {
 
 static REPORTED: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 
+type Identity = (Option<(String, String)>, Option<String>);
+type Known = HashMap<(usize, u32), (Instant, Identity)>;
+static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+const RETRY: Duration = Duration::from_secs(5);
+
+/// Name and platform id of a slot, looked up once per connection and retried slowly while unknown.
+fn identity(index: usize, client: u32, slot: &[u8], deref: &dyn Fn(usize) -> Option<Vec<u8>>) -> Identity {
+    if let Ok(mut guard) = KNOWN.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.retain(|(i, c), _| *i != index || *c == client);
+        if let Some((at, found)) = map.get(&(index, client)) {
+            if (found.0.is_some() && found.1.is_some()) || at.elapsed() < RETRY {
+                return found.clone();
+            }
+        }
+        let found = (roster::guess_name(slot, deref), roster::guess_id(slot, deref));
+        map.insert((index, client), (Instant::now(), found.clone()));
+        return found;
+    }
+    (roster::guess_name(slot, deref), roster::guess_id(slot, deref))
+}
+
 pub fn entries() -> Vec<Entry> {
     let Some(base) = object() else { return Vec::new() };
     let Some(raw) = read_bytes(base + SLOTS_AT, SLOT_COUNT * SLOT_SIZE) else { return Vec::new() };
@@ -51,22 +74,32 @@ pub fn entries() -> Vec<Entry> {
         if client == 0 || (client & 0x3f) as usize != index || state < MIN_STATE {
             continue;
         }
-        let guess = roster::guess_name(slot, &|p| read_bytes(p, 96));
+        let deref = |p: usize| read_bytes(p, 96).or_else(|| read_bytes(p, 48)).or_else(|| read_bytes(p, 16)).or_else(|| read_bytes(p, 8));
+        let (guess, platform_id) = identity(index, client, slot, &deref);
         if let Ok(mut seen) = REPORTED.lock() {
             if !seen.contains(&(index, client)) {
                 seen.push((index, client));
                 log(&format!(
-                    "player table: slot {index} client {client} state {state} permissions {:#04x} name {} bytes {}",
+                    "player table: slot {index} client {client} state {state} permissions {:#04x} name {} id {} bytes {}",
                     slot[roster::SLOT_PERMISSIONS],
                     match &guess {
                         Some((n, how)) => format!("\"{n}\" ({how})"),
                         None => "unreadable".to_string(),
                     },
+                    platform_id.as_deref().unwrap_or("unreadable"),
                     hex(slot)
                 ));
+                for off in (0..slot.len().saturating_sub(7)).step_by(8) {
+                    let p = u64::from_le_bytes(slot[off..off + 8].try_into().unwrap_or([0; 8]));
+                    if (0x1_0000..0x7ff0_0000_0000).contains(&p) {
+                        if let Some(b) = deref(p as usize) {
+                            log(&format!("player table: slot {index} +{off:#x} points to {}", hex(&b[..b.len().min(48)])));
+                        }
+                    }
+                }
             }
         }
-        out.push(Entry { index, client, state, permissions: slot[roster::SLOT_PERMISSIONS], name: guess.map(|g| g.0) });
+        out.push(Entry { index, client, state, permissions: slot[roster::SLOT_PERMISSIONS], name: guess.map(|g| g.0), id: platform_id });
     }
     out
 }

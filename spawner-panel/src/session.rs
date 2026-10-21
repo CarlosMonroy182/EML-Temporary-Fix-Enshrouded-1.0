@@ -19,7 +19,7 @@ impl Member {
     }
 
     pub fn id_label(&self) -> String {
-        if self.id.is_empty() {
+        if self.id.is_empty() || self.platform == "slot" {
             return String::new();
         }
         let platform = match self.platform.as_str() {
