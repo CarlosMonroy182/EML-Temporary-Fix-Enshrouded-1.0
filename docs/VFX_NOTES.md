@@ -21,3 +21,8 @@
 - SlotAttachment is client_only: server-created effects cannot be glued to a weapon or bone. Server-side bone positions come from the player's `ServerAnimationGraphSlotComponent` (1760 bytes: slot mask u64, origin WorldPosition, 36 x float3x4 local slots indexed by AttachmentSlot; HandR = 8). Blade tip = HandR + axis[BLADE_AXIS] * BLADE_LENGTH (axis still being confirmed with F10 logs).
 - Element of the item in use: staff spell from `NetworkRangedWeapon` (+68 ammunition item, +56 weapon item), melee weapon from `Equipment` (+16 main-hand impact item). Damage columns come from `export/m182_items.csv`; `element_of` picks the strongest magic damage, blunt-only = bone, no damage = arcane, else physical.
 - Effects per element are built in (`staff_effects`, `blade_effect`); `"auto": true` (default) ignores the effect lists in the json.
+
+## Hand glow (Oct 21, later)
+- Melee charge: the Lua mod `m182_vfx` (client and server) clones `VFX_Debuff_Poison_GemPerk_DamageOverTime` (has ServerSlotAttachment + LifeTime + CurrentTransform) into 9 templates `182e1e00-0000-4000-8000-00000000000N` (N = element 1..9) with the element's glow VfxResource and its default parameters.
+- The native module creates them with overrides CurrentTransform + ServerSlotAttachment (hash 0x430f162d, 112 bytes: SlotAttachmentBase 48 + attachmentTransform + updated; slot HandR, attachedToEntityId = player) + LifeTime 450 ms, renewed every 300 ms while charging.
+- Staff: arcane (mana drain) uses VFX_Spell_ManaDrain_Mana_OnPlayer + VFX_Resource_Increase_Mana at 1.25x; shroud uses only the fog evade impact at 0.6x.
