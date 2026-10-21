@@ -15,15 +15,12 @@ pub struct PowersState {
     pub stamina: bool,
     pub fly: bool,
     pub fly_speed: f32,
-    pub map_travel: bool,
-    pub unknown_height: bool,
-    pub teleport: [f64; 3],
     pub notice: String,
 }
 
 impl Default for PowersState {
     fn default() -> Self {
-        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, map_travel: false, unknown_height: true, teleport: [0.0; 3], notice: String::new() }
+        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, notice: String::new() }
     }
 }
 
@@ -33,7 +30,6 @@ impl PowersState {
         if let Some(v) = std::fs::read_to_string(dir.join(POWERS_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
             s.god = v.get("god").and_then(|x| x.as_bool()).unwrap_or(false);
             s.stamina = v.get("stamina").and_then(|x| x.as_bool()).unwrap_or(false);
-            s.map_travel = v.get("map_travel").and_then(|x| x.as_bool()).unwrap_or(false);
         }
         s
     }
@@ -44,7 +40,6 @@ impl PowersState {
             "stamina": self.stamina,
             "fly": false,
             "fly_speed": self.fly_speed,
-            "map_travel": self.map_travel,
         })
     }
 }
@@ -55,18 +50,6 @@ pub fn save(dir: &Path, state: &PowersState) -> Result<(), String> {
 
 pub fn command(dir: &Path, body: &Value) -> Result<(), String> {
     write_atomic(dir, COMMAND_FILE, "m182_command.request.tmp", &body.to_string())
-}
-
-pub fn teleport_body(point: [f64; 3], height_known: bool) -> Value {
-    if height_known {
-        json!({"cmd": "teleport", "at": [point[0], point[1], point[2]]})
-    } else {
-        json!({"cmd": "teleport", "at": [point[0], Value::Null, point[2]]})
-    }
-}
-
-pub fn marker_body() -> Value {
-    json!({"cmd": "teleport", "to": "waypoint"})
 }
 
 impl App {
@@ -96,55 +79,6 @@ impl App {
         }
         divider(ui);
 
-        heading(ui, "Teletransporte", 18.0);
-        if ui.checkbox(&mut self.powers.map_travel, "Viaje por el mapa: al poner un marcador en el mapa del juego viajas hasta ahí").changed() {
-            self.save_powers();
-        }
-        ui.add_space(4.0);
-        if !self.places.is_empty() {
-            let mut picked = None;
-            egui::ComboBox::from_id_salt("tp_place").selected_text("Copiar coordenadas de un lugar guardado…").show_ui(ui, |ui| {
-                for (i, p) in self.places.iter().enumerate() {
-                    if ui.selectable_label(false, &p.name).clicked() {
-                        picked = Some(i);
-                    }
-                }
-            });
-            if let Some(i) = picked {
-                let p = &self.places[i];
-                self.powers.teleport = [p.x, p.y, p.z];
-                self.powers.unknown_height = false;
-            }
-        }
-        for (label, value) in ["X", "Y (altura)", "Z"].iter().zip(self.powers.teleport.iter_mut()) {
-            ui.horizontal(|ui| {
-                ui.label(*label);
-                ui.add(egui::DragValue::new(value).speed(1.0).fixed_decimals(1));
-            });
-        }
-        ui.checkbox(&mut self.powers.unknown_height, "No conozco la altura: el juego busca el suelo y la caída va protegida");
-        ui.horizontal_wrapped(|ui| {
-            if let Some(p) = self.player {
-                if button(ui, "Usar mi posición", Vec2::new(170.0, 32.0), true, false) {
-                    self.powers.teleport = p;
-                    self.powers.unknown_height = false;
-                }
-            }
-            if button(ui, "TELETRANSPORTAR", Vec2::new(210.0, 32.0), true, true) {
-                let body = teleport_body(self.powers.teleport, !self.powers.unknown_height);
-                self.powers.notice = match command(&self.dir, &body) {
-                    Ok(()) => "Pedido de teletransporte enviado.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                };
-            }
-        });
-        ui.add_space(4.0);
-        if button(ui, "Ir al marcador del mapa del juego", Vec2::new(300.0, 32.0), true, false) {
-            self.powers.notice = match command(&self.dir, &marker_body()) {
-                Ok(()) => "Pedido enviado: pon antes un marcador en el mapa del juego.".to_string(),
-                Err(e) => format!("Error: {e}"),
-            };
-        }
         if !self.powers.notice.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(&self.powers.notice).color(GOOD));
@@ -155,31 +89,4 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn teleport_requests_name_a_point_or_the_game_marker() {
-        let known = teleport_body([1.0, 2.0, 3.0], true);
-        assert_eq!(known, json!({"cmd": "teleport", "at": [1.0, 2.0, 3.0]}));
-        let unknown = teleport_body([1.0, 2.0, 3.0], false);
-        assert!(unknown["at"][1].is_null());
-        assert_eq!(unknown["at"][0], 1.0);
-        assert_eq!(unknown["at"][2], 3.0);
-        assert!(unknown.get("ground").is_none());
-        assert_eq!(marker_body(), json!({"cmd": "teleport", "to": "waypoint"}));
-    }
-
-    #[test]
-    fn map_travel_is_written_with_the_other_powers_and_read_back() {
-        let dir = std::env::temp_dir().join(format!("m182_map_travel_panel_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut state = PowersState::default();
-        assert_eq!(state.to_json()["map_travel"], false);
-        state.map_travel = true;
-        save(&dir, &state).unwrap();
-        let text = std::fs::read_to_string(dir.join(POWERS_FILE)).unwrap();
-        assert!(text.contains("\"map_travel\":true"), "{text}");
-        assert!(PowersState::load(&dir).map_travel);
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }

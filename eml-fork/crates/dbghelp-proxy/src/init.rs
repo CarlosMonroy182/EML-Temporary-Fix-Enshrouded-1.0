@@ -51,8 +51,6 @@ pub fn init(config: Config) {
         }
     };
 
-    let guard = CopyGuard::arm(&current_dir);
-
     let result = lua::run(
         &env,
         RunArgs {
@@ -66,8 +64,6 @@ pub fn init(config: Config) {
             },
         },
     );
-
-    drop(guard);
 
     let result = match result {
         Ok(result) => result,
@@ -86,38 +82,6 @@ pub fn init(config: Config) {
             dlls: result.dlls,
         },
     ).expect("Failed to attach runtime loader");
-}
-
-struct CopyGuard(Option<Utf8PathBuf>);
-
-impl CopyGuard {
-    fn arm(game_dir: &Utf8Path) -> CopyGuard {
-        let dir = game_dir.join("mods").join("zz_m182_item_stats");
-        let list = dir.join("m182_custom.txt");
-        let wanted = std::fs::read_to_string(&list)
-            .map(|t| t.lines().any(|l| l.starts_with("pool ") || l.starts_with("copy ")))
-            .unwrap_or(false);
-        if !wanted {
-            return CopyGuard(None);
-        }
-        let marker = dir.join("m182_custom.running");
-        if marker.exists() {
-            let _ = std::fs::write(dir.join("m182_custom.skipped"), "the previous start stopped while the item copies were being created\n");
-            let _ = std::fs::remove_file(&marker);
-            error!("The previous start stopped while the item copies were being created, the copies are skipped this time");
-            return CopyGuard(None);
-        }
-        let _ = std::fs::write(&marker, "running\n");
-        CopyGuard(Some(marker))
-    }
-}
-
-impl Drop for CopyGuard {
-    fn drop(&mut self) {
-        if let Some(marker) = self.0.take() {
-            let _ = std::fs::remove_file(marker);
-        }
-    }
 }
 
 pub fn deinit() {

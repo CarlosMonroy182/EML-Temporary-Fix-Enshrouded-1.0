@@ -8,7 +8,6 @@
 
 pub mod chat;
 pub mod config;
-pub mod custom;
 pub mod faction;
 pub mod groups;
 pub mod roster;

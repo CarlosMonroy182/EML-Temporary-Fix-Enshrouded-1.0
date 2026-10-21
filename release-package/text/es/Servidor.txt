@@ -4,11 +4,12 @@ M182 - SERVIDOR (Dathost)
 INSTALAR
 1. Detén el servidor en el panel de Dathost.
 2. Con el FTP, entra a la carpeta donde esta enshrouded_server.exe.
-3. Sube TODO el contenido de esta carpeta "Servidor" (dbghelp.dll, eml.json, m182_native.json y la carpeta mods) a esa carpeta, reemplazando lo que haya.
+3. Sube TODO el contenido de esta carpeta "M182_Servidor" (dbghelp.dll, eml.json, m182_native.json y la carpeta mods) a esa carpeta, reemplazando lo que haya.
 4. Arranca el servidor. No hace falta subir ni abrir ningun .exe.
 
 ACTUALIZAR
-Al subir esta carpeta de nuevo no se tocan tus zonas, equipos ni apariciones (no vienen en el paquete). Si ya cambiaste el PvP desde el panel y no quieres perderlo, no reemplaces m182_native.json.
+Al subir esta carpeta de nuevo no se tocan tus zonas, equipos, apariciones ni tus ajustes de items (no vienen en el paquete). Si ya cambiaste el PvP desde el panel y no quieres perderlo, no reemplaces m182_native.json.
+Si vienes de una version anterior, en mods\zz_m182_item_stats puedes borrar m182_custom.txt, m182_custom_items.csv, m182_custom.skipped y m182_custom.running: las armas "unicas" (copias) ya no existen.
 
 CLAVE
 En m182_native.json la linea "chat_key" es la clave del canal de chat. Debe ser la misma que "remote_key" en el m182_native.json de la carpeta Cliente. Si quieres cambiarla, cambiala en los dos sitios con la misma cadena (sin espacios) y reinicia el servidor.
@@ -18,14 +19,11 @@ Tu entras al servidor con la carpeta "Cliente" instalada, pulsas INSERT y usas e
 
 QUE VIVE EN EL SERVIDOR
 Zonas, bases, equipos, apariciones, PvP y ajustes de items/niveles/habilidades se guardan en esta carpeta (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json y mods\zz_m182_item_stats\src\m182_data.lua). El servidor los lee solo y los mantiene aunque el administrador no este conectado. El panel unicamente envia los cambios.
-Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor. La carpeta mods\zz_m182_item_stats que trae este paquete ya incluye tus ajustes actuales.
+Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor.
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
-REINICIOS
-Las copias de armas unicas (8 por arma, ya preparadas en mods\zz_m182_item_stats\m182_custom.txt) se crean al arrancar: entregar armas editadas no requiere reiniciar. Si el servidor se cierra mientras crea las copias, el siguiente arranque las omite (aparece m182_custom.skipped en esa carpeta); borra ese archivo para reintentar.
-
 LIMITES (sinceridad)
-- Las ediciones "para todos" de armas concretas hechas en tu cliente viajan con los ajustes; las copias unicas son items distintos del botin normal y los entrega el panel.
+- Sin confirmar en el juego real: el bloqueo de cofres y construccion para visitantes de una base protegida. Al arrancar, m182_spawner.log debe decir "permissions hooked"; cuando alguien queda restringido dice "is a visitor now".
 - Si algo falla, mandame m182_spawner.log y el log de EML del servidor (aparece "chat: client ..." por cada mensaje recibido).
 
 Hecho por M182.

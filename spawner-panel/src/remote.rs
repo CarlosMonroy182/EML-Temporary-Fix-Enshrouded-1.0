@@ -459,14 +459,14 @@ mod tests {
         set_hosting(Some(false));
         assert!(connected());
         let command = "m182_command.request";
-        assert_eq!(route_for(command, r#"{"cmd":"teleport","at":[1,2,3]}"#), Route::ServerOnly);
+        assert_eq!(route_for(command, r#"{"cmd":"item_stats","item_id":1}"#), Route::ServerOnly);
         assert_eq!(route_for(command, r#"{"cmd":"heal"}"#), Route::Both);
-        assert_eq!(route_for(command, r#"{"cmd":"item_copy"}"#), Route::ServerOnly);
+        assert_eq!(route_for(command, r#"{"cmd":"item_stats"}"#), Route::ServerOnly);
         assert_eq!(route_for(command, "no es json"), Route::ServerOnly);
         assert_eq!(route_for("m182_zones.json", "{}"), Route::Both);
         set_hosting(Some(true));
         assert!(!connected());
-        assert_eq!(route_for(command, r#"{"cmd":"item_copy"}"#), Route::Local);
+        assert_eq!(route_for(command, r#"{"cmd":"item_stats"}"#), Route::Local);
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
         submit("m182_zones.json", r#"{"zones":[]}"#).unwrap();
         submit("m182_zones.json", r#"{"zones":[{"name":"B"}]}"#).unwrap();
         submit("m182_command.request", r#"{"cmd":"heal"}"#).unwrap();
-        submit("m182_command.request", r#"{"cmd":"teleport"}"#).unwrap();
+        submit("m182_command.request", r#"{"cmd":"item_stats"}"#).unwrap();
         assert_eq!(status().queued, 3);
         install_typist(Box::new(Recorder(typed.clone(), false)));
         wait_idle();
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(sent.len(), 3, "{lines:?}");
         let hex = |t: &str| t.bytes().map(|b| format!("{b:02x}")).collect::<String>();
         assert!(sent[0].contains(&hex(r#"{"zones":[{"name":"B"}]}"#)));
-        assert!(sent[1].contains(&hex("heal")) && sent[2].contains(&hex("teleport")));
+        assert!(sent[1].contains(&hex("heal")) && sent[2].contains(&hex("item_stats")));
         assert_eq!(lines.iter().filter(|l| *l == "<begin>").count(), 3);
         assert_eq!(lines.iter().filter(|l| *l == "<end>").count(), 3);
         assert!(status().last.contains("m182_command.request"));
