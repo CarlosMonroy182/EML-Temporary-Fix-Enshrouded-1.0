@@ -143,6 +143,7 @@ pub struct App {
     new_place: String,
     player: Option<[f64; 3]>,
     player_checked: Instant,
+    here: Option<(social::Here, Instant)>,
     synced: bool,
     icons: HashMap<String, Option<TextureHandle>>,
     status: Status,
@@ -545,6 +546,7 @@ impl App {
             spawner_checked: Instant::now(),
             player: read_player(&dir),
             player_checked: Instant::now(),
+            here: None,
             synced: false,
             places,
             new_place: String::new(),
@@ -1208,13 +1210,11 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.new_place).hint_text("Nombre del lugar").desired_width(260.0));
-            let ready = self.player.is_some() && !self.new_place.trim().is_empty();
+            let ready = (self.player.is_some() || remote::active()) && !self.new_place.trim().is_empty() && self.here.is_none();
             if button(ui, "Guardar mi posición", Vec2::new(220.0, 32.0), ready, false) {
-                if let Some(p) = self.player {
-                    self.places.push(Place { name: self.new_place.trim().to_string(), x: p[0], y: p[1], z: p[2] });
-                    self.new_place.clear();
-                    self.save_places();
-                }
+                let name = self.new_place.trim().to_string();
+                self.new_place.clear();
+                self.ask_here(social::Here::Place(name));
             }
         });
         divider(ui);
@@ -1357,6 +1357,7 @@ mod tests {
             new_place: String::new(),
             player: None,
             player_checked: Instant::now(),
+            here: None,
             synced: false,
             icons: HashMap::new(),
             status: Status::Idle,

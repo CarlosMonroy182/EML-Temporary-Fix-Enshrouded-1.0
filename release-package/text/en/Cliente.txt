@@ -27,7 +27,7 @@ TABS
 - Creatures: summon creatures or create spawns that respawn on their own (at your position or at a saved place), with the level, health and damage you want.
 - Many spawns: you can create 50 or more (up to 20 creatures each). You can place several in the same spot. A spawn only creates its creatures when a player is within 150 m; when nobody is near it stays idle, and when someone returns the missing creatures come back at once. That way the server does not carry them all at the same time. The list shows how many metres you are from each spawn. When you create or delete one, only that change is sent to the server (about 5 chat messages), not the whole list; "Resend all" does send the full list (about 3 messages per spawn, it takes a while).
 - Items: give items with level, rarity and amount, and edit their stats. Changing an item's stats changes that item for everyone (applied when the server restarts); "Restore original values" puts it back as in the game.
-- Places: save positions to use for spawns and zones.
+- Places: save positions to use for spawns and zones. On a server, "Save my position" and "Create where I am" ask the server for your position (it takes a few seconds); stay put until the place or zone appears.
 - Admin: god mode, infinite stamina and mana, heal yourself instantly.
 - PvP: turn combat between players on or off.
 - Zones and bases, and Teams (below).

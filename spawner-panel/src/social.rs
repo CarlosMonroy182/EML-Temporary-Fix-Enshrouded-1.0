@@ -148,6 +148,20 @@ pub fn parse_roster(text: &str, seq: u32) -> Option<Vec<(u32, String)>> {
     Some(out)
 }
 
+/// The player that asked and where the server sees it: `"me":{"n":5,"x":..,"y":..,"z":..}`.
+pub fn parse_roster_me(text: &str, seq: u32) -> Option<(u32, [f64; 3])> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if v.get("seq")?.as_u64()? != seq as u64 {
+        return None;
+    }
+    let me = v.get("me")?;
+    let p = [me.get("x")?.as_f64()?, me.get("y")?.as_f64()?, me.get("z")?.as_f64()?];
+    if p.iter().any(|c| !c.is_finite()) {
+        return None;
+    }
+    Some((me.get("n")?.as_u64()? as u32, p))
+}
+
 pub fn roster_seen(list: &[(u32, String)]) -> Vec<Seen> {
     list.iter()
         .map(|(n, label)| {
@@ -218,6 +232,8 @@ pub struct SocialState {
     pub roster: Vec<(u32, String)>,
     pub roster_seq: u32,
     pub roster_asked: Option<Instant>,
+    /// This account's entity and position as the server saw them when it answered.
+    pub server_me: Option<(u32, [f64; 3])>,
     pub extra: Vec<String>,
     pub extra_input: String,
     pub me: Option<crate::steam::Account>,
@@ -241,6 +257,7 @@ impl Default for SocialState {
             roster: Vec::new(),
             roster_seq: 0,
             roster_asked: None,
+            server_me: None,
             extra: Vec::new(),
             extra_input: String::new(),
             me: None,
@@ -384,11 +401,20 @@ impl SocialState {
         if let Some(list) = parse_roster(&text, self.roster_seq) {
             self.roster = list;
             self.roster_asked = None;
-            if let Some(n) = self.me.as_ref().and_then(|me| own_entity(&self.roster, me)) {
+            self.server_me = parse_roster_me(&text, self.roster_seq);
+            let entity = self.server_me.map(|m| m.0).or_else(|| self.me.as_ref().and_then(|me| own_entity(&self.roster, me)));
+            if let Some(n) = entity {
                 let text = json!({"entity": n}).to_string();
                 if write_atomic(dir, "m182_self.json", "m182_self.json.tmp", &text).is_ok() {
                     crate::remote::note(&format!("your character in the server's player list is entity {n}"));
                 }
+            }
+            if let (Some((_, server)), Some(game)) = (self.server_me, crate::read_player(dir)) {
+                let apart = ((server[0] - game[0]).powi(2) + (server[2] - game[2]).powi(2)).sqrt();
+                crate::remote::note(&format!(
+                    "position check: the server sees you at x={:.1} z={:.1}, your game says x={:.1} z={:.1} ({:.0} m apart)",
+                    server[0], server[2], game[0], game[2], apart
+                ));
             }
             self.notice = format!("{} jugador(es) conectado(s) al servidor.", self.roster.len());
         }
@@ -399,6 +425,7 @@ impl SocialState {
     pub fn request_roster(&mut self, dir: &Path) {
         let seq = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1) % 1_000_000) as u32 + 1;
         self.roster_seq = seq;
+        self.server_me = None;
         let _ = std::fs::remove_file(dir.join(crate::remote::ONLINE_FILE));
         let scan = json!({"seq": seq}).to_string();
         self.notice = match write_atomic(dir, crate::remote::SCAN_FILE, "m182_scan.request.tmp", &scan) {
@@ -452,12 +479,66 @@ impl SocialState {
     }
 }
 
+/// What a "where I stand" button is waiting for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Here {
+    Zone,
+    Place(String),
+}
+
 impl App {
+    /// Takes the position for a zone or a saved place. Against a server the server tells where
+    /// this player is standing (it knows for certain); in a local game the game's own position is used.
+    pub fn ask_here(&mut self, what: Here) {
+        if crate::remote::active() {
+            let dir = self.dir.clone();
+            self.social.request_roster(&dir);
+            if self.social.roster_asked.is_some() {
+                self.here = Some((what, Instant::now()));
+                self.social.notice = "Pidiendo tu posición al servidor…".to_string();
+            }
+        } else if let Some(p) = self.player {
+            self.place_here(what, p);
+        }
+    }
+
+    fn place_here(&mut self, what: Here, p: [f64; 3]) {
+        match what {
+            Here::Zone => self.add_zone(p[0], p[2]),
+            Here::Place(name) => {
+                self.places.push(crate::Place { name, x: p[0], y: p[1], z: p[2] });
+                self.save_places();
+            }
+        }
+    }
+
+    fn finish_here(&mut self) {
+        let Some((what, since)) = self.here.clone() else { return };
+        if self.social.roster_asked.is_none() {
+            self.here = None;
+            match (self.social.server_me, self.player) {
+                (Some((_, p)), _) => {
+                    self.place_here(what, p);
+                    self.social.notice = "Posición tomada del servidor.".to_string();
+                }
+                (None, Some(p)) => {
+                    self.place_here(what, p);
+                    self.social.notice = "El servidor no mandó tu posición; usé la de tu juego.".to_string();
+                }
+                (None, None) => self.social.notice = "No pude saber tu posición. Inténtalo otra vez.".to_string(),
+            }
+        } else if since.elapsed() > Duration::from_secs(30) {
+            self.here = None;
+            self.social.notice = "El servidor no contestó. Inténtalo otra vez.".to_string();
+        }
+    }
+
     pub fn social_tick(&mut self) {
         if self.social.checked.elapsed() >= Duration::from_millis(1000) {
             let dir = self.dir.clone();
             self.social.refresh(&dir);
             self.social.resync_teams(&dir);
+            self.finish_here();
         }
     }
 
@@ -494,10 +575,9 @@ impl App {
             ui.add(egui::Slider::new(&mut self.social.zone_radius, 5.0..=500.0).fixed_decimals(0));
         });
         ui.horizontal_wrapped(|ui| {
-            if button(ui, "Crear donde estoy", Vec2::new(190.0, 32.0), self.player.is_some(), true) {
-                if let Some(p) = self.player {
-                    self.add_zone(p[0], p[2]);
-                }
+            let ready = (self.player.is_some() || crate::remote::active()) && self.here.is_none();
+            if button(ui, "Crear donde estoy", Vec2::new(190.0, 32.0), ready, true) {
+                self.ask_here(Here::Zone);
             }
             if !self.places.is_empty() {
                 let mut picked = None;
@@ -800,6 +880,14 @@ mod tests {
         assert_eq!(fallback.len(), 2);
         assert_eq!(fallback[0].member.name, "Tú (ID 1)");
     }
+    #[test]
+    fn the_server_tells_who_asked_and_where() {
+        let text = r#"{"seq":7,"players":[{"n":1,"name":"Ana"}],"me":{"n":5,"x":2995.1,"y":895.0,"z":1607.7}}"#;
+        assert_eq!(parse_roster_me(text, 7), Some((5, [2995.1, 895.0, 1607.7])));
+        assert_eq!(parse_roster_me(text, 8), None);
+        assert_eq!(parse_roster_me(r#"{"seq":7,"players":[]}"#, 7), None);
+    }
+
     #[test]
     fn the_own_character_is_found_in_the_server_list() {
         let me = crate::steam::Account { name: "moradoox".into(), id: "76561199474170255".into() };
