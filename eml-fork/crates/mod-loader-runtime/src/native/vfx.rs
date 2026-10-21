@@ -738,6 +738,82 @@ pub fn queue_hand(template: [u8; 16], entity: u32, at: (i64, i64, i64)) {
 }
 
 
+// ---------------------------------------------------------------------------------------------
+// Walking aura: each player turns it on/off and picks the effect with crouch gestures, which the
+// server sees for every player (PC or console) without any key or chat message.
+// ---------------------------------------------------------------------------------------------
+
+pub const FLAG_SNEAK: u32 = 21;
+static SNEAK_LOGS: AtomicU32 = AtomicU32::new(0);
+pub const GESTURE_GAP_MS: u64 = 600;
+pub const AURA_EVERY_MS: u64 = 400;
+
+pub struct Aura {
+    pub name: &'static str,
+    pub effects: &'static [&'static str],
+    pub scale: f32,
+}
+
+pub const AURAS: [Aura; 8] = [
+    Aura { name: "fire", effects: &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer"], scale: 1.5 },
+    Aura { name: "lightning", effects: &["VFX_Trap_Electro_Impact"], scale: 1.5 },
+    Aura { name: "ice", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"], scale: 1.5 },
+    Aura { name: "shroud", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"], scale: 1.0 },
+    Aura { name: "holy light", effects: &["VFX_Resource_Increase_Health_NoSound"], scale: 1.5 },
+    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5 },
+    Aura { name: "blood", effects: &["VFX_Skill_BloodMagic_Trigger"], scale: 1.5 },
+    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0 },
+];
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AuraState {
+    pub on: bool,
+    pub index: usize,
+    pub sneak: Option<bool>,
+    pub changes: u32,
+    pub last_change: u64,
+    pub last_spawn: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    None,
+    Toggle,
+    Next,
+}
+
+/// Crouch gestures: 2 quick crouch changes (crouch and stand up) turn the aura on or off,
+/// 4 quick changes switch to the next effect (and turn it on). A gesture ends after
+/// `GESTURE_GAP_MS` without changes.
+pub fn gesture_step(st: &mut AuraState, flags: u64, now: u64) -> Gesture {
+    let sneak = flags & (1 << FLAG_SNEAK) != 0;
+    let previous = st.sneak.replace(sneak);
+    if previous.is_some() && previous != Some(sneak) {
+        if st.changes > 0 && now.saturating_sub(st.last_change) > GESTURE_GAP_MS {
+            st.changes = 0;
+        }
+        st.changes += 1;
+        st.last_change = now;
+        return Gesture::None;
+    }
+    if st.changes == 0 || now.saturating_sub(st.last_change) <= GESTURE_GAP_MS {
+        return Gesture::None;
+    }
+    let count = std::mem::take(&mut st.changes);
+    match count {
+        2 | 3 => {
+            st.on = !st.on;
+            Gesture::Toggle
+        }
+        n if n >= 4 => {
+            st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
+            st.on = true;
+            Gesture::Next
+        }
+        _ => Gesture::None,
+    }
+}
+
 fn position_of(manager: usize, id: u32) -> Option<((i64, i64, i64), (f64, f64))> {
     let t = spawner::transform_of(manager, id)?;
     if t.len() < TRANSFORM_SIZE {
@@ -779,6 +855,7 @@ fn run_loop(dir: std::path::PathBuf) {
     let mut players: Vec<u32> = Vec::new();
     let mut scanned = Instant::now() - Duration::from_secs(10);
     let mut states: HashMap<u32, PlayerCharge> = HashMap::new();
+    let mut auras: HashMap<u32, AuraState> = HashMap::new();
     let mut key_was_down = false;
     let mut reported_players = usize::MAX;
     let mut waiting_logged = false;
@@ -830,6 +907,7 @@ fn run_loop(dir: std::path::PathBuf) {
             scanned = Instant::now();
             players = spawner::player_entities(manager);
             states.retain(|id, _| players.contains(id));
+            auras.retain(|id, _| players.contains(id));
             if players.len() != reported_players {
                 reported_players = players.len();
                 log(&format!("vfx: watching {} player(s) {:?}", players.len(), players));
@@ -894,6 +972,25 @@ fn run_loop(dir: std::path::PathBuf) {
             }
             if !was && st.since.is_some() && SPAWNED.load(Ordering::Relaxed) < 40 {
                 log(&format!("vfx: entity {id} started charging (flags {flags:#x})"));
+            }
+            let charging = st.since.is_some();
+            let aura = auras.entry(id).or_default();
+            let sneak_now = flags & (1 << FLAG_SNEAK) != 0;
+            if aura.sneak.is_some() && aura.sneak != Some(sneak_now) && SNEAK_LOGS.fetch_add(1, Ordering::Relaxed) < 12 {
+                log(&format!("vfx: entity {id} crouch {} (flags {flags:#x})", if sneak_now { "on" } else { "off" }));
+            }
+            match gesture_step(aura, flags, now) {
+                Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, AURAS[aura.index].name)),
+                Gesture::Next => log(&format!("vfx: entity {id} aura {}", AURAS[aura.index].name)),
+                Gesture::None => {}
+            }
+            if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= AURA_EVERY_MS {
+                aura.last_spawn = now;
+                if let Some((at, facing)) = position_of(manager, id) {
+                    let a = &AURAS[aura.index % AURAS.len()];
+                    let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
+                    queue_burst(at, facing, &burst);
+                }
             }
         }
     }

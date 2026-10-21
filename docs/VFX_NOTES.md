@@ -26,3 +26,6 @@
 - Melee charge: the Lua mod `m182_vfx` (client and server) clones `VFX_Debuff_Poison_GemPerk_DamageOverTime` (has ServerSlotAttachment + LifeTime + CurrentTransform) into 9 templates `182e1e00-0000-4000-8000-00000000000N` (N = element 1..9) with the element's glow VfxResource and its default parameters.
 - The native module creates them with overrides CurrentTransform + ServerSlotAttachment (hash 0x430f162d, 112 bytes: SlotAttachmentBase 48 + attachmentTransform + updated; slot HandR, attachedToEntityId = player) + LifeTime 450 ms, renewed every 300 ms while charging.
 - Staff: arcane (mana drain) uses VFX_Spell_ManaDrain_Mana_OnPlayer + VFX_Resource_Increase_Mana at 1.25x; shroud uses only the fog evade impact at 0.6x.
+
+## Walking aura (Oct 21)
+- Per player, server side, vanilla effects only (everyone sees it). Gestures from `combinedState` bit 21 (InSneakMode): 2 quick changes = on/off, 4+ quick changes = next effect (`gesture_step`, 600 ms gap). 8 auras in `AURAS`, renewed every 400 ms at chest height, paused while charging.
