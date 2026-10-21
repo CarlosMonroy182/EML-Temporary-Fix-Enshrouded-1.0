@@ -1,7 +1,7 @@
 {
     "id": "m182_vfx",
     "name": "M182 VFX",
-    "description": "Replaces the effects shown while aiming and charging staff spells with other magic effects from the game, with custom colors and intensity.",
+    "description": "Creates the weapon-hand glow effects (one per damage type) used by the M182 VFX native module.",
     "version": "1.0.0",
     "capabilities": ["patch"],
     "dependencies": [],

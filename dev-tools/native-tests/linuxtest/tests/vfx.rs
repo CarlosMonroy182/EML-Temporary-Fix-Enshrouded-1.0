@@ -106,10 +106,13 @@ fn elements_follow_the_damage_columns() {
     assert_eq!(t.len(), 2);
     assert_eq!(t[&518418528], Fire);
     assert_eq!(t[&1048548069], Lightning);
+    let mut seen = std::collections::HashSet::new();
     for e in [Lightning, Fire, Ice, Shroud, Healing, Poison, Bone, Arcane, Physical] {
         assert!(!vfx::staff_effects(e).is_empty());
-        assert!(!vfx::blade_effect(e).is_empty());
+        assert!(seen.insert(vfx::hand_template(e)));
     }
+    assert_eq!(vfx::hand_template(Fire), config::parse_guid("182e1e00-0000-4000-8000-000000000002").unwrap());
+    assert!(vfx::staff_scale(Shroud) < 1.0);
 }
 
 #[test]
@@ -328,4 +331,32 @@ fn reads_spell_weapon_and_hand_of_the_player() {
     assert!((hand.2 as f64 / m + 49.6).abs() < 1e-6);
     assert_eq!(axes[1], [0.0, 1.0, 0.0]);
     assert!(vfx::slot_world(mgr, 1, 9).is_none(), "slot not initialised");
+}
+
+#[test]
+fn hand_glow_is_created_glued_to_the_players_right_hand() {
+    let _g = LOCK.lock().unwrap();
+    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56])]);
+    let mgr = w.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    let t = vfx::hand_template(vfx::Element::Ice);
+    vfx::queue_hand(t, 42, (7 << 32, 8 << 32, 9 << 32));
+    vfx::server_tick();
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (_, desc, data) = &seen[0];
+    assert_eq!(&desc[4..20], &t);
+    assert_eq!(u64::from_le_bytes(desc[0x20..0x28].try_into().unwrap()), 3);
+    assert_eq!(&data[0..4], &0x027a_c564u32.to_le_bytes());
+    let attach = &data[4 + 56..4 + 56 + 4 + 112];
+    assert_eq!(&attach[0..4], &0x430f_162du32.to_le_bytes());
+    let a = &attach[4..];
+    assert_eq!(a[41], 8);
+    assert_eq!(u32::from_le_bytes(a[44..48].try_into().unwrap()), 42);
+    assert_eq!(i64::from_le_bytes(a[48..56].try_into().unwrap()), 7 << 32);
+    let life = &data[4 + 56 + 4 + 112..];
+    assert_eq!(&life[0..4], &0xf22c_253cu32.to_le_bytes());
+    assert_eq!(u64::from_le_bytes(life[4..12].try_into().unwrap()), vfx::HAND_LIFE_MS * 1_000_000);
 }
