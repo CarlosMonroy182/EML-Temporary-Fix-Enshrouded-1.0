@@ -294,15 +294,50 @@ unsafe extern "win64" fn stub_chat() {
     );
 }
 
-// Entry of the server's per-tick chat pump: only remembers the player table (rcx) and goes on.
+// Entry of the server's per-tick chat pump: remembers the player table (rcx), lets the M182 VFX
+// module create its queued effects on this server tick, and goes on.
 #[unsafe(naked)]
 unsafe extern "win64" fn stub_pump() {
     core::arch::naked_asm!(
         "mov qword ptr [rip + {object}], rcx",
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push rax",
+        "sub rsp, 0x90",
+        "movups [rsp + 0x30], xmm0",
+        "movups [rsp + 0x40], xmm1",
+        "movups [rsp + 0x50], xmm2",
+        "movups [rsp + 0x60], xmm3",
+        "movups [rsp + 0x70], xmm4",
+        "movups [rsp + 0x80], xmm5",
+        "call {f}",
+        "movups xmm0, [rsp + 0x30]",
+        "movups xmm1, [rsp + 0x40]",
+        "movups xmm2, [rsp + 0x50]",
+        "movups xmm3, [rsp + 0x60]",
+        "movups xmm4, [rsp + 0x70]",
+        "movups xmm5, [rsp + 0x80]",
+        "lea rsp, [rsp + 0x90]",
+        "pop rax",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
         "jmp qword ptr [rip + {t}]",
         object = sym PLAYERS_OBJECT,
+        f = sym hook_pump,
         t = sym PUMP_TRAMPOLINE,
     );
+}
+
+extern "win64" fn hook_pump() {
+    super::vfx::server_tick();
 }
 
 fn install_pump(sections: &[&'static [u8]]) {
