@@ -52,6 +52,7 @@ const HASH_CURRENT_TRANSFORM: u32 = 0x027a_c564;
 const TRANSFORM_SIZE: usize = 56;
 const COMBAT_SIZE: usize = 24;
 const METERS: f64 = 4_294_967_296.0;
+const MAX_DELAY_MS: u64 = 600;
 
 pub const FLAG_HEAVY_ATTACK: u32 = 29;
 pub const FLAG_RANGED_PREPARING: u32 = 26;
@@ -93,27 +94,25 @@ impl Default for VfxConfig {
             charge: Burst {
                 effects: vec![
                     "VFX_Skill_Aura_SunFire_Trigger_OnPlayer".into(),
-                    "VFX_Spell_LightningChannel_SourceTarget_NoTarget".into(),
                     "VFX_Trap_Electro_Impact".into(),
                 ],
-                scale: 3.0,
-                height: 1.0,
+                scale: 2.0,
+                height: 0.9,
                 distance: 0.0,
-                ring: 3,
-                radius: 1.2,
+                ring: 1,
+                radius: 0.0,
             },
-            charge_every_ms: 350,
+            charge_every_ms: 250,
             release: Burst {
                 effects: vec![
                     "VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion".into(),
-                    "VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Lightning".into(),
                     "VFX_Skill_MassDestruction_Impact".into(),
                 ],
-                scale: 3.0,
-                height: 0.5,
-                distance: 2.5,
-                ring: 3,
-                radius: 1.5,
+                scale: 2.0,
+                height: 0.0,
+                distance: 1.5,
+                ring: 1,
+                radius: 0.0,
             },
             min_charge_ms: 300,
             test_key: "F9".into(),
@@ -214,6 +213,7 @@ pub fn burst_points(x: i64, y: i64, z: i64, facing: (f64, f64), b: &Burst) -> Ve
 }
 
 struct Spawn {
+    queued: u64,
     template: [u8; 16],
     at: (i64, i64, i64),
     scale: f32,
@@ -224,6 +224,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: Mutex<Option<VfxConfig>> = Mutex::new(None);
 static QUEUE: Mutex<Vec<Spawn>> = Mutex::new(Vec::new());
 static QUEUED: AtomicU32 = AtomicU32::new(0);
+static RUNNING: AtomicBool = AtomicBool::new(false);
 static COMBAT_INDEX: AtomicI32 = AtomicI32::new(-1);
 static COMBAT_MGR: AtomicUsize = AtomicUsize::new(0);
 static SPAWNED: AtomicU32 = AtomicU32::new(0);
@@ -304,7 +305,7 @@ pub fn queue_burst(at: (i64, i64, i64), facing: (f64, f64), b: &Burst) {
             if i > 0 && j > 0 {
                 continue;
             }
-            q.push(Spawn { template: *t, at: p, scale: b.scale });
+            q.push(Spawn { queued: now_ms(), template: *t, at: p, scale: b.scale });
         }
     }
     QUEUED.store(1, Ordering::SeqCst);
@@ -313,6 +314,25 @@ pub fn queue_burst(at: (i64, i64, i64), facing: (f64, f64), b: &Burst) {
 /// Creates the queued effects. Called by the spawner from the game's own entity-create call
 /// on the server, the same place every other M182 spawn happens.
 pub fn run(manager: usize) {
+    if QUEUED.load(Ordering::Relaxed) == 0 || RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    run_queue(manager);
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Called on every server tick (the server's player-table pump).
+pub fn server_tick() {
+    if QUEUED.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let manager = spawner::server_manager();
+    if manager != 0 {
+        run(manager);
+    }
+}
+
+fn run_queue(manager: usize) {
     if QUEUED.swap(0, Ordering::SeqCst) == 0 {
         return;
     }
@@ -320,7 +340,9 @@ pub fn run(manager: usize) {
         Ok(mut q) => std::mem::take(&mut *q),
         Err(_) => return,
     };
-    for s in work.into_iter().take(24) {
+    let now = now_ms();
+    let fresh: Vec<Spawn> = work.into_iter().filter(|s| now.saturating_sub(s.queued) <= MAX_DELAY_MS).collect();
+    for s in fresh.into_iter().take(24) {
         let id = create_effect(manager, s.template, s.at, s.scale);
         if id == 0 {
             if FAILED.fetch_add(1, Ordering::Relaxed) < 3 {

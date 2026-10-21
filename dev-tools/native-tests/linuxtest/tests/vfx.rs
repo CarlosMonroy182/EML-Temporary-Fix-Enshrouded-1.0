@@ -205,3 +205,54 @@ fn queued_bursts_are_created_from_the_spawn_hook_with_scale() {
         assert_eq!(f32::from_le_bytes(data[4 + 36..8 + 36].try_into().unwrap()), 1.0);
     }
 }
+
+#[test]
+fn server_tick_creates_queued_effects_without_waiting_for_the_game() {
+    let _g = LOCK.lock().unwrap();
+    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56])]);
+    let mgr = w.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    vfx::server_tick();
+    assert_eq!(SEEN.lock().unwrap().len(), 0);
+    let b = vfx::Burst { effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
+    vfx::queue_burst((1 << 32, 2 << 32, 3 << 32), (0.0, 1.0), &b);
+    vfx::server_tick();
+    assert!(!vfx::pending());
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(i64::from_le_bytes(seen[0].2[4..12].try_into().unwrap()), 1 << 32);
+    assert_eq!(i64::from_le_bytes(seen[0].2[20..28].try_into().unwrap()), 3 << 32);
+}
+
+static PUMPED: Mutex<Vec<(usize, usize, usize, usize)>> = Mutex::new(Vec::new());
+
+extern "win64" fn fake_pump(rcx: usize, rdx: usize, r8: usize, r9: usize) -> usize {
+    PUMPED.lock().unwrap().push((rcx, rdx, r8, r9));
+    0xabc
+}
+
+#[test]
+fn pump_hook_keeps_arguments_and_runs_the_queue() {
+    use linuxtest::native::patch;
+    let _g = LOCK.lock().unwrap();
+    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56])]);
+    let mgr = w.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    PUMPED.lock().unwrap().clear();
+    patch::PUMP_TRAMPOLINE.store(fake_pump as usize, Ordering::SeqCst);
+    let b = vfx::Burst { effects: vec!["VFX_Trap_Electro_Impact".into()], scale: 2.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 };
+    vfx::queue_burst((0, 0, 0), (0.0, 1.0), &b);
+    let stub: extern "win64" fn(usize, usize, usize, usize) -> usize = unsafe { std::mem::transmute(patch::stub_pump as usize) };
+    let r = stub(0x1111, 0x2222, 0x3333, 0x4444);
+    assert_eq!(r, 0xabc);
+    assert_eq!(PUMPED.lock().unwrap().as_slice(), &[(0x1111, 0x2222, 0x3333, 0x4444)]);
+    assert_eq!(patch::PLAYERS_OBJECT.load(Ordering::SeqCst), 0x1111);
+    assert_eq!(SEEN.lock().unwrap().len(), 1);
+    let r = stub(0x5555, 1, 2, 3);
+    assert_eq!(r, 0xabc);
+    assert_eq!(SEEN.lock().unwrap().len(), 1);
+}

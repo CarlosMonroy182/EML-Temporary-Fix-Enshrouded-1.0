@@ -23,6 +23,7 @@ unsafe fn FlushInstructionCache(_p: *mut c_void, _a: *const c_void, _s: usize) -
 unsafe fn VirtualAlloc(_a: *mut c_void, size: usize, _k: u32, _p: u32) -> *mut c_void { unsafe { libc::mmap(std::ptr::null_mut(), size, 7, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) } }
 '''
 p=ffi.sub(lambda m:shim,p,count=1)
+p=p.replace('unsafe extern "win64" fn stub_pump()','pub unsafe extern "win64" fn stub_pump()').replace('pub(super) static PUMP_TRAMPOLINE','pub static PUMP_TRAMPOLINE')
 p=p.replace('pub(super) static CHAT_TRAMPOLINE','pub static CHAT_TRAMPOLINE').replace('pub(super) static PLAYERS_OBJECT','pub static PLAYERS_OBJECT')
 wr('patch.rs',p)
 sp=rd('spawn_probe.rs')
