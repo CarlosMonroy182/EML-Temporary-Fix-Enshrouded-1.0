@@ -59,6 +59,7 @@ const CATALOG: &[(&str, &str)] = &[
     ("VFX_Consumable_LightWisp", "ba445d10-0b7b-402e-853b-e49b7ff50876"),
     ("VFX_Resource_Increase_Health_NoSound", "b8e9aca9-8713-4c4c-b51c-1591e74873b4"),
     ("VFX_Spell_ManaDrain_Mana_OnPlayer", "e39c8dd9-d54a-4bef-8a09-8c5d739ea4e5"),
+    ("VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn", "9852b802-6210-4122-82f6-d2bf5e0c277a"),
     ("VFX_Resource_Increase_Mana", "4f994c03-779b-4809-944c-9ca09f7f3bd2"),
     ("VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fire", "eaf35f40-185b-4f5e-9d8a-c7cc71b19797"),
     ("VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice", "aea9621e-914f-4838-bf0e-076046a82a2d"),
@@ -481,6 +482,7 @@ pub enum Element {
     Bone,
     Arcane,
     Physical,
+    Summon,
 }
 
 /// Element of an item from its damage distribution
@@ -518,6 +520,7 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
         Element::Poison => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Blunt"],
         Element::Bone => &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Blunt"],
         Element::Arcane => &["VFX_Spell_ManaDrain_Mana_OnPlayer", "VFX_Resource_Increase_Mana"],
+        Element::Summon => &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"],
     }
 }
 
@@ -542,6 +545,7 @@ pub fn hand_template(e: Element) -> [u8; 16] {
         Element::Poison => 6,
         Element::Bone => 7,
         Element::Arcane => 8,
+        Element::Summon => 7,
         Element::Physical => 9,
     };
     let mut g = super::config::parse_guid("182e1e00-0000-4000-8000-000000000000").unwrap_or([0; 16]);
@@ -549,10 +553,16 @@ pub fn hand_template(e: Element) -> [u8; 16] {
     g
 }
 
-static ITEMS: Mutex<Option<HashMap<u32, Element>>> = Mutex::new(None);
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemKind {
+    pub element: Element,
+    pub wand: bool,
+}
 
-/// Reads `item_id` and the damage columns of `export/m182_items.csv`.
-pub fn parse_items(text: &str) -> HashMap<u32, Element> {
+static ITEMS: Mutex<Option<HashMap<u32, ItemKind>>> = Mutex::new(None);
+
+/// Reads `item_id`, `debug_name`, `slot` and the damage columns of `export/m182_items.csv`.
+pub fn parse_items(text: &str) -> HashMap<u32, ItemKind> {
     let mut out = HashMap::new();
     let mut lines = text.lines();
     let Some(header) = lines.next() else { return out };
@@ -560,6 +570,8 @@ pub fn parse_items(text: &str) -> HashMap<u32, Element> {
     let at = |name: &str| cols.iter().position(|c| *c == name);
     let names = ["cut", "pierce", "blunt", "fire", "ice", "fog", "lightning", "healing", "poison"];
     let (Some(id_col), Some(idx)) = (at("item_id"), names.iter().map(|n| at(n)).collect::<Option<Vec<usize>>>()) else { return out };
+    let name_col = at("debug_name");
+    let slot_col = at("slot");
     for line in lines {
         let f: Vec<&str> = line.split(',').collect();
         let Some(id) = f.get(id_col).and_then(|v| v.trim().parse::<u32>().ok()) else { continue };
@@ -567,12 +579,15 @@ pub fn parse_items(text: &str) -> HashMap<u32, Element> {
         for (k, i) in idx.iter().enumerate() {
             d[k] = f.get(*i).and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(0.0);
         }
-        out.insert(id, element_of(d));
+        let name = name_col.and_then(|c| f.get(c)).copied().unwrap_or("");
+        let slot = slot_col.and_then(|c| f.get(c)).copied().unwrap_or("");
+        let element = if name.contains("_Spell_Skeleton") { Element::Summon } else { element_of(d) };
+        out.insert(id, ItemKind { element, wand: slot == "MidRangeWeapon" || name.contains("_Wand") });
     }
     out
 }
 
-pub fn item_element(item: u32) -> Option<Element> {
+pub fn item_kind(item: u32) -> Option<ItemKind> {
     let mut guard = ITEMS.lock().ok()?;
     if guard.is_none() {
         let path = std::env::current_dir().ok()?.join("export").join("m182_items.csv");
@@ -583,7 +598,11 @@ pub fn item_element(item: u32) -> Option<Element> {
     guard.as_ref()?.get(&item).copied()
 }
 
-pub fn set_items(table: HashMap<u32, Element>) {
+pub fn item_element(item: u32) -> Option<Element> {
+    item_kind(item).map(|k| k.element)
+}
+
+pub fn set_items(table: HashMap<u32, ItemKind>) {
     if let Ok(mut g) = ITEMS.lock() {
         *g = Some(table);
     }
@@ -822,8 +841,12 @@ fn run_loop(dir: std::path::PathBuf) {
             let every = if st.heavy { 100 } else { cfg.charge_every_ms };
             match step(st, flags, now, every, cfg.min_charge_ms) {
                 Event::Charge { melee: false } => {
-                    if let Some((at, facing)) = position_of(manager, id) {
-                        let element = ranged_items(manager, id)
+                    let items = ranged_items(manager, id);
+                    let wand = items.and_then(|(_, weapon)| item_kind(weapon)).map(|k| k.wand).unwrap_or(false);
+                    if wand {
+                        note_once("vfx: wands do not get the staff aura");
+                    } else if let Some((at, facing)) = position_of(manager, id) {
+                        let element = items
                             .and_then(|(ammo, weapon)| item_element(ammo).filter(|e| *e != Element::Physical).or_else(|| item_element(weapon)))
                             .unwrap_or(Element::Lightning);
                         if st.element != Some(element) {

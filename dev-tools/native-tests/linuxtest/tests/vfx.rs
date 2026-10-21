@@ -101,16 +101,20 @@ fn elements_follow_the_damage_columns() {
     assert_eq!(vfx::element_of([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Bone);
     assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]), Arcane);
     assert_eq!(vfx::element_of([0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Physical);
-    let csv = "item_id,guid,debug_name,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison\n518418528,x,Weapon_T4_1H_SwordEpic_01,0.5,0,0,0.5,0,0,0,0,0\n1048548069,y,Ammo_T2_Spell_Lightning_Chain_lvl12,0,0,0,0,0,0,1,0,0\nbad,line\n";
+    let csv = "item_id,guid,debug_name,slot,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison\n518418528,x,Weapon_T4_1H_SwordEpic_01,MeleeWeapon,0.5,0,0,0.5,0,0,0,0,0\n1048548069,y,Ammo_T2_Spell_Lightning_Chain_lvl12,Ammunition,0,0,0,0,0,0,1,0,0\n1250423976,z,Ammo_T3_Spell_Skeleton_lvl17,Ammunition,0.5,0,0,0,0.5,0,0,0,0\n42,w,Weapon_T1_1H_Wand_02_Ice,MidRangeWeapon,0,0,0,0,1,0,0,0,0\nbad,line\n";
     let t = vfx::parse_items(csv);
-    assert_eq!(t.len(), 2);
-    assert_eq!(t[&518418528], Fire);
-    assert_eq!(t[&1048548069], Lightning);
+    assert_eq!(t.len(), 4);
+    assert_eq!(t[&518418528].element, Fire);
+    assert!(!t[&518418528].wand);
+    assert_eq!(t[&1048548069].element, Lightning);
+    assert_eq!(t[&1250423976].element, Summon);
+    assert!(t[&42].wand);
     let mut seen = std::collections::HashSet::new();
     for e in [Lightning, Fire, Ice, Shroud, Healing, Poison, Bone, Arcane, Physical] {
         assert!(!vfx::staff_effects(e).is_empty());
         assert!(seen.insert(vfx::hand_template(e)));
     }
+    assert!(!vfx::staff_effects(Summon).is_empty());
     assert_eq!(vfx::hand_template(Fire), config::parse_guid("182e1e00-0000-4000-8000-000000000002").unwrap());
     assert!(vfx::staff_scale(Shroud) < 1.0);
 }
