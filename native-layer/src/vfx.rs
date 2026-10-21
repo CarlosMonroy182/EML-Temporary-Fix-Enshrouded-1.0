@@ -570,8 +570,70 @@ pub fn staff_scale(e: Element) -> f32 {
 
 /// Template made by the M182 VFX Lua mod: the element's glow, attached on the server to the
 /// player's weapon hand.
-/// Game effect glued (by the server) to the weapon hand while a melee attack is charged.
-/// Only the game's own templates are used, so every player can see them.
+/// Game templates (glider trails, never seen outside gliding) that the M182 VFX Lua mod turns
+/// into the glows: on the server it adds the server-only parts (LifeTime, DoNotSave), on PCs
+/// with the mod it swaps the look. Every client knows them, so nobody is disconnected; players
+/// without the mod see the original trail.
+pub const GLOW_CARRIERS: [&str; 14] = [
+    "ad949f69-aadd-4f5e-97dc-1db3afc5ffde",
+    "21f9f3e9-433f-48d7-b605-c0f2ad1ed5cf",
+    "d6d33ef8-8681-47b6-a429-04c00666cca1",
+    "f7bc7106-ac91-45da-9d93-056bddf0c8d0",
+    "04c22eef-5e56-4a6e-b340-ee07366862f5",
+    "c7fd6895-e278-4b10-abb2-d4b2f882a134",
+    "cc9d30cb-cf05-4baf-ab07-77586516dc3c",
+    "45d8ce2a-0b08-44d4-b47e-6a849a149279",
+    "0b5af7c4-5183-4e61-99a2-12535f90d6d0",
+    "25662ec7-c5cd-4595-ab2c-9ff46b8dbcd6",
+    "be24c385-8b5e-4ea7-9827-48eaec9c5209",
+    "132d2794-96a7-4e45-b80a-fd8d14810ac7",
+    "f56a56dd-a068-43e9-8ec4-f4fdbb68846b",
+    "73500153-66c8-420d-a99e-a7341daa6e32",
+];
+
+/// Marker written in the Lua mod that prepares the carriers (older versions do not).
+pub const GLOW_MOD_MARKER: &str = "glow carriers ready";
+
+static GLOWS: AtomicBool = AtomicBool::new(false);
+
+/// True when this machine runs the Lua mod that prepares the glow carriers.
+pub fn glows_ready() -> bool {
+    GLOWS.load(Ordering::Relaxed)
+}
+
+pub fn set_glows_ready(on: bool) {
+    GLOWS.store(on, Ordering::Relaxed);
+}
+
+pub fn glow_mod_installed(dir: &std::path::Path) -> bool {
+    let folder = dir.join("mods").join("m182_vfx");
+    folder.join("mod.json").is_file()
+        && std::fs::read_to_string(folder.join("src").join("mod.lua")).map(|t| t.contains(GLOW_MOD_MARKER)).unwrap_or(false)
+}
+
+/// Glow `n` (1..=14).
+pub fn glow_template(n: u8) -> Option<[u8; 16]> {
+    let i = (n as usize).checked_sub(1)?;
+    super::config::parse_guid(GLOW_CARRIERS.get(i)?)
+}
+
+pub fn hand_template(e: Element) -> Option<[u8; 16]> {
+    let n: u8 = match e {
+        Element::Lightning => 1,
+        Element::Fire => 2,
+        Element::Ice => 3,
+        Element::Shroud => 4,
+        Element::Healing => 5,
+        Element::Poison => 6,
+        Element::Bone | Element::Summon => 7,
+        Element::Arcane => 8,
+        Element::Physical => 9,
+    };
+    glow_template(n)
+}
+
+/// Game effect glued (by the server) to the weapon hand while a melee attack is charged
+/// when the glow mod is not installed.
 pub fn hand_effect(e: Element) -> Option<[u8; 16]> {
     let guid = match e {
         Element::Poison => "eee801de-8da6-4e11-b5f7-159205ffb139",
@@ -783,6 +845,7 @@ pub struct Aura {
     pub name: &'static str,
     pub effects: &'static [&'static str],
     pub scale: f32,
+    pub glow: Option<u8>,
     pub life_ms: Option<u64>,
     pub every_ms: u64,
 }
@@ -790,7 +853,35 @@ pub struct Aura {
 pub const LINGER_MS: u64 = 1200;
 
 const fn aura(name: &'static str, effects: &'static [&'static str], scale: f32, life_ms: Option<u64>, every_ms: u64) -> Aura {
-    Aura { name, effects, scale, life_ms, every_ms }
+    Aura { name, effects, scale, glow: None, life_ms, every_ms }
+}
+
+const fn glow(name: &'static str, n: u8) -> Aura {
+    Aura { name, effects: &[], scale: 1.0, glow: Some(n), life_ms: None, every_ms: HAND_EVERY_MS }
+}
+
+pub const GLOW_AURAS: [Aura; 16] = [
+    glow("fire", 2),
+    glow("lightning", 1),
+    glow("frost", 3),
+    glow("shroud", 4),
+    glow("holy glow", 5),
+    glow("poison", 6),
+    glow("ectoplasm tendrils", 7),
+    glow("arcane", 8),
+    glow("blood rage", 9),
+    glow("water", 10),
+    glow("death fog", 11),
+    glow("ectoplasm", 12),
+    glow("stars", 13),
+    glow("fire ring", 14),
+    aura("mana", &["VFX_Spell_ManaDrain_Mana_OnPlayer"], 1.5, Some(LINGER_MS), 150),
+    aura("necromancy", &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], 1.0, None, 400),
+];
+
+/// The walking auras in use: the glows when the glow mod is installed, else game effects only.
+pub fn aura_list() -> &'static [Aura] {
+    if glows_ready() { &GLOW_AURAS } else { &AURAS }
 }
 
 pub const AURAS: [Aura; 7] = [
@@ -843,7 +934,7 @@ pub fn gesture_step(st: &mut AuraState, flags: u64, emote: Option<(u32, u32)>, n
     }
     match fresh {
         Some(EMOTE_VICTORY) => {
-            st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
+            st.index = if st.on { (st.index + 1) % aura_list().len() } else { st.index };
             st.on = true;
             Gesture::Next
         }
@@ -906,8 +997,10 @@ pub fn start() {
         return;
     }
     let _ = CLOCK.get_or_init(Instant::now);
-    tracing::info!(target: "m182::vfx", dir = ?dir, log = LOG_FILE, "M182 VFX started");
-    log("vfx: started");
+    let glows = glow_mod_installed(&dir);
+    set_glows_ready(glows);
+    tracing::info!(target: "m182::vfx", dir = ?dir, log = LOG_FILE, glows, "M182 VFX started");
+    log(&format!("vfx: started (custom glows {})", if glows { "on" } else { "off: mods/m182_vfx not installed, game effects only" }));
     if let Err(e) = std::thread::Builder::new().name("m182-vfx".into()).spawn(move || run_loop(dir)) {
         tracing::warn!(target: "m182::vfx", error = %e, "could not start vfx thread");
     }
@@ -986,6 +1079,8 @@ fn run_loop(dir: std::path::PathBuf) {
                 100
             } else if cfg.auto && st.element == Some(Element::Arcane) {
                 150
+            } else if cfg.auto && st.element == Some(Element::Fire) && glows_ready() {
+                HAND_EVERY_MS
             } else {
                 cfg.charge_every_ms
             };
@@ -1003,15 +1098,21 @@ fn run_loop(dir: std::path::PathBuf) {
                             st.element = Some(element);
                             log(&format!("vfx: entity {id} staff element {element:?}"));
                         }
-                        let mut burst = cfg.charge.clone();
-                        if cfg.auto {
-                            burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
-                            burst.scale *= staff_scale(element);
-                            if matches!(element, Element::Arcane | Element::Fire) {
-                                burst.life_ms = Some(LINGER_MS);
+                        let burning = if cfg.auto && element == Element::Fire && glows_ready() { hand_template(Element::Fire) } else { None };
+                        if let Some(template) = burning {
+                            let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
+                            queue_slot(template, id, SLOT_CHEST, chest, HAND_LIFE_MS);
+                        } else {
+                            let mut burst = cfg.charge.clone();
+                            if cfg.auto {
+                                burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
+                                burst.scale *= staff_scale(element);
+                                if matches!(element, Element::Arcane | Element::Fire) {
+                                    burst.life_ms = Some(LINGER_MS);
+                                }
                             }
+                            queue_burst(at, facing, &burst);
                         }
-                        queue_burst(at, facing, &burst);
                     }
                 }
                 Event::Charge { melee: true } => {
@@ -1027,7 +1128,8 @@ fn run_loop(dir: std::path::PathBuf) {
                         if now.saturating_sub(st.last_hand) >= HAND_EVERY_MS {
                             st.last_hand = now;
                             let at = slot_world(manager, id, SLOT_HAND_R).map(|(h, _)| h).or_else(|| position_of(manager, id).map(|(p, _)| p));
-                            if let (Some(at), Some(template)) = (at, hand_effect(element)) {
+                            let template = if glows_ready() { hand_template(element) } else { hand_effect(element) };
+                            if let (Some(at), Some(template)) = (at, template) {
                                 queue_hand(template, id, at);
                             }
                         }
@@ -1049,14 +1151,18 @@ fn run_loop(dir: std::path::PathBuf) {
             let charging = st.since.is_some();
             let aura = auras.entry(id).or_default();
             match gesture_step(aura, flags, last_emote(manager, id), now) {
-                Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, AURAS[aura.index].name)),
-                Gesture::Next => log(&format!("vfx: entity {id} aura {}/{} {}", aura.index + 1, AURAS.len(), AURAS[aura.index].name)),
+                Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, aura_list()[aura.index % aura_list().len()].name)),
+                Gesture::Next => log(&format!("vfx: entity {id} aura {}/{} {}", aura.index + 1, aura_list().len(), aura_list()[aura.index % aura_list().len()].name)),
                 Gesture::None => {}
             }
-            let a = &AURAS[aura.index % AURAS.len()];
+            let a = &aura_list()[aura.index % aura_list().len()];
             if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
                 aura.last_spawn = now;
                 if let Some((at, facing)) = position_of(manager, id) {
+                    if let Some(template) = a.glow.and_then(glow_template) {
+                        let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
+                        queue_slot(template, id, SLOT_CHEST, chest, HAND_LIFE_MS);
+                    }
                     if !a.effects.is_empty() {
                         let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), life_ms: a.life_ms, scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
                         queue_burst(at, facing, &burst);

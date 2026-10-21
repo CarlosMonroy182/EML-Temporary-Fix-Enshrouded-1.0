@@ -1,0 +1,11 @@
+{
+    "id": "m182_vfx",
+    "name": "M182 VFX",
+    "description": "Custom glow effects (one per damage type) used by the M182 VFX native module.",
+    "version": "2.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}
