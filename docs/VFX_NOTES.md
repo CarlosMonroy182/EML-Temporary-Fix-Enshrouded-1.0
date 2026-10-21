@@ -29,3 +29,11 @@
 
 ## Walking aura (Oct 21)
 - Per player, server side. Crouch (InSneakMode bit 21 rising edge) = on/off; victory emote (PlayerInput 1472 bytes, triggerEmoteAction at +696 version, +700 id; victory = 1355035795) = next effect. Fire aura and fire staff use the burning glow template glued to the chest (needs the Lua mod on the viewer); mana and holy light override LifeTime to 1.2 s.
+
+## Kick fix (2026-10-21)
+- Server-spawned entities replicate to every client. The custom Lua glow templates
+  (182e1e00-…) only existed on machines with the Lua mod, so other clients (PS5 included)
+  were disconnected when one was spawned. The server now spawns game templates only
+  (`is_vanilla` is checked by the tests) and the Lua mod was removed.
+- Walking aura: greet emote = on/off, victory emote = next (crouch no longer toggles, normal
+  sneaking was switching it on).
