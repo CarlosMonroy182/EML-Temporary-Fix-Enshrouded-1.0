@@ -28,4 +28,4 @@
 - Staff: arcane (mana drain) uses VFX_Spell_ManaDrain_Mana_OnPlayer + VFX_Resource_Increase_Mana at 1.25x; shroud uses only the fog evade impact at 0.6x.
 
 ## Walking aura (Oct 21)
-- Per player, server side, vanilla effects only (everyone sees it). Gestures from `combinedState` bit 21 (InSneakMode): 2 quick changes = on/off, 4+ quick changes = next effect (`gesture_step`, 600 ms gap). 8 auras in `AURAS`, renewed every 400 ms at chest height, paused while charging.
+- Per player, server side. Crouch (InSneakMode bit 21 rising edge) = on/off; victory emote (PlayerInput 1472 bytes, triggerEmoteAction at +696 version, +700 id; victory = 1355035795) = next effect. Fire aura and fire staff use the burning glow template glued to the chest (needs the Lua mod on the viewer); mana and holy light override LifeTime to 1.2 s.

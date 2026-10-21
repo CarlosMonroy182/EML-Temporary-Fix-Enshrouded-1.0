@@ -88,6 +88,8 @@ pub const FLAG_READY: u32 = 50;
 #[serde(default)]
 pub struct Burst {
     pub effects: Vec<String>,
+    #[serde(skip)]
+    pub life_ms: Option<u64>,
     pub scale: f32,
     pub height: f32,
     pub distance: f32,
@@ -111,7 +113,7 @@ pub struct VfxConfig {
 
 impl Default for Burst {
     fn default() -> Self {
-        Self { effects: Vec::new(), scale: 1.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 }
+        Self { effects: Vec::new(), life_ms: None, scale: 1.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 }
     }
 }
 
@@ -120,6 +122,7 @@ impl Default for VfxConfig {
         Self {
             enabled: true,
             charge: Burst {
+                life_ms: None,
                 effects: vec![
                     "VFX_Skill_Aura_SunFire_Trigger_OnPlayer".into(),
                     "VFX_Trap_Electro_Impact".into(),
@@ -240,7 +243,8 @@ struct Spawn {
     template: [u8; 16],
     at: (i64, i64, i64),
     scale: f32,
-    hand: Option<u32>,
+    hand: Option<(u32, u8)>,
+    life_ms: Option<u64>,
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -329,7 +333,7 @@ pub fn queue_burst(at: (i64, i64, i64), facing: (f64, f64), b: &Burst) {
             if i > 0 && j > 0 {
                 continue;
             }
-            q.push(Spawn { queued: now_ms(), template: *t, at: p, scale: b.scale, hand: None });
+            q.push(Spawn { queued: now_ms(), template: *t, at: p, scale: b.scale, hand: None, life_ms: b.life_ms });
         }
     }
     QUEUED.store(1, Ordering::SeqCst);
@@ -368,8 +372,8 @@ fn run_queue(manager: usize) {
     let fresh: Vec<Spawn> = work.into_iter().filter(|s| now.saturating_sub(s.queued) <= MAX_DELAY_MS).collect();
     for s in fresh.into_iter().take(24) {
         let id = match s.hand {
-            Some(entity) => create_on_slot(manager, s.template, entity, SLOT_HAND_R as u8, s.at, HAND_LIFE_MS),
-            None => create_effect(manager, s.template, s.at, s.scale),
+            Some((entity, slot)) => create_on_slot(manager, s.template, entity, slot, s.at, s.life_ms.unwrap_or(HAND_LIFE_MS)),
+            None => create_effect_for(manager, s.template, s.at, s.scale, s.life_ms),
         };
         if id == 0 {
             if FAILED.fetch_add(1, Ordering::Relaxed) < 3 {
@@ -382,6 +386,11 @@ fn run_queue(manager: usize) {
 }
 
 pub fn create_effect(manager: usize, template: [u8; 16], at: (i64, i64, i64), scale: f32) -> u32 {
+    create_effect_for(manager, template, at, scale, None)
+}
+
+/// Like `create_effect`, optionally overriding how long the effect lives.
+pub fn create_effect_for(manager: usize, template: [u8; 16], at: (i64, i64, i64), scale: f32, life_ms: Option<u64>) -> u32 {
     let mut transform = [0u8; TRANSFORM_SIZE];
     transform[0..8].copy_from_slice(&(at.0 as u64).to_le_bytes());
     transform[8..16].copy_from_slice(&(at.1 as u64).to_le_bytes());
@@ -390,14 +399,22 @@ pub fn create_effect(manager: usize, template: [u8; 16], at: (i64, i64, i64), sc
     for off in [40, 44, 48] {
         transform[off..off + 4].copy_from_slice(&scale.to_le_bytes());
     }
+    let life = life_time_bytes(life_ms.unwrap_or(0));
     let mut entries = [0u8; 0x100];
     entries[0..4].copy_from_slice(&HASH_CURRENT_TRANSFORM.to_le_bytes());
     entries[8..16].copy_from_slice(&(transform.as_ptr() as u64).to_le_bytes());
     entries[16..24].copy_from_slice(&(TRANSFORM_SIZE as u64).to_le_bytes());
+    let mut count = 1u64;
+    if life_ms.is_some() {
+        entries[24..28].copy_from_slice(&HASH_LIFE_TIME.to_le_bytes());
+        entries[32..40].copy_from_slice(&(life.as_ptr() as u64).to_le_bytes());
+        entries[40..48].copy_from_slice(&(LIFE_TIME_SIZE as u64).to_le_bytes());
+        count = 2;
+    }
     let mut desc = [0u8; 0x100];
     desc[4..20].copy_from_slice(&template);
     desc[0x18..0x20].copy_from_slice(&(entries.as_ptr() as u64).to_le_bytes());
-    desc[0x20..0x28].copy_from_slice(&1u64.to_le_bytes());
+    desc[0x20..0x28].copy_from_slice(&count.to_le_bytes());
     original_create(manager, 0, desc.as_ptr() as usize, 0)
 }
 
@@ -415,7 +432,18 @@ pub fn main_hand(manager: usize, id: u32) -> Option<(u32, u32)> {
         if b.len() < EQUIPMENT_SIZE {
             return None;
         }
-        return Some((u32_at(&b, MAIN_HAND_VISUAL), u32_at(&b, MAIN_HAND_ITEM)));
+        let visual = u32_at(&b, MAIN_HAND_VISUAL);
+        let first = u32_at(&b, MAIN_HAND_ITEM);
+        if item_kind(first).map(|k| k.weapon).unwrap_or(false) {
+            return Some((visual, first));
+        }
+        for slot in 0..11 {
+            let item = u32_at(&b, 8 + slot * 72 + 8);
+            if item != 0 && item_kind(item).map(|k| k.weapon).unwrap_or(false) {
+                return Some((visual, item));
+            }
+        }
+        return Some((visual, first));
     }
     None
 }
@@ -559,6 +587,7 @@ pub fn hand_template(e: Element) -> [u8; 16] {
 pub struct ItemKind {
     pub element: Element,
     pub wand: bool,
+    pub weapon: bool,
 }
 
 static ITEMS: Mutex<Option<HashMap<u32, ItemKind>>> = Mutex::new(None);
@@ -584,7 +613,8 @@ pub fn parse_items(text: &str) -> HashMap<u32, ItemKind> {
         let name = name_col.and_then(|c| f.get(c)).copied().unwrap_or("");
         let slot = slot_col.and_then(|c| f.get(c)).copied().unwrap_or("");
         let element = if name.contains("_Spell_Skeleton") { Element::Summon } else { element_of(d) };
-        out.insert(id, ItemKind { element, wand: slot == "MidRangeWeapon" || name.contains("_Wand") });
+        let weapon = matches!(slot, "MeleeWeapon" | "RangeWeapon" | "MidRangeWeapon") || name.starts_with("Weapon_");
+        out.insert(id, ItemKind { element, wand: slot == "MidRangeWeapon" || name.contains("_Wand"), weapon });
     }
     out
 }
@@ -729,13 +759,20 @@ pub fn create_on_slot(manager: usize, template: [u8; 16], entity: u32, slot: u8,
 }
 
 pub fn queue_hand(template: [u8; 16], entity: u32, at: (i64, i64, i64)) {
+    queue_slot(template, entity, SLOT_HAND_R as u8, at, HAND_LIFE_MS);
+}
+
+/// Queues `template` glued (on the server) to `slot` of `entity` for `life_ms`.
+pub fn queue_slot(template: [u8; 16], entity: u32, slot: u8, at: (i64, i64, i64), life_ms: u64) {
     let Ok(mut q) = QUEUE.lock() else { return };
     if q.len() > 48 {
         return;
     }
-    q.push(Spawn { queued: now_ms(), template, at, scale: 1.0, hand: Some(entity) });
+    q.push(Spawn { queued: now_ms(), template, at, scale: 1.0, hand: Some((entity, slot)), life_ms: Some(life_ms) });
     QUEUED.store(1, Ordering::SeqCst);
 }
+
+pub const SLOT_CHEST: u8 = 2;
 
 
 // ---------------------------------------------------------------------------------------------
@@ -745,24 +782,27 @@ pub fn queue_hand(template: [u8; 16], entity: u32, at: (i64, i64, i64)) {
 
 pub const FLAG_SNEAK: u32 = 21;
 static SNEAK_LOGS: AtomicU32 = AtomicU32::new(0);
-pub const GESTURE_GAP_MS: u64 = 600;
-pub const AURA_EVERY_MS: u64 = 400;
 
 pub struct Aura {
     pub name: &'static str,
     pub effects: &'static [&'static str],
     pub scale: f32,
+    pub body: Option<Element>,
+    pub life_ms: Option<u64>,
+    pub every_ms: u64,
 }
 
+pub const LINGER_MS: u64 = 1200;
+
 pub const AURAS: [Aura; 8] = [
-    Aura { name: "fire", effects: &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer"], scale: 1.5 },
-    Aura { name: "lightning", effects: &["VFX_Trap_Electro_Impact"], scale: 1.5 },
-    Aura { name: "ice", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"], scale: 1.5 },
-    Aura { name: "shroud", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"], scale: 1.0 },
-    Aura { name: "holy light", effects: &["VFX_Resource_Increase_Health_NoSound"], scale: 1.5 },
-    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5 },
-    Aura { name: "blood", effects: &["VFX_Skill_BloodMagic_Trigger"], scale: 1.5 },
-    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0 },
+    Aura { name: "fire", effects: &[], scale: 1.0, body: Some(Element::Fire), life_ms: None, every_ms: HAND_EVERY_MS },
+    Aura { name: "lightning", effects: &["VFX_Trap_Electro_Impact"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
+    Aura { name: "ice", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
+    Aura { name: "shroud", effects: &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"], scale: 1.0, body: None, life_ms: None, every_ms: 400 },
+    Aura { name: "holy light", effects: &["VFX_Resource_Increase_Health_NoSound"], scale: 1.5, body: None, life_ms: Some(LINGER_MS), every_ms: 250 },
+    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5, body: None, life_ms: Some(LINGER_MS), every_ms: 150 },
+    Aura { name: "blood", effects: &["VFX_Skill_BloodMagic_Trigger"], scale: 1.5, body: None, life_ms: None, every_ms: 400 },
+    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0, body: None, life_ms: None, every_ms: 400 },
 ];
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -770,8 +810,7 @@ pub struct AuraState {
     pub on: bool,
     pub index: usize,
     pub sneak: Option<bool>,
-    pub changes: u32,
-    pub last_change: u64,
+    pub emote: Option<(u32, u32)>,
     pub last_spawn: u64,
 }
 
@@ -782,36 +821,40 @@ pub enum Gesture {
     Next,
 }
 
-/// Crouch gestures: 2 quick crouch changes (crouch and stand up) turn the aura on or off,
-/// 4 quick changes switch to the next effect (and turn it on). A gesture ends after
-/// `GESTURE_GAP_MS` without changes.
-pub fn gesture_step(st: &mut AuraState, flags: u64, now: u64) -> Gesture {
+pub const EMOTE_VICTORY: u32 = 1_355_035_795;
+const PLAYER_INPUT_SIZE: usize = 1472;
+const EMOTE_AT: usize = 696;
+
+/// The last emote the player triggered (version counter, emote id), from the server's
+/// `PlayerInput` component.
+pub fn last_emote(manager: usize, id: u32) -> Option<(u32, u32)> {
+    let b = component_with(manager, id, PLAYER_INPUT_SIZE, |_| true)?;
+    Some((u32_at(&b, EMOTE_AT), u32_at(&b, EMOTE_AT + 4)))
+}
+
+/// Crouching turns the aura on or off; the victory emote switches to the next effect
+/// (and turns it on).
+pub fn gesture_step(st: &mut AuraState, flags: u64, emote: Option<(u32, u32)>, now: u64) -> Gesture {
+    let _ = now;
     let sneak = flags & (1 << FLAG_SNEAK) != 0;
     let previous = st.sneak.replace(sneak);
-    if previous.is_some() && previous != Some(sneak) {
-        if st.changes > 0 && now.saturating_sub(st.last_change) > GESTURE_GAP_MS {
-            st.changes = 0;
-        }
-        st.changes += 1;
-        st.last_change = now;
-        return Gesture::None;
+    let new_emote = match (st.emote, emote) {
+        (Some(old), Some(cur)) => cur != old && cur.1 == EMOTE_VICTORY,
+        _ => false,
+    };
+    if emote.is_some() {
+        st.emote = emote;
     }
-    if st.changes == 0 || now.saturating_sub(st.last_change) <= GESTURE_GAP_MS {
-        return Gesture::None;
+    if new_emote {
+        st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
+        st.on = true;
+        return Gesture::Next;
     }
-    let count = std::mem::take(&mut st.changes);
-    match count {
-        2 | 3 => {
-            st.on = !st.on;
-            Gesture::Toggle
-        }
-        n if n >= 4 => {
-            st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
-            st.on = true;
-            Gesture::Next
-        }
-        _ => Gesture::None,
+    if previous == Some(false) && sneak {
+        st.on = !st.on;
+        return Gesture::Toggle;
     }
+    Gesture::None
 }
 
 fn position_of(manager: usize, id: u32) -> Option<((i64, i64, i64), (f64, f64))> {
@@ -918,7 +961,15 @@ fn run_loop(dir: std::path::PathBuf) {
             let Some(flags) = read_flags(manager, id) else { continue };
             let st = states.entry(id).or_default();
             let was = st.since.is_some();
-            let every = if st.heavy { 100 } else { cfg.charge_every_ms };
+            let every = if st.heavy {
+                100
+            } else if cfg.auto && st.element == Some(Element::Arcane) {
+                150
+            } else if cfg.auto && st.element == Some(Element::Fire) {
+                HAND_EVERY_MS
+            } else {
+                cfg.charge_every_ms
+            };
             match step(st, flags, now, every, cfg.min_charge_ms) {
                 Event::Charge { melee: false } => {
                     let items = ranged_items(manager, id);
@@ -933,12 +984,20 @@ fn run_loop(dir: std::path::PathBuf) {
                             st.element = Some(element);
                             log(&format!("vfx: entity {id} staff element {element:?}"));
                         }
-                        let mut burst = cfg.charge.clone();
-                        if cfg.auto {
-                            burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
-                            burst.scale *= staff_scale(element);
+                        if cfg.auto && element == Element::Fire {
+                            let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
+                            queue_slot(hand_template(Element::Fire), id, SLOT_CHEST, chest, HAND_LIFE_MS);
+                        } else {
+                            let mut burst = cfg.charge.clone();
+                            if cfg.auto {
+                                burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
+                                burst.scale *= staff_scale(element);
+                                if element == Element::Arcane {
+                                    burst.life_ms = Some(LINGER_MS);
+                                }
+                            }
+                            queue_burst(at, facing, &burst);
                         }
-                        queue_burst(at, facing, &burst);
                     }
                 }
                 Event::Charge { melee: true } => {
@@ -979,17 +1038,23 @@ fn run_loop(dir: std::path::PathBuf) {
             if aura.sneak.is_some() && aura.sneak != Some(sneak_now) && SNEAK_LOGS.fetch_add(1, Ordering::Relaxed) < 12 {
                 log(&format!("vfx: entity {id} crouch {} (flags {flags:#x})", if sneak_now { "on" } else { "off" }));
             }
-            match gesture_step(aura, flags, now) {
+            match gesture_step(aura, flags, last_emote(manager, id), now) {
                 Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, AURAS[aura.index].name)),
                 Gesture::Next => log(&format!("vfx: entity {id} aura {}", AURAS[aura.index].name)),
                 Gesture::None => {}
             }
-            if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= AURA_EVERY_MS {
+            let a = &AURAS[aura.index % AURAS.len()];
+            if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
                 aura.last_spawn = now;
                 if let Some((at, facing)) = position_of(manager, id) {
-                    let a = &AURAS[aura.index % AURAS.len()];
-                    let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
-                    queue_burst(at, facing, &burst);
+                    if let Some(element) = a.body {
+                        let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
+                        queue_slot(hand_template(element), id, SLOT_CHEST, chest, HAND_LIFE_MS);
+                    }
+                    if !a.effects.is_empty() {
+                        let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), life_ms: a.life_ms, scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
+                        queue_burst(at, facing, &burst);
+                    }
                 }
             }
         }
