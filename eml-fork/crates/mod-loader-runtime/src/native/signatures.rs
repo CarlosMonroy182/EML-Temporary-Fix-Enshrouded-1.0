@@ -73,16 +73,6 @@ pub static PLAYERS_PUMP: [u8; 31] = [
 
 pub const PLAYERS_PUMP_DISPLACED: usize = 14;
 
-/// Server and client `admin_player` system (build 1267041): the system that consumes the admin
-/// requests of a player's input, the teleport among them. The first 16 bytes are whole, position
-/// independent instructions.
-pub static ADMIN_PLAYER: [u8; 21] = [
-    0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x41, 0x54, 0x48, 0x8d, 0xac, 0x24, 0x18, 0xe9, 0xff, 0xff,
-    0xb8, 0xe8, 0x17, 0x00, 0x00,
-];
-
-pub const ADMIN_PLAYER_DISPLACED: usize = 16;
-
 /// The game's `permissions of player` lookup (build 1267041): `rdx` is the player's entity id and
 /// the answer is stored at `*rcx`. Every chest, inventory and building action asks it. The hook
 /// replaces the last 14 bytes before `ret`.

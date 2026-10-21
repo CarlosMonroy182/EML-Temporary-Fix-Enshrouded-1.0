@@ -24,14 +24,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spawner-panel
+          workspaces: |
+            spawner-panel
+            en-panel
       - name: Build
         working-directory: spawner-panel
         run: cargo build --release --locked --lib
+      - name: Build English
+        shell: bash
+        run: |
+          python spawner-panel/tools/localize.py spawner-panel/src en-panel/src
+          cp spawner-panel/Cargo.toml spawner-panel/Cargo.lock en-panel/
+          cp -r spawner-panel/assets en-panel/assets
+          cd en-panel
+          cargo build --release --locked --lib
       - uses: actions/upload-artifact@v4
         with:
           name: panel
           path: spawner-panel/target/release/m182_spawner_panel.dll
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-en
+          path: en-panel/target/release/m182_spawner_panel.dll
           if-no-files-found: error
 
   native:
@@ -64,28 +79,38 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          for side in Cliente Servidor; do
-            out=dist/M182_$side
-            mkdir -p $out/mods/m182_spawn_variants/src
+          pack() {
+            side=$1; folder=$2; panel=$3; readme=$4; text=$5
+            out=dist/$folder
+            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src
             cp release-package/$side/* $out/
+            cp release-package/text/$text $out/$readme
             cp artifacts/native/dbghelp.dll $out/
             cp spawner-mods/m182_spawn_variants/mod.json $out/mods/m182_spawn_variants/
             cp spawner-mods/m182_spawn_variants/src/mod.lua $out/mods/m182_spawn_variants/src/
-          done
-          cp artifacts/panel/m182_spawner_panel.dll dist/M182_Cliente/M182_Panel.dll
-          cp eml-fork/LICENSE dist/M182_Cliente/ || true
+            cp spawner-mods/zz_m182_item_stats/mod.json $out/mods/zz_m182_item_stats/
+            cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
+            if [ "$side" = Cliente ]; then
+              cp artifacts/$panel/m182_spawner_panel.dll $out/M182_Panel.dll
+              cp eml-fork/LICENSE $out/ || true
+            fi
+          }
+          pack Cliente M182_Cliente panel LEEME.txt es/Cliente.txt
+          pack Servidor M182_Servidor panel LEEME.txt es/Servidor.txt
+          pack Cliente M182_Client panel-en README.txt en/Cliente.txt
+          pack Servidor M182_Server panel-en README.txt en/Servidor.txt
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src
           cp artifacts/native/dbghelp.dll dist/M182_PvP/
           cp nexus-package/m182_native.json nexus-package/eml.json nexus-package/README.txt dist/M182_PvP/
           cp eml-fork/LICENSE dist/M182_PvP/
           cp spawner-mods/m182_spawn_variants/mod.json dist/M182_PvP/mods/m182_spawn_variants/
           cp spawner-mods/m182_spawn_variants/src/mod.lua dist/M182_PvP/mods/m182_spawn_variants/src/
-          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente.zip M182_Cliente && zip -r M182_Servidor.zip M182_Servidor)
-          (cd dist && sha256sum M182_Cliente.zip M182_Servidor.zip M182_PvP_Nexus.zip > SHA256.txt)
+          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server)
+          (cd dist && sha256sum M182_*.zip > SHA256.txt)
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=admin-pannel-latest
           gh release delete "$tag" --cleanup-tag --yes || true
-          gh release create "$tag" dist/M182_Cliente.zip dist/M182_Servidor.zip dist/M182_PvP_Nexus.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Cliente and Servidor folders (in-game panel, Insert) and the M182 PvP package for Nexus. Work in progress."
+          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."

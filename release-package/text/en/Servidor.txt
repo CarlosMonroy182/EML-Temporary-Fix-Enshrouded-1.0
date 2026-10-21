@@ -1,0 +1,29 @@
+M182 - SERVER (Dathost)
+==========================
+
+INSTALL
+1. Stop the server in the Dathost panel.
+2. With FTP, go to the folder where enshrouded_server.exe is.
+3. Upload ALL the contents of this "M182_Server" folder (dbghelp.dll, eml.json, m182_native.json and the mods folder) to that folder, replacing what is there.
+4. Start the server. No .exe needs to be uploaded or opened.
+
+UPDATING
+Uploading this folder again does not touch your zones, teams, spawns or item settings (they are not in the package). If you already changed PvP from the panel and do not want to lose it, do not replace m182_native.json.
+If you are coming from an older version, in mods\zz_m182_item_stats you can delete m182_custom.txt, m182_custom_items.csv, m182_custom.skipped and m182_custom.running: "unique" weapons (copies) no longer exist.
+
+KEY
+In m182_native.json the "chat_key" line is the chat channel key. It must be the same as "remote_key" in the m182_native.json of the Client folder. If you want to change it, change it in both places with the same string (no spaces) and restart the server.
+
+HOW IT IS USED
+You join the server with the "Client" folder installed, press INSERT and use the panel. The panel detects by itself that you are on the server. You do not have to type commands.
+
+WHAT LIVES ON THE SERVER
+Zones, bases, teams, spawns, PvP and item/level/skill settings are saved in this folder (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json and mods\zz_m182_item_stats\src\m182_data.lua). The server reads them by itself and keeps them even when the administrator is not connected. The panel only sends the changes.
+Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
+Personal powers (god mode, energy) only last while that player is connected.
+
+LIMITS (honesty)
+- Not confirmed in the real game: the chest and building block for visitors of a protected base. At startup m182_spawner.log should say "permissions hooked"; when someone becomes restricted it says "is a visitor now".
+- If something fails, send me m182_spawner.log and the server's EML log ("chat: client ..." appears for every message received).
+
+Made by M182.

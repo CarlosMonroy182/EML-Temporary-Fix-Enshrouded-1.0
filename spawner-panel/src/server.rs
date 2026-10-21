@@ -1,9 +1,8 @@
 use eframe::egui::{self, RichText, Vec2};
-use serde_json::json;
 
 use crate::remote;
 use crate::theme::*;
-use crate::{powers, App};
+use crate::App;
 
 impl App {
     /// One line under the header while the panel drives a server.
@@ -73,45 +72,5 @@ impl App {
             ui.label(RichText::new(self.remote_notice.clone()).color(GOOD).size(14.5));
         }
         ui.label(RichText::new("Para que el envío funcione: el chat del juego debe abrirse con Enter y el mundo del servidor estar cargado. No uses el teclado mientras el panel escribe.").color(MUTED).size(14.5));
-    }
-
-    #[allow(dead_code)]
-    pub fn copies_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("ARMAS ÚNICAS").font(title_font(22.0)).color(GOLD));
-        ui.label(RichText::new("Cada arma o armadura que edites sale como una copia propia, con sus stats, sin cambiar las demás. El juego solo conoce los ítems que existen al abrirse: por eso cada ítem editado reserva unas copias (se crean al abrir el juego o al reiniciar el servidor).").color(MUTED));
-        let pending = self.items.book.pending_count();
-        if remote::active() && pending > 0 {
-            ui.label(RichText::new(format!("Hay {pending} ítems con copias reservadas esperando un reinicio del servidor.")).color(GOLD_DIM));
-            if button(ui, "YA REINICIÉ EL SERVIDOR", Vec2::new(260.0, 32.0), true, true) {
-                self.items.book.confirm_restart();
-                let _ = self.items.book.save(&self.dir);
-            }
-        }
-        ui.add_space(6.0);
-        ui.label(RichText::new("Reservar copias de varias armas de una vez (4 por arma). Alarga un poco el arranque del juego:").color(MUTED).size(14.5));
-        ui.horizontal_wrapped(|ui| {
-            for (label, slot) in [("Cuerpo a cuerpo", "MeleeWeapon"), ("Arcos y ballestas", "RangeWeapon"), ("Bastones y varitas", "MidRangeWeapon"), ("Escudos", "Shield")] {
-                if button(ui, label, Vec2::new(170.0, 30.0), true, false) {
-                    let bases: Vec<u32> = self.items.rows.iter().filter(|r| r.slot == slot && r.deliverable()).map(|r| r.id).collect();
-                    let mut added = 0;
-                    for base in &bases {
-                        if self.items.book.register(*base, 4) {
-                            added += 1;
-                        }
-                    }
-                    let _ = self.items.book.save(&self.dir);
-                    self.items.notice = match powers::command(&self.dir, &json!({"cmd": "item_pools", "bases": bases, "slots": 4})) {
-                        Ok(()) if added == 0 => "Esas armas ya estaban reservadas.".to_string(),
-                        Ok(()) => format!("Reservadas copias de {added} ítems. Reinicia {} una vez para crearlas.", if remote::active() { "el servidor y pulsa «Ya reinicié el servidor»" } else { "el juego" }),
-                        Err(e) => format!("Error: {e}"),
-                    };
-                }
-            }
-        });
-        if !self.items.notice.is_empty() {
-            ui.label(RichText::new(self.items.notice.clone()).color(GOOD).size(14.5));
-        }
-        let used: usize = self.items.book.pools.values().map(|p| p.used.values().filter(|u| u.active).count()).sum();
-        ui.label(RichText::new(format!("Ítems con copias reservadas: {} · copias en uso: {} · copias de {} ítems por crear", self.items.book.pools.len(), used, pending)).color(MUTED).size(14.5));
     }
 }

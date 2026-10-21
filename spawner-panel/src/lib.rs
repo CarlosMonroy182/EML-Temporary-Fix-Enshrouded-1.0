@@ -1,4 +1,3 @@
-pub mod copies;
 pub mod embed;
 pub mod host;
 pub mod input;
@@ -485,7 +484,6 @@ impl App {
             balance.insert(k, v);
         }
         let mut item_state = items::ItemsState {
-            global: !copies::ENABLED,
             levels: items::load_levels(&dir),
             rows: item_rows,
             balance_base,
@@ -496,7 +494,6 @@ impl App {
             rarity: 0,
             amount: 1,
             generic_pickup: items::load_generic_pickup(&dir),
-            book: copies::Book::load(&dir),
             ..Default::default()
         };
         if let Ok(log) = std::fs::read_to_string(dir.join("m182_spawner.log")) {
@@ -658,34 +655,7 @@ impl App {
     fn spawn(&mut self, mode: Mode) {
         let Some(index) = self.catalog(mode).selected else { return };
         let guid = self.catalog(mode).entries[index].guid.clone();
-        let mut copy: Option<items::CopyDelivery> = None;
         if mode == Mode::Items {
-            if let Some(item) = self.items.rows.get(index).cloned() {
-                let dir = self.dir.clone();
-                match self.items.copy_outcome(&dir, &item, self.items.level, remote::active()) {
-                    items::CopyOutcome::Plain => {}
-                    items::CopyOutcome::Blocked { message, commands } => {
-                        for command in commands {
-                            let _ = powers::command(&dir, &command);
-                        }
-                        self.items.notice = message.clone();
-                        self.status = Status::Error(message);
-                        return;
-                    }
-                    items::CopyOutcome::Deliver(delivery) => {
-                        for command in &delivery.commands {
-                            if let Err(e) = powers::command(&dir, command) {
-                                self.status = Status::Error(e);
-                                return;
-                            }
-                        }
-                        self.items.notice = format!("Copia única nº {} de «{}» preparada con tus stats.", delivery.slot, item.name);
-                        copy = Some(delivery);
-                    }
-                }
-            }
-        }
-        if mode == Mode::Items && copy.is_none() {
             if let Some(item) = self.items.rows.get(index).cloned() {
                 if self.items.note_delivery(&item, self.items.level) {
                     let dir = self.dir.clone();
@@ -734,13 +704,7 @@ impl App {
                     request["item_level"] = json!(self.items.level);
                     request["item_rarity"] = json!(self.items.rarity);
                     request["item_amount"] = json!(self.items.amount);
-                    if let Some(delivery) = &copy {
-                        request["item"] = json!(delivery.item);
-                        request["item_guid"] = json!(delivery.guid);
-                        if delivery.stats.as_object().is_some_and(|s| !s.is_empty()) {
-                            request["stats"] = delivery.stats.clone();
-                        }
-                    } else if let Some(stats) = self.items.stats_request(&item) {
+                    if let Some(stats) = self.items.stats_request(&item) {
                         request["stats"] = stats;
                     }
                 }
@@ -1436,7 +1400,7 @@ mod tests {
     #[test]
     fn item_stats_autosave_and_delivery() {
         let dir = temp_dir("autosave");
-        let mut st = items::ItemsState { global: true, ..Default::default() };
+        let mut st = items::ItemsState::default();
         let mut item = items::Item::default();
         item.id = 77;
         item.guid = "aaaaaaaa-0000-0000-0000-000000000077".into();
@@ -1476,12 +1440,6 @@ mod tests {
         powers::save(&dir, &st).unwrap();
         let back = powers::PowersState::load(&dir);
         assert!(back.god && !back.fly && !back.stamina);
-        powers::command(&dir, &powers::teleport_body([1.0, 2.0, 3.0], true)).unwrap();
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(powers::COMMAND_FILE)).unwrap()).unwrap();
-        assert_eq!(v["cmd"], "teleport");
-        assert_eq!(v["at"], json!([1.0, 2.0, 3.0]));
-        let unknown = powers::teleport_body([1.0, 2.0, 3.0], false);
-        assert!(unknown["at"][1].is_null());
         let _ = std::fs::remove_dir_all(dir);
     }
 

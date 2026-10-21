@@ -1796,27 +1796,16 @@ struct Powers {
     stamina: bool,
     fly: bool,
     fly_speed: Option<f32>,
-    map_travel: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Command {
     cmd: String,
-    at: Option<[Option<f64>; 3]>,
     label: Option<String>,
     guid: Option<String>,
     item_id: Option<u32>,
     stats: Option<StatsPatch>,
-    ground: Option<f64>,
-    base: Option<u32>,
-    slot: Option<u32>,
-    slots: Option<u32>,
-    dmg: Option<String>,
-    arm: Option<String>,
-    lvl: Option<[u32; 2]>,
-    bases: Option<Vec<u32>>,
-    to: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1850,7 +1839,6 @@ struct PowerState {
     groups: GroupState,
     saved: HashMap<(usize, u32), Saved>,
     zone_ids: Vec<u32>,
-    entity_protect: HashMap<u32, Instant>,
     diag_left: u32,
     diag_last: Option<Instant>,
     spawners: SpawnerSet,
@@ -2236,329 +2224,10 @@ fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
                 st.protect_until = Some(Instant::now() + Duration::from_secs(8));
                 st.hover = None;
             }
-            log(&format!(
-                "powers: god={} stamina={} fly={} map_travel={}",
-                p.god, p.stamina, p.fly, p.map_travel
-            ));
+            log(&format!("powers: god={} stamina={} fly={}", p.god, p.stamina, p.fly));
             st.powers = p;
         }
         Err(e) => log(&format!("powers: invalid file ({e})")),
-    }
-}
-
-const PLAYER_INPUT_SIZE: usize = 1472;
-const CONSUMED_INPUT_SIZE: usize = 224;
-const ADMIN_BLOCK_AT: usize = 0x434;
-const ADMIN_BLOCK_SIZE: usize = 0x28;
-const ADMIN_VERSION_AT: usize = 0x458;
-const CONSUMED_ADMIN_AT: usize = 0xac;
-const WAYPOINT_SIZE: usize = 32;
-const TELEPORT_PROTECTION: Duration = Duration::from_secs(25);
-const TELEPORT_HEIGHT_MARGIN: f64 = 1.0;
-const TELEPORT_UNKNOWN_RISE: f64 = 150.0;
-
-#[derive(Clone)]
-struct TeleportJob {
-    entity: u32,
-    at: [Option<f64>; 3],
-    waypoint: bool,
-    queued: Instant,
-    tries: u32,
-}
-
-struct TeleportSent {
-    job: TeleportJob,
-    block: Vec<u8>,
-    written: u32,
-}
-
-static TELEPORT_JOBS: Mutex<Vec<TeleportJob>> = Mutex::new(Vec::new());
-static TELEPORT_SENT: Mutex<Vec<TeleportSent>> = Mutex::new(Vec::new());
-
-pub fn reset_teleports() {
-    if let Ok(mut jobs) = TELEPORT_JOBS.lock() {
-        jobs.clear();
-    }
-    if let Ok(mut sent) = TELEPORT_SENT.lock() {
-        sent.clear();
-    }
-    if let Ok(mut map) = MAP_TRAVEL.lock() {
-        map.entities.clear();
-        map.seen.clear();
-        map.last = None;
-    }
-    if let Ok(mut list) = MAP_ACTIONS.lock() {
-        list.clear();
-    }
-    if let Ok(mut last) = MAP_LAST_GO.lock() {
-        last.clear();
-    }
-    if let Ok(mut protect) = MAP_PROTECT.lock() {
-        protect.clear();
-    }
-}
-
-fn queue_teleport(job: TeleportJob) {
-    if let Ok(mut jobs) = TELEPORT_JOBS.lock() {
-        jobs.retain(|j| j.entity != job.entity);
-        jobs.push(job);
-    }
-}
-
-fn teleport_watchdog() {
-    let Ok(mut jobs) = TELEPORT_JOBS.lock() else { return };
-    let before = jobs.len();
-    jobs.retain(|j| j.queued.elapsed() < Duration::from_secs(15));
-    if jobs.len() != before {
-        log("teleport: the game never took the request (the teleport hook is not active)");
-    }
-}
-
-fn waypoint_position(slots: &[Slot]) -> Option<(f64, f64, f64)> {
-    let mut found = Vec::new();
-    for slot in slots.iter().filter(|s| s.stride == WAYPOINT_SIZE) {
-        let Some(b) = read_bytes(slot.addr, WAYPOINT_SIZE) else { continue };
-        if b.len() < WAYPOINT_SIZE || b[0] != 1 || b[1..8].iter().any(|v| *v != 0) {
-            continue;
-        }
-        let p = (le_i64(&b, 8) as f64 / METERS, le_i64(&b, 16) as f64 / METERS, le_i64(&b, 24) as f64 / METERS);
-        if p.0.abs() < 40_000.0 && p.2.abs() < 40_000.0 && p.1.abs() < 6_000.0 && (p.0 != 0.0 || p.2 != 0.0) {
-            found.push(p);
-        }
-    }
-    if found.len() == 1 { found.pop() } else { None }
-}
-
-fn current_height(manager: usize, entity: u32) -> Option<f64> {
-    transform_of(manager, entity).map(|t| le_i64(&t, 8) as f64 / METERS)
-}
-
-struct MapTravel {
-    entities: Vec<u32>,
-    seen: Vec<(u32, Option<(f64, f64, f64)>)>,
-    last: Option<Instant>,
-}
-
-static MAP_TRAVEL: Mutex<MapTravel> = Mutex::new(MapTravel { entities: Vec::new(), seen: Vec::new(), last: None });
-const MAP_TRAVEL_PERIOD: Duration = Duration::from_millis(100);
-const MAP_HEIGHT_REACH: f64 = 600.0;
-
-fn set_map_travel(entities: Vec<u32>) {
-    let Ok(mut state) = MAP_TRAVEL.lock() else { return };
-    state.seen.retain(|(entity, _)| entities.contains(entity));
-    state.entities = entities;
-}
-
-const WAYPOINT_ACTION_AT: usize = 8 + 568;
-
-#[derive(Clone, Copy, PartialEq)]
-struct MapAction {
-    version: u32,
-    enable: bool,
-    ping: bool,
-    at: (f64, f64, f64),
-}
-
-fn waypoint_action(slots: &[Slot]) -> Option<MapAction> {
-    let input = slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE)?;
-    let b = read_bytes(input.addr + WAYPOINT_ACTION_AT, WAYPOINT_SIZE).filter(|b| b.len() == WAYPOINT_SIZE)?;
-    Some(MapAction {
-        version: u32_at(&b, 28),
-        enable: b[24] == 1,
-        ping: b[25] == 1,
-        at: (le_i64(&b, 0) as f64 / METERS, le_i64(&b, 8) as f64 / METERS, le_i64(&b, 16) as f64 / METERS),
-    })
-}
-
-static MAP_ACTIONS: Mutex<Vec<(u32, MapAction)>> = Mutex::new(Vec::new());
-static MAP_LAST_GO: Mutex<Vec<(u32, (f64, f64, f64), Instant)>> = Mutex::new(Vec::new());
-
-fn map_action_scan(entity: u32, slots: &[Slot]) -> Option<(f64, f64, f64)> {
-    let Some(action) = waypoint_action(slots) else {
-        if let Ok(mut list) = MAP_ACTIONS.lock() {
-            if !list.iter().any(|(e, _)| *e == entity) {
-                list.push((entity, MapAction { version: 0, enable: false, ping: false, at: (0.0, 0.0, 0.0) }));
-                log(&format!("map travel: entity {entity} has no player input to read map markers from"));
-            }
-        }
-        return None;
-    };
-    let mut list = MAP_ACTIONS.lock().ok()?;
-    let Some(slot) = list.iter_mut().find(|(e, _)| *e == entity) else {
-        log(&format!(
-            "map travel: watching entity {entity}, map marker version {} enabled={} ping={} x={:.1} y={:.1} z={:.1}",
-            action.version, action.enable, action.ping, action.at.0, action.at.1, action.at.2
-        ));
-        list.push((entity, action));
-        return None;
-    };
-    if slot.1.version == action.version && slot.1.enable == action.enable && slot.1.at == action.at {
-        return None;
-    }
-    slot.1 = action;
-    log(&format!(
-        "map travel: entity {entity} sent a map marker, version {} enabled={} ping={} x={:.1} y={:.1} z={:.1}",
-        action.version, action.enable, action.ping, action.at.0, action.at.1, action.at.2
-    ));
-    if action.enable && !action.ping && (action.at.0 != 0.0 || action.at.2 != 0.0) { Some(action.at) } else { None }
-}
-
-fn map_travel_scan(manager: usize) {
-    let (entities, due) = match MAP_TRAVEL.lock() {
-        Ok(mut state) => {
-            let due = state.last.map(|t| t.elapsed() >= MAP_TRAVEL_PERIOD).unwrap_or(true);
-            if due && !state.entities.is_empty() {
-                state.last = Some(Instant::now());
-            }
-            (state.entities.clone(), due)
-        }
-        Err(_) => return,
-    };
-    if !due {
-        return;
-    }
-    for entity in entities {
-        let Some((_, _, slots)) = entity_layout(manager, entity) else { continue };
-        if let Some(sent) = map_action_scan(entity, &slots) {
-            map_travel_go(manager, entity, Some(sent));
-        }
-        let marker = waypoint_position(&slots);
-        let previous = MAP_TRAVEL.lock().ok().and_then(|mut state| match state.seen.iter_mut().find(|(e, _)| *e == entity) {
-            Some(slot) => Some(std::mem::replace(&mut slot.1, marker)),
-            None => {
-                state.seen.push((entity, marker));
-                None
-            }
-        });
-        if previous.is_some_and(|before| before != marker) && marker.is_some() {
-            map_travel_go(manager, entity, marker);
-        }
-    }
-}
-
-fn map_travel_go(manager: usize, entity: u32, marker: Option<(f64, f64, f64)>) {
-    let Some((x, y, z)) = marker else { return };
-    if let Ok(mut last) = MAP_LAST_GO.lock() {
-        last.retain(|(_, _, at)| at.elapsed() < Duration::from_secs(5));
-        if last.iter().any(|(e, p, _)| *e == entity && (p.0 - x).abs() < 1.0 && (p.2 - z).abs() < 1.0) {
-            return;
-        }
-        last.push((entity, (x, y, z), Instant::now()));
-    }
-    let here = current_height(manager, entity);
-    let known = y.abs() > 0.5 && here.is_none_or(|h| (y - h).abs() <= MAP_HEIGHT_REACH);
-    log(&format!("map travel: entity {entity} marked x={x:.1} y={y:.1} z={z:.1}, height {}", if known { "known" } else { "unknown" }));
-    queue_teleport(TeleportJob { entity, at: [Some(x), if known { Some(y) } else { None }, Some(z)], waypoint: false, queued: Instant::now(), tries: 0 });
-    if let Ok(mut protect) = MAP_PROTECT.lock() {
-        protect.push((entity, Instant::now() + TELEPORT_PROTECTION));
-    }
-}
-
-static MAP_PROTECT: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
-static ADMIN_TICK_SEEN: AtomicBool = AtomicBool::new(false);
-
-/// Runs inside the game's own admin system, on the game thread, right before the system looks for
-/// the teleport request of each player. A request the game consumed last time is put back to what
-/// the player's own game sent, then the pending requests are handed to the game.
-pub fn admin_tick() {
-    let manager = SERVER_MGR.load(Ordering::SeqCst);
-    if manager == 0 {
-        return;
-    }
-    if !ADMIN_TICK_SEEN.swap(true, Ordering::Relaxed) {
-        log("teleport: the game's admin system is running, requests can be handed over");
-    }
-    map_travel_scan(manager);
-    let sent: Vec<TeleportSent> = TELEPORT_SENT.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
-    let mut again = Vec::new();
-    for item in sent {
-        let Some((_, _, slots)) = entity_layout(manager, item.job.entity) else { continue };
-        let (Some(input), Some(consumed)) = (
-            slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE),
-            slots.iter().find(|s| s.stride == CONSUMED_INPUT_SIZE),
-        ) else {
-            continue;
-        };
-        let taken = read_bytes(consumed.addr + CONSUMED_ADMIN_AT, 4).map(|b| u32_at(&b, 0) == item.written).unwrap_or(false);
-        let original = u32_at(&item.block, ADMIN_VERSION_AT - ADMIN_BLOCK_AT);
-        write_bytes(input.addr + ADMIN_BLOCK_AT, &item.block);
-        write_bytes(consumed.addr + CONSUMED_ADMIN_AT, &original.to_le_bytes());
-        if taken {
-            log(&format!("teleport: the game took the request for entity {}", item.job.entity));
-        } else if item.job.tries < 3 {
-            let mut job = item.job.clone();
-            job.tries += 1;
-            again.push(job);
-        } else {
-            log(&format!("teleport: the game did not take the request for entity {}", item.job.entity));
-        }
-    }
-    let mut jobs: Vec<TeleportJob> = TELEPORT_JOBS.lock().map(|mut j| std::mem::take(&mut *j)).unwrap_or_default();
-    jobs.extend(again);
-    for job in jobs {
-        let Some((_, _, slots)) = entity_layout(manager, job.entity) else {
-            log(&format!("teleport: entity {} is not in the world", job.entity));
-            continue;
-        };
-        let (Some(input), Some(consumed)) = (
-            slots.iter().find(|s| s.stride == PLAYER_INPUT_SIZE),
-            slots.iter().find(|s| s.stride == CONSUMED_INPUT_SIZE),
-        ) else {
-            log(&format!("teleport: entity {} has no player input", job.entity));
-            continue;
-        };
-        let Some(block) = read_bytes(input.addr + ADMIN_BLOCK_AT, ADMIN_BLOCK_SIZE).filter(|b| b.len() == ADMIN_BLOCK_SIZE) else { continue };
-        let Some(seen) = read_bytes(consumed.addr + CONSUMED_ADMIN_AT, 4).filter(|b| b.len() == 4) else { continue };
-        let mut target = job.at;
-        if job.waypoint {
-            match waypoint_position(&slots) {
-                Some((x, y, z)) => target = [Some(x), if y.abs() > 0.5 { Some(y) } else { None }, Some(z)],
-                None => {
-                    log(&format!("teleport: no marker is set on the game map for entity {}", job.entity));
-                    continue;
-                }
-            }
-        }
-        let (Some(x), Some(z)) = (target[0], target[2]) else { continue };
-        let (y, known) = match target[1] {
-            Some(y) => (y + TELEPORT_HEIGHT_MARGIN, true),
-            None => (current_height(manager, job.entity).unwrap_or(0.0) + TELEPORT_UNKNOWN_RISE, false),
-        };
-        let version = u32_at(&seen, 0).wrapping_add(1);
-        let mut out = vec![0u8; ADMIN_BLOCK_SIZE];
-        out[0..4].copy_from_slice(&(x as f32).to_le_bytes());
-        out[4..8].copy_from_slice(&(y as f32).to_le_bytes());
-        out[8..12].copy_from_slice(&(z as f32).to_le_bytes());
-        out[12..16].copy_from_slice(&1.0f32.to_le_bytes());
-        out[28..32].copy_from_slice(&1.0f32.to_le_bytes());
-        out[32] = 1;
-        out[36..40].copy_from_slice(&version.to_le_bytes());
-        if !write_bytes(input.addr + ADMIN_BLOCK_AT, &out) {
-            log(&format!("teleport: could not hand the request to the game for entity {}", job.entity));
-            continue;
-        }
-        log(&format!(
-            "teleport: entity {} asked to go to x={x:.1} y={y:.1} z={z:.1} (height {})",
-            job.entity,
-            if known { "known" } else { "estimated, the game looks for the ground" }
-        ));
-        if let Ok(mut list) = TELEPORT_SENT.lock() {
-            list.push(TeleportSent { job: job.clone(), block, written: version });
-        }
-        let (entity, m) = (job.entity, manager);
-        let _ = std::thread::Builder::new().name("m182-teleport-check".into()).spawn(move || {
-            for wait in [1500u64, 6000] {
-                std::thread::sleep(Duration::from_millis(wait));
-                if let Some(t) = transform_of(m, entity) {
-                    log(&format!(
-                        "teleport check: entity {entity} at x={:.1} y={:.1} z={:.1}",
-                        le_i64(&t, 0) as f64 / METERS,
-                        le_i64(&t, 8) as f64 / METERS,
-                        le_i64(&t, 16) as f64 / METERS
-                    ));
-                }
-            }
-        });
     }
 }
 
@@ -2584,81 +2253,9 @@ fn run_command(st: &mut PowerState, dir: &std::path::Path) {
                 log("command: heal");
             }
         }
-        "teleport" => {
-            let server = SERVER_MGR.load(Ordering::SeqCst);
-            if server == 0 {
-                log("command teleport: this game is not running the world, the server does it");
-                return;
-            }
-            let entity = if via_chat { ((requester - 1) & 0x3f) + 1 } else { PLAYER_ID.load(Ordering::SeqCst) };
-            if entity == 0 {
-                log("command teleport: the character is not known yet");
-                return;
-            }
-            let waypoint = cmd.to.as_deref() == Some("waypoint");
-            let finite = |v: Option<f64>| v.filter(|x| x.is_finite() && x.abs() < 1.0e6);
-            let mut at = [None; 3];
-            if !waypoint {
-                let Some(given) = cmd.at else {
-                    log("command teleport: missing destination");
-                    return;
-                };
-                let (Some(x), Some(z)) = (finite(given[0]), finite(given[2])) else {
-                    log("command teleport: invalid destination");
-                    return;
-                };
-                at = [Some(x), finite(given[1]), Some(z)];
-            }
-            let now = Instant::now();
-            queue_teleport(TeleportJob { entity, at, waypoint, queued: now, tries: 0 });
-            if via_chat {
-                st.entity_protect.insert(entity, now + TELEPORT_PROTECTION);
-            } else {
-                st.protect_until = Some(now + TELEPORT_PROTECTION);
-            }
-            st.hover = None;
-            st.last_written = None;
-        }
         "item_stats" => {
             if let Err(e) = std::thread::Builder::new().name("m182-item-stats".into()).spawn(move || run_item_stats(cmd)) {
                 log(&format!("item stats: could not start worker: {e}"));
-            }
-        }
-        "item_pool" => {
-            let (base, slots) = (cmd.base.unwrap_or(0), cmd.slots.unwrap_or(0));
-            match super::custom::set_pool(dir, base, slots) {
-                Ok(()) => log(&format!("item copies: {slots} spare copies saved for item {base} (available after the next start)")),
-                Err(e) => log(&format!("item copies: pool for item {base} refused: {e}")),
-            }
-        }
-        "item_pools" => {
-            let bases = cmd.bases.clone().unwrap_or_default();
-            match super::custom::set_pools(dir, &bases, cmd.slots.unwrap_or(0)) {
-                Ok(changed) => log(&format!("item copies: spare copies saved for {changed} more items (available after the next start)")),
-                Err(e) => log(&format!("item copies: pools refused: {e}")),
-            }
-        }
-        "item_copy" => {
-            let (base, slot) = (cmd.base.unwrap_or(0), cmd.slot.unwrap_or(0));
-            let lvl = cmd.lvl.map(|l| (l[0], l[1])).unwrap_or((0, 0));
-            match super::custom::set_copy(dir, base, slot, cmd.dmg.as_deref(), cmd.arm.as_deref(), lvl) {
-                Ok(()) => log(&format!("item copies: copy {slot} of item {base} saved")),
-                Err(e) => {
-                    log(&format!("item copies: copy {slot} of item {base} refused: {e}"));
-                    return;
-                }
-            }
-            if cmd.stats.is_some() {
-                if let Err(e) = std::thread::Builder::new().name("m182-item-copy".into()).spawn(move || run_item_stats(cmd)) {
-                    log(&format!("item copies: could not start worker: {e}"));
-                }
-            }
-        }
-        "item_copy_drop" => {
-            let (base, slot) = (cmd.base.unwrap_or(0), cmd.slot.unwrap_or(0));
-            match super::custom::drop_copy(dir, base, slot) {
-                Ok(()) => log(&format!("item copies: copy {slot} of item {base} released")),
-                Err(e) => log(&format!("item copies: could not release copy {slot} of item {base}: {e}")),
             }
         }
         other => log(&format!("command ignored: unknown command \"{other}\"")),
@@ -3284,7 +2881,7 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
         match serde_json::from_str::<Powers>(&text) {
             Ok(p) => {
-                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={} map_travel={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly, p.map_travel));
+                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly));
                 let slot = st.client_powers.entry(client).or_default();
                 slot.powers = p;
                 slot.mtime = mtime;
@@ -3351,30 +2948,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
             want.push(pair);
         }
     }
-    let now = Instant::now();
-    if let Ok(mut asked) = MAP_PROTECT.lock() {
-        for (entity, until) in asked.drain(..) {
-            st.entity_protect.insert(entity, until);
-        }
-    }
-    st.entity_protect.retain(|_, until| now < *until);
-    for entity in st.entity_protect.keys() {
-        let pair = (SERVER_MGR.load(Ordering::SeqCst), *entity);
-        if !want.contains(&pair) {
-            want.push(pair);
-        }
-    }
-    teleport_watchdog();
-    let mut travellers: Vec<u32> = Vec::new();
-    if st.powers.map_travel && hosting {
-        travellers.push(id);
-    }
-    for (client_number, c) in &st.client_powers {
-        if c.powers.map_travel {
-            travellers.push((client_number & 0x3f) + 1);
-        }
-    }
-    set_map_travel(travellers);
     for (client_number, c) in &st.client_powers {
         if c.powers.god {
             let entity = (client_number & 0x3f) + 1;
@@ -3514,7 +3087,6 @@ pub fn new_power_state() -> PowerState {
         groups: GroupState::new(),
         saved: HashMap::new(),
         zone_ids: Vec::new(),
-        entity_protect: HashMap::new(),
         diag_left: 12,
         diag_last: None,
         spawners: SpawnerSet::default(),
@@ -4271,7 +3843,6 @@ fn powers_loop() {
             || st.powers.stamina
             || st.powers.fly
             || st.heal_once
-            || !st.entity_protect.is_empty()
             || !st.saved.is_empty()
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()

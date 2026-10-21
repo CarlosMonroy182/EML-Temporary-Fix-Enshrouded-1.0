@@ -124,7 +124,6 @@ stub!(stub_friend_opts, friend_opts);
 
 pub(super) static CHAT_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 pub(super) static PUMP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-pub(super) static ADMIN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 /// The server's player table, captured the first time the game runs its per-tick chat pump.
 pub(super) static PLAYERS_OBJECT: AtomicUsize = AtomicUsize::new(0);
 
@@ -306,82 +305,6 @@ unsafe extern "win64" fn stub_pump() {
     );
 }
 
-extern "win64" fn hook_admin(_context: usize) {
-    let _ = std::panic::catch_unwind(super::spawner::admin_tick);
-}
-
-// Entry of the game's `admin_player` system: lets the teleport requests be handed to the game
-// right before the system looks for them, then runs the system untouched.
-#[unsafe(naked)]
-unsafe extern "win64" fn stub_admin() {
-    core::arch::naked_asm!(
-        "push rcx",
-        "push rdx",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        "push rax",
-        "sub rsp, 0x90",
-        "movups [rsp + 0x30], xmm0",
-        "movups [rsp + 0x40], xmm1",
-        "movups [rsp + 0x50], xmm2",
-        "movups [rsp + 0x60], xmm3",
-        "movups [rsp + 0x70], xmm4",
-        "movups [rsp + 0x80], xmm5",
-        "call {f}",
-        "movups xmm0, [rsp + 0x30]",
-        "movups xmm1, [rsp + 0x40]",
-        "movups xmm2, [rsp + 0x50]",
-        "movups xmm3, [rsp + 0x60]",
-        "movups xmm4, [rsp + 0x70]",
-        "movups xmm5, [rsp + 0x80]",
-        "add rsp, 0x90",
-        "pop rax",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdx",
-        "pop rcx",
-        "jmp qword ptr [rip + {t}]",
-        f = sym hook_admin,
-        t = sym ADMIN_TRAMPOLINE,
-    );
-}
-
-fn install_admin(sections: &[&'static [u8]]) {
-    let target = match find_unique(sections, &signatures::ADMIN_PLAYER) {
-        Ok(addr) => addr,
-        Err(count) => {
-            super::spawner::log(&format!("teleport: admin system signature matched {count} times; teleport off"));
-            return;
-        }
-    };
-    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
-    if page.is_null() {
-        super::spawner::log("teleport: trampoline allocation failed");
-        return;
-    }
-    let displaced = signatures::ADMIN_PLAYER_DISPLACED;
-    unsafe {
-        std::ptr::copy_nonoverlapping(target, page, displaced);
-        let tail = page.add(displaced);
-        tail.write(0xFF);
-        tail.add(1).write(0x25);
-        tail.add(2).cast::<u32>().write_unaligned(0);
-        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
-    }
-    ADMIN_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
-    match unsafe { write_jump(target, stub_admin as usize) } {
-        Ok(()) => super::spawner::log("teleport hooked"),
-        Err(code) => {
-            ADMIN_TRAMPOLINE.store(0, Ordering::SeqCst);
-            super::spawner::log(&format!("teleport: VirtualProtect failed ({code})"));
-        }
-    }
-}
-
 fn install_pump(sections: &[&'static [u8]]) {
     let target = match find_unique(sections, &signatures::PLAYERS_PUMP) {
         Ok(addr) => addr,
@@ -496,7 +419,6 @@ pub fn install() -> Outcome {
     install_chat(&sections);
     if super::config::LIVE.spawner() {
         install_pump(&sections);
-        install_admin(&sections);
         install_permissions(&sections);
     }
 
