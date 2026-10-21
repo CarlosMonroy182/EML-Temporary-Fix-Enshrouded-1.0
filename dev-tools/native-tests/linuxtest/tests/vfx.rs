@@ -119,6 +119,16 @@ fn elements_follow_the_damage_columns() {
     }
     assert!(!vfx::staff_effects(Summon).is_empty());
     assert!(vfx::hand_effect(Fire).is_none(), "no custom templates: clients without the mod would be kicked");
+    let mut carriers = std::collections::HashSet::new();
+    for e in [Lightning, Fire, Ice, Shroud, Healing, Poison, Bone, Arcane, Physical] {
+        let g = vfx::hand_template(e).unwrap();
+        assert!(carriers.insert(g));
+        assert_ne!(&g[..4], &[0x18, 0x2e, 0x1e, 0x00], "glows must ride on game templates");
+    }
+    assert_eq!(vfx::hand_template(Fire), config::parse_guid("21f9f3e9-433f-48d7-b605-c0f2ad1ed5cf"));
+    assert!(vfx::glow_template(0).is_none() && vfx::glow_template(15).is_none());
+    let all: std::collections::HashSet<_> = (1..=14).map(|n| vfx::glow_template(n).unwrap()).collect();
+    assert_eq!(all.len(), 14);
     assert_eq!(vfx::hand_effect(Poison), config::parse_guid("eee801de-8da6-4e11-b5f7-159205ffb139"));
     assert!(vfx::staff_scale(Shroud) < 1.0);
 }
@@ -394,12 +404,17 @@ fn greet_toggles_and_victory_switches_the_aura() {
     assert_eq!(st.index, 2, "turning on with victory keeps the last effect");
     let mut fresh = vfx::AuraState::default();
     assert_eq!(vfx::gesture_step(&mut fresh, READY, Some((3, g)), 0), vfx::Gesture::None, "state already present when first seen");
-    for a in vfx::AURAS.iter() {
-        assert!(!a.effects.is_empty());
+    for a in vfx::AURAS.iter().chain(vfx::GLOW_AURAS.iter()) {
+        assert!(!a.effects.is_empty() || a.glow.and_then(vfx::glow_template).is_some());
         for name in a.effects {
             assert!(vfx::is_vanilla(name), "{name} must be a game effect");
         }
     }
+    vfx::set_glows_ready(false);
+    assert_eq!(vfx::aura_list().len(), 7);
+    vfx::set_glows_ready(true);
+    assert_eq!(vfx::aura_list().len(), 16);
+    vfx::set_glows_ready(false);
 }
 
 #[test]
@@ -444,4 +459,23 @@ fn installed_by_config_in_any_case_or_by_the_lua_mod() {
     assert!(vfx::installed(&base));
     assert!(vfx::config_path(&base).is_none());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn custom_glows_need_the_current_lua_mod_next_to_the_game() {
+    let dir = std::env::temp_dir().join(format!("m182_vfx_glow_{}", std::process::id()));
+    let src = dir.join("mods").join("m182_vfx").join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    assert!(!vfx::glow_mod_installed(&dir));
+    std::fs::write(dir.join("mods").join("m182_vfx").join("mod.json"), "{}").unwrap();
+    std::fs::write(src.join("mod.lua"), "print('glow effects ready')").unwrap();
+    assert!(!vfx::glow_mod_installed(&dir), "old Lua mod (custom templates) must not enable glows");
+    let lua = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../spawner-mods/m182_vfx/src/mod.lua")).unwrap();
+    assert!(lua.contains(vfx::GLOW_MOD_MARKER));
+    for g in vfx::GLOW_CARRIERS {
+        assert!(lua.contains(g), "{g} missing in the Lua mod");
+    }
+    std::fs::write(src.join("mod.lua"), &lua).unwrap();
+    assert!(vfx::glow_mod_installed(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
 }

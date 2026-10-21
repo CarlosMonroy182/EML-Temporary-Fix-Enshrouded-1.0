@@ -37,3 +37,14 @@
   (`is_vanilla` is checked by the tests) and the Lua mod was removed.
 - Walking aura: greet emote = on/off, victory emote = next (crouch no longer toggles, normal
   sneaking was switching it on).
+
+## Glow carriers (2026-10-21, later)
+- LifeTime, DoNotSave and ServerSlotAttachment are `server_only`; VfxComponent, VfxComponentResource and
+  VfxParametersTemplateComponent are `client_only`. Only CurrentTransform is networked for the glider trail
+  sub-entity templates, so changing the other parts keeps every client compatible.
+- The Lua mod (v2) takes 14 glider-trail templates (`GLOW_CARRIERS`), adds LifeTime + DoNotSave (copied from
+  the poison gem debuff) everywhere, and where VfxResources exist (PCs) swaps the look to the glow and sets
+  VfxComponent to Self/Chest (no parent). Players without the mod see the original trail.
+- The native module only uses the glows when `mods/m182_vfx/src/mod.lua` (with the "glow carriers ready"
+  marker) is next to the game; otherwise game effects only (7 walking auras).
+- Offline check passed: `emm run --patch` + `kfc-parser unpack -f <guid>_39768775_0` shows the added parts.
