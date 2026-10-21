@@ -66,13 +66,11 @@ jobs:
           mkdir -p dist
           for side in Cliente Servidor; do
             out=dist/M182_$side
-            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src
+            mkdir -p $out/mods/m182_spawn_variants/src
             cp release-package/$side/* $out/
             cp artifacts/native/dbghelp.dll $out/
             cp spawner-mods/m182_spawn_variants/mod.json $out/mods/m182_spawn_variants/
             cp spawner-mods/m182_spawn_variants/src/mod.lua $out/mods/m182_spawn_variants/src/
-            cp spawner-mods/zz_m182_item_stats/mod.json $out/mods/zz_m182_item_stats/
-            cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
           done
           cp artifacts/panel/m182_spawner_panel.dll dist/M182_Cliente/M182_Panel.dll
           cp eml-fork/LICENSE dist/M182_Cliente/ || true

@@ -2357,7 +2357,8 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         .iter()
         .map(|(id, number)| {
             let name = names.get(id).cloned();
-            let team = groups::team_for(&st.groups.teams, *number, name.as_deref(), *id);
+            let platform_id = table.iter().find(|e| e.entity() == *id).and_then(|e| e.id.clone());
+            let team = groups::team_for_player(&st.groups.teams, *number, name.as_deref(), *id, platform_id.as_deref());
             Seen { id: *id, number: *number, name, team }
         })
         .collect();
@@ -2484,9 +2485,9 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
 }
 
 pub fn roster_line(seq: u32) -> String {
-    let names = super::table::names();
+    let table = super::table::entries();
     let mut ids: Vec<u32> = tracked_ids();
-    for e in super::table::entries() {
+    for e in &table {
         if !ids.contains(&e.entity()) {
             ids.push(e.entity());
         }
@@ -2494,7 +2495,11 @@ pub fn roster_line(seq: u32) -> String {
     ids.sort_unstable();
     let entries: Vec<(u32, String)> = ids
         .into_iter()
-        .map(|id| (id, names.get(&id).cloned().unwrap_or_else(|| format!("Jugador {id}"))))
+        .map(|id| {
+            let entry = table.iter().find(|e| e.entity() == id);
+            let name = entry.and_then(|e| e.name.clone()).unwrap_or_else(|| format!("ID {id}"));
+            (id, roster::label_with_id(&name, entry.and_then(|e| e.id.as_deref())))
+        })
         .collect();
     super::roster::reply_text(seq, &entries)
 }

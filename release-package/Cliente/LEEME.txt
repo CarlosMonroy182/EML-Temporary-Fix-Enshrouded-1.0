@@ -5,7 +5,7 @@ INSTALAR
 1. Cierra Enshrouded.
 2. Abre la carpeta del juego (Steam > Enshrouded > Administrar > Ver archivos locales). Es la carpeta donde esta enshrouded.exe.
 3. Copia y pega TODO el contenido de esta carpeta "Cliente" dentro de la carpeta del juego. Si Windows pregunta, elige "Reemplazar".
-   Se copian: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json, la carpeta mods y el archivo m182_item_stats.json.
+   Se copian: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json, y la carpeta mods. Tus ajustes de items (m182_item_stats.json y mods\zz_m182_item_stats) NO vienen en este paquete: se conservan los tuyos.
 4. Abre el juego. Cuando estes dentro del mundo, pulsa la tecla INSERT: se abre el panel M182. Vuelve a pulsar INSERT (o cierra la ventana) para esconderlo.
 
 IMPORTANTE
@@ -35,7 +35,8 @@ ARMAS UNICAS (cada arma distinta)
 LIMITES (sinceridad)
 - Las copias unicas, el teclado automatico en el chat y la ventana sobre el juego estan hechos para esta version y todavia necesitan tu prueba en el juego real. Si algo no responde, mandame m182_panel.log, m182_spawner.log y el log de EML de la carpeta logs para corregirlo.
 - Las respuestas del servidor solo llegan para la lista de jugadores. Si algo no aparece, revisa m182_spawner.log del servidor.
-- Sin resolver todavia: soltar botin de enemigos invocados por comando y desbloquear habilidades sin puntos. Para el botin, m182_spawner.log (cliente y servidor) guarda los datos necesarios para corregirlo.
+- Sin confirmar todavia: el botin de enemigos invocados por comando con los niveles subidos. Si no suelta botin, mandame m182_spawner.log (cliente y servidor).
+- Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes, reinicia. Para el servidor, sube tambien la carpeta mods\zz_m182_item_stats de tu juego a la del servidor y reinicialo.
 
 DESINSTALAR
 Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.

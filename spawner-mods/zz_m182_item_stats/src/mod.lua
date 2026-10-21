@@ -7,6 +7,11 @@ local LEVELS = {
 local BALANCE = {
 }
 
+local FREE_SKILLS = BALANCE["freeSkills"] == 1
+BALANCE["freeSkills"] = nil
+local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
+if WIDEN <= 55 then WIDEN = 0 end
+
 local function try(f)
     local ok, r = pcall(f)
     if ok then return r end
@@ -83,6 +88,7 @@ end
 
 local found = {}
 local levelsDone = {}
+local widened = 0
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 if items ~= nil then
     pcall(function()
@@ -91,6 +97,14 @@ if items ~= nil then
                 local data = resource.data
                 local id = unsigned(hash_of(data.itemId))
                 local range = id and LEVELS[id]
+                if WIDEN > 0 then
+                    local wspan = try(function() return data.itemLevelRange end)
+                    local wlo = try(function() return wspan.minLevel end)
+                    local whi = try(function() return wspan.maxLevel end)
+                    if type(wlo) == "number" and type(whi) == "number" and whi > wlo and whi < WIDEN and put(wspan, "maxLevel", WIDEN) then
+                        widened = widened + 1
+                    end
+                end
                 if range ~= nil then
                     local span = try(function() return data.itemLevelRange end)
                     local lo = try(function() return span.minLevel end)
@@ -127,7 +141,23 @@ for id in pairs(LEVELS) do
     if levelsDone[id] == nil then print(string.format("[m182-item-stats] item %d (level range) not found in the game data", id)) end
 end
 
-print(string.format("[m182-item-stats] items done applied=%d failed=%d", applied, failed))
+print(string.format("[m182-item-stats] items done applied=%d failed=%d widened=%d", applied, failed, widened))
+
+if FREE_SKILLS then
+    local nodes, freed = 0, 0
+    local trees = try(function() return game.assets.get_resources_by_type("keen::SkillTreeResource") end)
+    if type(trees) == "table" then
+        for _, tree in ipairs(trees) do
+            pcall(function()
+                for _, node in ipairs(tree.data.nodes) do
+                    nodes = nodes + 1
+                    if put(node, "costs", 0) then freed = freed + 1 end
+                end
+            end)
+        end
+    end
+    print(string.format("[m182-item-stats] skills free of cost: %d of %d nodes", freed, nodes))
+end
 
 local tables = try(function() return game.assets.get_resources_by_type("keen::BalancingTable") end)
 if type(tables) == "table" and #tables > 0 then

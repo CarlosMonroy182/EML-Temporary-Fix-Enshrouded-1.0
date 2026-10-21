@@ -4,7 +4,7 @@ M182 - SERVIDOR (Dathost)
 INSTALAR
 1. Detén el servidor en el panel de Dathost.
 2. Con el FTP, entra a la carpeta donde esta enshrouded_server.exe.
-3. Sube TODO el contenido de esta carpeta "Servidor" (dbghelp.dll, eml.json, m182_native.json, m182_item_stats.json y la carpeta mods) a esa carpeta, reemplazando lo que haya.
+3. Sube TODO el contenido de esta carpeta "Servidor" (dbghelp.dll, eml.json, m182_native.json y la carpeta mods) a esa carpeta, reemplazando lo que haya.
 4. Arranca el servidor. No hace falta subir ni abrir ningun .exe.
 
 CLAVE
@@ -12,6 +12,9 @@ En m182_native.json la linea "chat_key" es la clave del canal de chat. Debe ser 
 
 COMO SE USA
 Tu entras al servidor con la carpeta "Cliente" instalada, pulsas INSERT y usas el panel. El panel detecta solo que estas en el servidor. No tienes que escribir comandos.
+
+AJUSTES DE ITEMS Y NIVELES
+La carpeta mods\zz_m182_item_stats trae los ajustes del panel (niveles 255, estadisticas). Cuando cambies Ajustes o items en el panel, sube de nuevo esa carpeta desde tu juego (mods\zz_m182_item_stats) y reinicia el servidor.
 
 REINICIOS
 Las copias de armas unicas ya vienen preparadas en mods\zz_m182_item_stats\m182_custom.txt (el mismo archivo que en la carpeta Cliente). No hace falta reiniciar para usarlas.

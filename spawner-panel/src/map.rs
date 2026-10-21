@@ -343,7 +343,7 @@ impl App {
                     tiles::set_calibration(tiles::fit_calibration(&self.map.anchors));
                     self.map.calibrating = false;
                     self.map.notice = match tiles::save_anchors(&self.dir, &self.map.anchors) {
-                        Ok(()) => format!("Mapa calibrado con {} punto(s). Si sigue desfasado, camina lejos de aquí y calibra otra vez.", self.map.anchors.len()),
+                        Ok(()) => format!("Mapa calibrado ({} punto(s)).", self.map.anchors.len()),
                         Err(e) => format!("Error: {e}"),
                     };
                 }
@@ -513,7 +513,7 @@ impl App {
 
     fn map_controls(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Mapa del mundo", 19.0);
-        ui.label(RichText::new("Arrastra para mover y usa la rueda para acercar. Haz clic en cualquier punto o marcador para elegirlo.").color(MUTED));
+        ui.label(RichText::new("Arrastra, rueda para acercar, clic para elegir.").color(MUTED));
         divider(ui);
         let width = ui.available_width();
         label_title(ui, "PUNTO ELEGIDO");
@@ -523,12 +523,9 @@ impl App {
                     ui.label(RichText::new(self.map.selected_label.clone()).color(GOLD));
                 }
                 ui.label(RichText::new(format!("X {:.0}     Y {:.0}     Z {:.0}", sel[0], sel[1], sel[2])).size(17.0));
-                if !self.map.selected_height_known {
-                    ui.label(RichText::new("Altura desconocida: el juego te baja solo hasta el suelo, sin daño por caída.").color(MUTED).size(14.5));
-                }
             }
             None => {
-                ui.label(RichText::new("Aún no elegiste ningún punto. Haz clic en el mapa.").color(MUTED));
+                ui.label(RichText::new("Haz clic en el mapa.").color(MUTED));
             }
         }
         ui.add_space(6.0);
@@ -553,7 +550,7 @@ impl App {
                     self.places.push(Place { name: self.map.name.trim().to_string(), x: sel[0], y: sel[1], z: sel[2] });
                     self.map.name.clear();
                     self.save_places();
-                    self.map.notice = "Lugar guardado. Ya aparece en el mapa y puedes usarlo para crear apariciones.".to_string();
+                    self.map.notice = "Lugar guardado.".to_string();
                 }
             }
             if button(ui, "Guardar mi posición actual", Vec2::new(ui.available_width(), 32.0), can_name && self.player.is_some(), false) {
@@ -569,7 +566,7 @@ impl App {
         let frame = egui::Frame::none().fill(CARD).stroke(Stroke::new(1.5_f32, GOLD_DIM)).rounding(5.0).inner_margin(egui::Margin::same(10.0));
         frame.show(ui, |ui| {
             label_title(ui, "CALIBRAR EL MAPA");
-            ui.label(RichText::new("Si tu punto verde no coincide con donde estás, párate en un lugar reconocible del juego, pulsa el botón y haz clic en el mapa donde estás. Repite en otro lugar lejano para ajustar también la escala.").color(MUTED).size(14.5));
+            ui.label(RichText::new("Calibrar: párate en un lugar conocido, pulsa el botón y haz clic en el mapa donde estás.").color(MUTED).size(14.5));
             let label = if self.map.calibrating { "Haz clic en el mapa donde estás…" } else { "Calibrar con mi posición" };
             if button(ui, label, Vec2::new(ui.available_width(), 34.0), self.player.is_some(), self.map.calibrating) {
                 self.map.calibrating = !self.map.calibrating;

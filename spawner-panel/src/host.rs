@@ -142,11 +142,13 @@ pub struct Pace {
     pub opened: u64,
     pub before_send: u64,
     pub after_send: u64,
+    pub window_lines: usize,
+    pub window_ms: u64,
 }
 
 impl Default for Pace {
     fn default() -> Self {
-        Self { burst: 2, gap: 3, opened: 150, before_send: 80, after_send: 180 }
+        Self { burst: 2, gap: 3, opened: 150, before_send: 80, after_send: 180, window_lines: 12, window_ms: 15_000 }
     }
 }
 
@@ -162,6 +164,12 @@ impl Pace {
         if let Some(n) = get("typing_gap_ms") {
             pace.gap = n.min(50);
         }
+        if let Some(n) = get("typing_lines") {
+            pace.window_lines = (n as usize).clamp(1, 200);
+        }
+        if let Some(n) = get("typing_window_s") {
+            pace.window_ms = n.clamp(1, 120) * 1000;
+        }
         pace
     }
 }
@@ -170,11 +178,12 @@ pub struct ChatTypist<S: Sys> {
     host: Arc<Host<S>>,
     open_scan: u16,
     pace: Pace,
+    sent: std::collections::VecDeque<std::time::Instant>,
 }
 
 impl<S: Sys> ChatTypist<S> {
     pub fn new(host: Arc<Host<S>>, open_key: &str) -> Self {
-        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER), pace: Pace::default() }
+        Self { host, open_scan: scan_of(open_key).unwrap_or(ENTER), pace: Pace::default(), sent: std::collections::VecDeque::new() }
     }
 
     pub fn with_pace(mut self, pace: Pace) -> Self {
@@ -185,29 +194,47 @@ impl<S: Sys> ChatTypist<S> {
     fn game_has_focus(&self, game: usize) -> bool {
         self.host.sys.foreground() == game
     }
+
+    /// The game drops chat lines sent in a long uninterrupted run: keep to a lines-per-window budget.
+    fn throttle(&mut self) {
+        let window = std::time::Duration::from_millis(self.pace.window_ms);
+        let now = std::time::Instant::now();
+        self.sent.retain(|t| now.duration_since(*t) < window);
+        if self.sent.len() >= self.pace.window_lines {
+            let oldest = self.sent[self.sent.len() - self.pace.window_lines];
+            let wait = window.saturating_sub(now.duration_since(oldest));
+            self.host.sys.sleep(wait.as_millis() as u64 + 50);
+        }
+        self.sent.push_back(std::time::Instant::now());
+    }
 }
 
 impl<S: Sys> Typist for ChatTypist<S> {
     fn begin(&mut self) -> Result<(), String> {
-        let sys = &self.host.sys;
         let game = self.host.game_window();
         if game == 0 {
             return Err("Abre el panel con Insert desde dentro del juego antes de enviar.".to_string());
         }
-        sys.focus(game);
-        sys.sleep(300);
-        if !self.game_has_focus(game) {
-            return Err("No pude pasar el control al juego. Deja el juego visible y vuelve a intentarlo.".to_string());
+        for attempt in 0..4 {
+            self.host.sys.focus(game);
+            self.host.sys.sleep(300);
+            if self.game_has_focus(game) {
+                return Ok(());
+            }
+            if attempt < 3 {
+                self.host.sys.sleep(500);
+            }
         }
-        Ok(())
+        Err("No pude pasar el control al juego. Deja el juego visible.".to_string())
     }
 
     fn line(&mut self, text: &str) -> Result<(), String> {
-        let sys = &self.host.sys;
         let game = self.host.game_window();
         if !self.game_has_focus(game) {
             return Err("El juego perdió el control mientras se escribía. No toques el teclado ni el ratón durante el envío.".to_string());
         }
+        self.throttle();
+        let sys = &self.host.sys;
         sys.tap(self.open_scan);
         sys.sleep(self.pace.opened);
         let units: Vec<u16> = text.encode_utf16().collect();

@@ -85,7 +85,6 @@ impl App {
 
     pub fn powers_tab(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Admin del jugador", 22.0);
-        ui.label(RichText::new("Solo afectan a tu personaje (el anfitrión). Se aplican mientras el juego está abierto.").color(MUTED));
         divider(ui);
 
         let mut changed = false;
@@ -109,7 +108,6 @@ impl App {
         divider(ui);
 
         heading(ui, "Teletransporte", 18.0);
-        ui.label(RichText::new("Elige un lugar guardado o escribe coordenadas. También puedes elegir un punto en la pestaña Mapa.").color(MUTED));
         if !self.places.is_empty() {
             let mut picked = None;
             egui::ComboBox::from_id_salt("tp_place").selected_text("Copiar coordenadas de un lugar guardado…").show_ui(ui, |ui| {

@@ -58,7 +58,9 @@ pub fn compose(key: &str, file: &str, body: &str, limit: usize) -> Vec<String> {
         lines.push(format!("{}{}", head(key, command, file), hex(&body[from..to])));
         from = to;
     }
-    lines.push(format!("{PREFIX} {key} endx {file}"));
+    let end = format!("{PREFIX} {key} endx {file}");
+    lines.push(end.clone());
+    lines.push(end);
     lines
 }
 
