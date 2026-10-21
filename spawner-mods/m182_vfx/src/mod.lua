@@ -49,9 +49,8 @@ local created, failed = 0, 0
 for _, e in ipairs(ELEMENTS) do
     local guid = string.format("182e1e00-0000-4000-8000-%012x", e.n)
     local ok, err = pcall(function()
-        local vfx = game.assets.get_resource(e.vfx, VFX_TYPE, 0)
-        if vfx == nil then error("effect " .. e.vfx .. " not found") end
-        local defaults = vfx.data.defaultParameterData.data
+        local vfx = try(function() return game.assets.get_resource(e.vfx, VFX_TYPE, 0) end)
+        local defaults = vfx and try(function() return vfx.data.defaultParameterData.data end)
         local existing = try(function() return game.assets.get_resource(guid, TEMPLATE_TYPE, 0) end)
         local copy = existing or game.assets.create_resource(base.data, TEMPLATE_TYPE, guid, 0)
         local data = copy.data
@@ -60,7 +59,7 @@ for _, e in ipairs(ELEMENTS) do
             local t = tostring(c.type)
             if t == "keen::ecs::VfxComponentResource" then
                 c.value.vfx = e.vfx
-            elseif t == "keen::ecs::VfxParametersTemplateComponent" then
+            elseif t == "keen::ecs::VfxParametersTemplateComponent" and defaults ~= nil then
                 local block = c.value.parameters.data
                 for i = 1, 16 do block[i] = unsigned(num(defaults[i]) or 0) end
             end
