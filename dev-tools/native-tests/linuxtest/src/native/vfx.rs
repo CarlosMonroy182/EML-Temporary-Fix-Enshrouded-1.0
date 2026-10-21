@@ -45,12 +45,47 @@ const CATALOG: &[(&str, &str)] = &[
     ("VFX_Spell_Totem_Projectile_Shoot_Lightning", "9ba3cb11-08f7-4d19-a20b-087848d7e536"),
     ("VFX_Player_Companion_Shock_Wisp_Shoot", "53293378-8c9d-4277-ba22-f3c607f1025f"),
     ("VFX_Weapon_Arrow_Stun_Impact", "e2f935c2-5687-4d8d-a111-117fd0f6bf19"),
+    ("VFX_SubEntity_Projectile_Enemy_WilloWisp_Fireball_Deflected", "038a7a31-9901-4745-9b05-2f9da575dcdd"),
+    ("VFX_SubEntity_Projectile_Enemy_IceWisp_IceBolt_Deflected", "4047af6e-7775-4d84-b4dd-10daa219b6c8"),
+    ("VFX_SubEntity_Projectile_Enemy_Boss_FogDragon_Germinate_Deflected", "b0454193-a591-492b-844d-7242704fa370"),
+    ("VFX_SubEntity_Projectile_Enemy_Fogger_Jelly_Seeker_Deflected", "fdeef833-002f-407e-892f-e247ee0d9e2e"),
+    ("VFX_SubEntity_Projectile_FlyingSkull_Skeleton_Deflected", "19efcf99-bbe8-4084-8d01-2c10d5da73b4"),
+    ("VFX_SubEntity_Projectile_Enemy_Mage_Sickle_Deflected", "685bebdd-77e3-4e4b-b186-c36debc93a1e"),
+    ("VFX_WeaponGem_GemOfAgility_OnHit", "9ff81751-98fe-44bb-b2af-ffdbf532b492"),
+    ("VFX_WeaponGem_GemOfOverpowering_OnBlock", "26e442b5-3f5d-49f4-b9c3-f49b63ee6444"),
+    ("VFX_SubEntity_Enemy_FogMonstrosity_summon_spawn", "11dfe1bd-74fb-45e4-a921-369927a3a1f0"),
+    ("VFX_SubEntity_Enemy_Vukah_Shaman_Elite_Beast_Summon_Spawn", "93fb1052-2eac-4b6b-84e4-4ca4128ed805"),
+    ("VFX_WeaponGem_GemOfFocusedLight_SourceTarget_tier3", "b99fbda9-2a79-4f87-97e9-eeb7a3a0e19a"),
+    ("VFX_Consumable_LightWisp", "ba445d10-0b7b-402e-853b-e49b7ff50876"),
+];
+
+/// Effects that can be glued to a weapon or bone (their templates carry SlotAttachment and LifeTime).
+pub const TIP_CANDIDATES: [&str; 12] = [
+    "VFX_SubEntity_Projectile_Enemy_WilloWisp_Fireball_Deflected",
+    "VFX_SubEntity_Projectile_Enemy_IceWisp_IceBolt_Deflected",
+    "VFX_SubEntity_Projectile_Enemy_Boss_FogDragon_Germinate_Deflected",
+    "VFX_SubEntity_Projectile_Enemy_Fogger_Jelly_Seeker_Deflected",
+    "VFX_SubEntity_Projectile_FlyingSkull_Skeleton_Deflected",
+    "VFX_SubEntity_Projectile_Enemy_Mage_Sickle_Deflected",
+    "VFX_WeaponGem_GemOfAgility_OnHit",
+    "VFX_WeaponGem_GemOfOverpowering_OnBlock",
+    "VFX_SubEntity_Enemy_FogMonstrosity_summon_spawn",
+    "VFX_SubEntity_Enemy_Vukah_Shaman_Elite_Beast_Summon_Spawn",
+    "VFX_WeaponGem_GemOfFocusedLight_SourceTarget_tier3",
+    "VFX_Consumable_LightWisp",
 ];
 
 
 const HASH_CURRENT_TRANSFORM: u32 = 0x027a_c564;
 const TRANSFORM_SIZE: usize = 56;
 const COMBAT_SIZE: usize = 24;
+const EQUIPMENT_SIZE: usize = 1380;
+const MAIN_HAND_VISUAL: usize = 800 + 23 * 24 + 20;
+const MAIN_HAND_ITEM: usize = 8 + 8;
+const HASH_SLOT_ATTACHMENT: u32 = 0x0956_1436;
+const SLOT_ATTACHMENT_SIZE: usize = 48;
+const HASH_LIFE_TIME: u32 = 0xf22c_253c;
+const LIFE_TIME_SIZE: usize = 24;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_DELAY_MS: u64 = 600;
 
@@ -70,6 +105,17 @@ pub struct Burst {
     pub radius: f32,
 }
 
+/// Effect glued to the weapon (or a bone of the player) while a melee attack is charged.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Tip {
+    pub effects: Vec<String>,
+    pub attach_to: String,
+    pub slot: String,
+    pub offset: [f32; 3],
+    pub every_ms: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VfxConfig {
@@ -77,13 +123,29 @@ pub struct VfxConfig {
     pub charge: Burst,
     pub charge_every_ms: u64,
     pub release: Burst,
+    pub melee_charge: Burst,
+    pub melee_release: Burst,
+    pub weapon_tip: Tip,
     pub min_charge_ms: u64,
     pub test_key: String,
+    pub tip_test_key: String,
 }
 
 impl Default for Burst {
     fn default() -> Self {
         Self { effects: Vec::new(), scale: 1.0, height: 0.0, distance: 0.0, ring: 1, radius: 0.0 }
+    }
+}
+
+impl Default for Tip {
+    fn default() -> Self {
+        Self {
+            effects: vec!["VFX_SubEntity_Projectile_Enemy_WilloWisp_Fireball_Deflected".into()],
+            attach_to: "weapon".into(),
+            slot: "Head".into(),
+            offset: [0.0, 0.0, 0.0],
+            every_ms: 300,
+        }
     }
 }
 
@@ -103,26 +165,20 @@ impl Default for VfxConfig {
                 radius: 0.0,
             },
             charge_every_ms: 250,
-            release: Burst {
-                effects: vec![
-                    "VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion".into(),
-                    "VFX_Skill_MassDestruction_Impact".into(),
-                ],
-                scale: 2.0,
-                height: 0.0,
-                distance: 1.5,
-                ring: 1,
-                radius: 0.0,
-            },
+            release: Burst::default(),
+            melee_charge: Burst::default(),
+            melee_release: Burst::default(),
+            weapon_tip: Tip::default(),
             min_charge_ms: 300,
             test_key: "F9".into(),
+            tip_test_key: "F10".into(),
         }
     }
 }
 
 pub fn parse_config(text: &str) -> Result<VfxConfig, String> {
     let mut cfg: VfxConfig = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    for b in [&mut cfg.charge, &mut cfg.release] {
+    for b in [&mut cfg.charge, &mut cfg.release, &mut cfg.melee_charge, &mut cfg.melee_release] {
         b.scale = if b.scale.is_finite() { b.scale.clamp(0.1, 20.0) } else { 1.0 };
         b.ring = b.ring.clamp(1, 8);
         b.radius = if b.radius.is_finite() { b.radius.clamp(0.0, 10.0) } else { 0.0 };
@@ -130,8 +186,21 @@ pub fn parse_config(text: &str) -> Result<VfxConfig, String> {
         b.distance = if b.distance.is_finite() { b.distance.clamp(0.0, 20.0) } else { 0.0 };
         b.effects.truncate(6);
     }
+    cfg.weapon_tip.effects.truncate(6);
+    cfg.weapon_tip.every_ms = cfg.weapon_tip.every_ms.clamp(100, 5000);
+    for v in cfg.weapon_tip.offset.iter_mut() {
+        *v = if v.is_finite() { v.clamp(-5.0, 5.0) } else { 0.0 };
+    }
     cfg.charge_every_ms = cfg.charge_every_ms.clamp(100, 5000);
     Ok(cfg)
+}
+
+pub fn slot_value(name: &str) -> Option<u8> {
+    const SLOTS: [&str; 16] = [
+        "Root", "Head", "Chest", "Pelvis", "FootL", "FootR", "FootRL", "FootRR", "HandR", "HandL", "KneeR", "KneeL", "ArmL", "Block",
+        "HandPalmR", "HandPalmL",
+    ];
+    SLOTS.iter().position(|s| s.eq_ignore_ascii_case(name.trim())).map(|i| i as u8)
 }
 
 /// State flags of a `CombatTargetActor` component (`activeAbilityMask` u32, padding,
@@ -158,35 +227,36 @@ pub struct PlayerCharge {
     pub since: Option<u64>,
     pub last_burst: Option<u64>,
     pub heavy: bool,
+    pub last_tip: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
     None,
-    Charge,
-    Release,
+    Charge { melee: bool },
+    Release { melee: bool },
 }
 
-/// One step of the per-player charge tracker (`now` in milliseconds).
-pub fn step(st: &mut PlayerCharge, flags: u64, now: u64, cfg: &VfxConfig) -> Event {
+/// One step of the per-player charge tracker (`now` in milliseconds). A charge that showed the
+/// heavy-attack flag is a melee charge, otherwise a ranged (staff, bow) charge.
+pub fn step(st: &mut PlayerCharge, flags: u64, now: u64, every_ms: u64, min_charge_ms: u64) -> Event {
     if is_charging(flags) {
         if flags & (1 << FLAG_HEAVY_ATTACK) != 0 {
             st.heavy = true;
         }
         let since = *st.since.get_or_insert(now);
-        let due = st.last_burst.map(|t| now.saturating_sub(t) >= cfg.charge_every_ms).unwrap_or(true);
-        if due && now.saturating_sub(since) >= 120 && !cfg.charge.effects.is_empty() {
+        let due = st.last_burst.map(|t| now.saturating_sub(t) >= every_ms).unwrap_or(true);
+        if due && now.saturating_sub(since) >= 120 {
             st.last_burst = Some(now);
-            return Event::Charge;
+            return Event::Charge { melee: st.heavy };
         }
         return Event::None;
     }
     let Some(since) = st.since.take() else { return Event::None };
     st.last_burst = None;
-    st.heavy = false;
-    let long_enough = now.saturating_sub(since) >= cfg.min_charge_ms;
-    if long_enough && flags & (1 << FLAG_DEAD) == 0 && !cfg.release.effects.is_empty() {
-        Event::Release
+    let melee = std::mem::take(&mut st.heavy);
+    if now.saturating_sub(since) >= min_charge_ms && flags & (1 << FLAG_DEAD) == 0 {
+        Event::Release { melee }
     } else {
         Event::None
     }
@@ -212,11 +282,20 @@ pub fn burst_points(x: i64, y: i64, z: i64, facing: (f64, f64), b: &Burst) -> Ve
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Attach {
+    pub entity: u32,
+    pub slot: u8,
+    pub offset: [f32; 3],
+    pub life_ms: u64,
+}
+
 struct Spawn {
     queued: u64,
     template: [u8; 16],
     at: (i64, i64, i64),
     scale: f32,
+    attach: Option<Attach>,
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -305,7 +384,7 @@ pub fn queue_burst(at: (i64, i64, i64), facing: (f64, f64), b: &Burst) {
             if i > 0 && j > 0 {
                 continue;
             }
-            q.push(Spawn { queued: now_ms(), template: *t, at: p, scale: b.scale });
+            q.push(Spawn { queued: now_ms(), template: *t, at: p, scale: b.scale, attach: None });
         }
     }
     QUEUED.store(1, Ordering::SeqCst);
@@ -343,13 +422,16 @@ fn run_queue(manager: usize) {
     let now = now_ms();
     let fresh: Vec<Spawn> = work.into_iter().filter(|s| now.saturating_sub(s.queued) <= MAX_DELAY_MS).collect();
     for s in fresh.into_iter().take(24) {
-        let id = create_effect(manager, s.template, s.at, s.scale);
+        let id = match &s.attach {
+            Some(a) => create_attached(manager, s.template, a),
+            None => create_effect(manager, s.template, s.at, s.scale),
+        };
         if id == 0 {
             if FAILED.fetch_add(1, Ordering::Relaxed) < 3 {
                 log("vfx: the game did not create an effect");
             }
-        } else if SPAWNED.fetch_add(1, Ordering::Relaxed) < 5 {
-            log(&format!("vfx: effect created id={id} scale={:.1}", s.scale));
+        } else if SPAWNED.fetch_add(1, Ordering::Relaxed) < 5 || s.attach.map(|a| a.life_ms == 2500).unwrap_or(false) {
+            log(&format!("vfx: effect created id={id} scale={:.1} attached={:?}", s.scale, s.attach));
         }
     }
 }
@@ -372,6 +454,103 @@ pub fn create_effect(manager: usize, template: [u8; 16], at: (i64, i64, i64), sc
     desc[0x18..0x20].copy_from_slice(&(entries.as_ptr() as u64).to_le_bytes());
     desc[0x20..0x28].copy_from_slice(&1u64.to_le_bytes());
     original_create(manager, 0, desc.as_ptr() as usize, 0)
+}
+
+pub fn queue_attached(template_name: &str, attach: Attach) -> bool {
+    let Some(template) = template_guid(template_name) else { return false };
+    let Ok(mut q) = QUEUE.lock() else { return false };
+    if q.len() > 48 {
+        return false;
+    }
+    q.push(Spawn { queued: now_ms(), template, at: (0, 0, 0), scale: 1.0, attach: Some(attach) });
+    QUEUED.store(1, Ordering::SeqCst);
+    true
+}
+
+pub fn attachment_bytes(a: &Attach) -> [u8; SLOT_ATTACHMENT_SIZE] {
+    let mut b = [0u8; SLOT_ATTACHMENT_SIZE];
+    for (i, v) in a.offset.iter().enumerate() {
+        b[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    b[36..40].copy_from_slice(&1.0f32.to_le_bytes());
+    b[40] = 0;
+    b[41] = a.slot;
+    b[42] = 0;
+    b[44..48].copy_from_slice(&a.entity.to_le_bytes());
+    b
+}
+
+pub fn life_time_bytes(ms: u64) -> [u8; LIFE_TIME_SIZE] {
+    let mut b = [0u8; LIFE_TIME_SIZE];
+    b[0..8].copy_from_slice(&(ms.saturating_mul(1_000_000)).to_le_bytes());
+    b
+}
+
+pub fn create_attached(manager: usize, template: [u8; 16], a: &Attach) -> u32 {
+    let slot = attachment_bytes(a);
+    let life = life_time_bytes(a.life_ms);
+    let mut entries = [0u8; 0x100];
+    entries[0..4].copy_from_slice(&HASH_SLOT_ATTACHMENT.to_le_bytes());
+    entries[8..16].copy_from_slice(&(slot.as_ptr() as u64).to_le_bytes());
+    entries[16..24].copy_from_slice(&(SLOT_ATTACHMENT_SIZE as u64).to_le_bytes());
+    entries[24..28].copy_from_slice(&HASH_LIFE_TIME.to_le_bytes());
+    entries[32..40].copy_from_slice(&(life.as_ptr() as u64).to_le_bytes());
+    entries[40..48].copy_from_slice(&(LIFE_TIME_SIZE as u64).to_le_bytes());
+    let mut desc = [0u8; 0x100];
+    desc[4..20].copy_from_slice(&template);
+    desc[0x18..0x20].copy_from_slice(&(entries.as_ptr() as u64).to_le_bytes());
+    desc[0x20..0x28].copy_from_slice(&2u64.to_le_bytes());
+    original_create(manager, 0, desc.as_ptr() as usize, 0)
+}
+
+/// The visual entity of the weapon in the player's main hand and the weapon's item id,
+/// read from the player's `Equipment` component.
+pub fn main_hand(manager: usize, id: u32) -> Option<(u32, u32)> {
+    let record = spawner::find_record(manager, id)?;
+    let p = spawner::placement(record)?;
+    for index in 0..spawner::COMPONENT_SLOTS {
+        let Some((addr, stride)) = spawner::component_address(&p, index) else { continue };
+        if stride != EQUIPMENT_SIZE {
+            continue;
+        }
+        let b = read_bytes(addr, EQUIPMENT_SIZE)?;
+        if b.len() < EQUIPMENT_SIZE {
+            return None;
+        }
+        return Some((u32_at(&b, MAIN_HAND_VISUAL), u32_at(&b, MAIN_HAND_ITEM)));
+    }
+    None
+}
+
+/// Where a weapon effect should be glued: the weapon's own entity when the server has it,
+/// otherwise the player's bone.
+fn tip_target(manager: usize, player: u32, tip: &Tip) -> Attach {
+    let slot = slot_value(&tip.slot).unwrap_or(1);
+    let life_ms = tip.every_ms + 150;
+    if tip.attach_to.eq_ignore_ascii_case("weapon") {
+        if let Some((weapon, item)) = main_hand(manager, player) {
+            if weapon != 0 && spawner::find_record(manager, weapon).is_some() {
+                note_once(&format!("vfx: weapon effects go on the weapon entity {weapon} (item {item}) slot {slot}"));
+                return Attach { entity: weapon, slot, offset: tip.offset, life_ms };
+            }
+            note_once(&format!("vfx: weapon entity {weapon} (item {item}) is not on the server; using the right hand"));
+        } else {
+            note_once("vfx: equipment of the player not found; using the right hand");
+        }
+        return Attach { entity: player, slot: 8, offset: tip.offset, life_ms };
+    }
+    Attach { entity: player, slot, offset: tip.offset, life_ms }
+}
+
+static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn note_once(text: &str) {
+    if let Ok(mut n) = NOTES.lock() {
+        if !n.iter().any(|t| t == text) {
+            n.push(text.to_string());
+            log(text);
+        }
+    }
 }
 
 /// Finds the `CombatTargetActor` component of a player and returns its flags.
@@ -453,6 +632,8 @@ fn run_loop(dir: std::path::PathBuf) {
     let mut scanned = Instant::now() - Duration::from_secs(10);
     let mut states: HashMap<u32, PlayerCharge> = HashMap::new();
     let mut key_was_down = false;
+    let mut tip_was_down = false;
+    let mut tip_index = 0usize;
     let mut reported_players = usize::MAX;
     let mut waiting_logged = false;
     loop {
@@ -464,8 +645,8 @@ fn run_loop(dir: std::path::PathBuf) {
                 if let Some((cfg, m)) = load(&dir) {
                     modified = m;
                     log(&format!(
-                        "vfx: config loaded enabled={} charge={:?} x{} release={:?} x{}",
-                        cfg.enabled, cfg.charge.effects, cfg.charge.scale, cfg.release.effects, cfg.release.scale
+                        "vfx: config loaded enabled={} charge={:?} release={:?} melee_charge={:?} melee_release={:?} weapon_tip={:?}",
+                        cfg.enabled, cfg.charge.effects, cfg.release.effects, cfg.melee_charge.effects, cfg.melee_release.effects, cfg.weapon_tip
                     ));
                     ENABLED.store(cfg.enabled, Ordering::SeqCst);
                     if let Ok(mut c) = CONFIG.lock() {
@@ -499,6 +680,22 @@ fn run_loop(dir: std::path::PathBuf) {
             }
         }
         key_was_down = down;
+        let tip_key = super::config::parse_key(&cfg.tip_test_key);
+        let tip_down = tip_key.map(|k| unsafe { GetAsyncKeyState(k) } as u16 & 0x8000 != 0).unwrap_or(false) && spawner::game_has_focus();
+        if tip_down && !tip_was_down {
+            let host = spawner::host_player();
+            if host != 0 {
+                let name = TIP_CANDIDATES[tip_index % TIP_CANDIDATES.len()];
+                tip_index += 1;
+                let mut target = tip_target(manager, host, &cfg.weapon_tip);
+                target.life_ms = 2500;
+                let queued = queue_attached(name, target);
+                log(&format!("vfx: tip test {}/{} {name} on entity {} slot {} queued={queued}", (tip_index - 1) % TIP_CANDIDATES.len() + 1, TIP_CANDIDATES.len(), target.entity, target.slot));
+            } else {
+                log("vfx: tip test key pressed but there is no host player");
+            }
+        }
+        tip_was_down = tip_down;
         if scanned.elapsed() >= Duration::from_secs(3) {
             scanned = Instant::now();
             players = spawner::player_entities(manager);
@@ -513,15 +710,28 @@ fn run_loop(dir: std::path::PathBuf) {
             let Some(flags) = read_flags(manager, id) else { continue };
             let st = states.entry(id).or_default();
             let was = st.since.is_some();
-            match step(st, flags, now, &cfg) {
-                Event::Charge => {
+            let every = if st.heavy { cfg.charge_every_ms.min(cfg.weapon_tip.every_ms) } else { cfg.charge_every_ms };
+            match step(st, flags, now, every, cfg.min_charge_ms) {
+                Event::Charge { melee: false } => {
                     if let Some((at, facing)) = position_of(manager, id) {
                         queue_burst(at, facing, &cfg.charge);
                     }
                 }
-                Event::Release => {
+                Event::Charge { melee: true } => {
                     if let Some((at, facing)) = position_of(manager, id) {
-                        queue_burst(at, facing, &cfg.release);
+                        queue_burst(at, facing, &cfg.melee_charge);
+                    }
+                    if !cfg.weapon_tip.effects.is_empty() && now.saturating_sub(st.last_tip) >= cfg.weapon_tip.every_ms {
+                        st.last_tip = now;
+                        let target = tip_target(manager, id, &cfg.weapon_tip);
+                        for name in &cfg.weapon_tip.effects {
+                            queue_attached(name, target);
+                        }
+                    }
+                }
+                Event::Release { melee } => {
+                    if let Some((at, facing)) = position_of(manager, id) {
+                        queue_burst(at, facing, if melee { &cfg.melee_release } else { &cfg.release });
                     }
                     if SPAWNED.load(Ordering::Relaxed) < 40 {
                         log(&format!("vfx: entity {id} released a charged attack (flags {flags:#x})"));

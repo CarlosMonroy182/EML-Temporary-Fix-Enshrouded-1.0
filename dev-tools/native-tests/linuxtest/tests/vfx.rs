@@ -35,7 +35,7 @@ const READY: u64 = 1 << 50 | 1;
 fn config_defaults_and_limits() {
     let cfg = vfx::parse_config("{}").unwrap();
     assert!(cfg.enabled);
-    assert!(!cfg.charge.effects.is_empty() && !cfg.release.effects.is_empty());
+    assert!(!cfg.charge.effects.is_empty());
     let cfg = vfx::parse_config(r#"{"enabled":false,"charge":{"effects":["a","b","c","d","e","f","g"],"scale":99,"ring":40,"radius":-3},"charge_every_ms":1}"#).unwrap();
     assert!(!cfg.enabled);
     assert_eq!(cfg.charge.effects.len(), 6);
@@ -62,18 +62,37 @@ fn combat_state_is_recognised() {
 
 #[test]
 fn charge_repeats_and_release_fires_once() {
-    let cfg = vfx::VfxConfig { charge_every_ms: 300, min_charge_ms: 300, ..Default::default() };
     let mut st = vfx::PlayerCharge::default();
     let heavy = READY | 1 << vfx::FLAG_HEAVY_ATTACK;
-    assert_eq!(vfx::step(&mut st, READY, 0, &cfg), vfx::Event::None);
-    assert_eq!(vfx::step(&mut st, heavy, 1000, &cfg), vfx::Event::None);
-    assert_eq!(vfx::step(&mut st, heavy, 1130, &cfg), vfx::Event::Charge);
-    assert_eq!(vfx::step(&mut st, heavy, 1300, &cfg), vfx::Event::None);
-    assert_eq!(vfx::step(&mut st, heavy, 1430, &cfg), vfx::Event::Charge);
-    assert_eq!(vfx::step(&mut st, READY, 1500, &cfg), vfx::Event::Release);
-    assert_eq!(vfx::step(&mut st, READY, 1600, &cfg), vfx::Event::None);
-    assert_eq!(vfx::step(&mut st, heavy, 2000, &cfg), vfx::Event::None);
-    assert_eq!(vfx::step(&mut st, READY, 2100, &cfg), vfx::Event::None, "too short to count as charged");
+    let aim = READY | 1 << vfx::FLAG_RANGED_PREPARING;
+    assert_eq!(vfx::step(&mut st, READY, 0, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, heavy, 1000, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, heavy, 1130, 300, 300), vfx::Event::Charge { melee: true });
+    assert_eq!(vfx::step(&mut st, heavy, 1300, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, heavy, 1430, 300, 300), vfx::Event::Charge { melee: true });
+    assert_eq!(vfx::step(&mut st, READY, 1500, 300, 300), vfx::Event::Release { melee: true });
+    assert_eq!(vfx::step(&mut st, READY, 1600, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, heavy, 2000, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, READY, 2100, 300, 300), vfx::Event::None, "too short to count as charged");
+    assert_eq!(vfx::step(&mut st, aim, 3000, 300, 300), vfx::Event::None);
+    assert_eq!(vfx::step(&mut st, aim, 3200, 300, 300), vfx::Event::Charge { melee: false });
+    assert_eq!(vfx::step(&mut st, READY, 3600, 300, 300), vfx::Event::Release { melee: false });
+}
+
+#[test]
+fn defaults_keep_the_staff_aura_and_drop_flashes() {
+    let cfg = vfx::parse_config("{}").unwrap();
+    assert!(!cfg.charge.effects.is_empty());
+    assert!(cfg.release.effects.is_empty());
+    assert!(cfg.melee_charge.effects.is_empty());
+    assert!(cfg.melee_release.effects.is_empty());
+    assert!(!cfg.weapon_tip.effects.is_empty());
+    assert_eq!(vfx::slot_value("head"), Some(1));
+    assert_eq!(vfx::slot_value("HandR"), Some(8));
+    assert_eq!(vfx::slot_value("nope"), None);
+    for name in vfx::TIP_CANDIDATES {
+        assert!(config::parse_guid(name).is_none());
+    }
 }
 
 #[test]
@@ -255,4 +274,34 @@ fn pump_hook_keeps_arguments_and_runs_the_queue() {
     let r = stub(0x5555, 1, 2, 3);
     assert_eq!(r, 0xabc);
     assert_eq!(SEEN.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn weapon_tip_effects_are_glued_to_the_weapon_with_a_short_life() {
+    let _g = LOCK.lock().unwrap();
+    let mut equipment = vec![0u8; 1380];
+    equipment[16..20].copy_from_slice(&5555u32.to_le_bytes());
+    equipment[1372..1376].copy_from_slice(&3u32.to_le_bytes());
+    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56]), (40, 1380, 0x2000, equipment)]);
+    let mgr = w.mem.as_ptr() as usize;
+    assert_eq!(vfx::main_hand(mgr, 1), Some((3, 5555)));
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    let a = vfx::Attach { entity: 1, slot: 8, offset: [0.0, 0.5, 0.0], life_ms: 450 };
+    assert!(vfx::queue_attached("VFX_SubEntity_Projectile_Enemy_WilloWisp_Fireball_Deflected", a));
+    vfx::server_tick();
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (_, desc, data) = &seen[0];
+    assert_eq!(&desc[4..20], &config::parse_guid("038a7a31-9901-4745-9b05-2f9da575dcdd").unwrap());
+    assert_eq!(u64::from_le_bytes(desc[0x20..0x28].try_into().unwrap()), 2);
+    assert_eq!(&data[0..4], &0x0956_1436u32.to_le_bytes());
+    let slot = &data[4..52];
+    assert_eq!(f32::from_le_bytes(slot[4..8].try_into().unwrap()), 0.5);
+    assert_eq!(f32::from_le_bytes(slot[36..40].try_into().unwrap()), 1.0);
+    assert_eq!(slot[41], 8);
+    assert_eq!(u32::from_le_bytes(slot[44..48].try_into().unwrap()), 1);
+    assert_eq!(&data[52..56], &0xf22c_253cu32.to_le_bytes());
+    assert_eq!(u64::from_le_bytes(data[56..64].try_into().unwrap()), 450_000_000);
 }
