@@ -28,6 +28,9 @@ pub mod spawner;
 #[cfg(all())]
 pub mod table;
 
+#[cfg(all())]
+pub mod vfx;
+
 use std::path::PathBuf;
 
 #[cfg(all())]
@@ -63,6 +66,8 @@ pub fn attach() {
     if cfg.panel {
         panel_host::start(dir.clone());
     }
+
+    vfx::start();
 
     if patch::install() != patch::Outcome::Retry {
         spawn_watcher(path);

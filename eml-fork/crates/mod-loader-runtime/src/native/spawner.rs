@@ -56,7 +56,7 @@ const HASH_PICKUP_ITEM: u32 = 0x0877_5a90;
 const PICKUP_ITEM_SIZE: usize = 28;
 
 const TRANSFORM_SIZE: usize = 56;
-const COMPONENT_SLOTS: usize = 640;
+pub(super) const COMPONENT_SLOTS: usize = 640;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
 const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
@@ -135,7 +135,7 @@ pub fn start() {
     }
 }
 
-fn game_has_focus() -> bool {
+pub(super) fn game_has_focus() -> bool {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
@@ -1007,7 +1007,7 @@ fn hash_slot(id: u32, capacity: u64) -> u64 {
     ((b as u64 >> 16) ^ b as u64) & capacity.wrapping_sub(1)
 }
 
-fn find_record(manager: usize, id: u32) -> Option<usize> {
+pub(super) fn find_record(manager: usize, id: u32) -> Option<usize> {
     let map = manager + 0x148;
     let head = read_bytes(map, 0x58)?;
     let capacity = u64_at(&head, 0x10);
@@ -1040,13 +1040,13 @@ fn find_record(manager: usize, id: u32) -> Option<usize> {
     None
 }
 
-struct Placement {
+pub(super) struct Placement {
     def: usize,
     chunk: usize,
     slot: usize,
 }
 
-fn placement(record: usize) -> Option<Placement> {
+pub(super) fn placement(record: usize) -> Option<Placement> {
     let b = read_bytes(record, 0x38)?;
     let def = u64_at(&b, 0x18) as usize;
     let chunk = u64_at(&b, 0x20) as usize;
@@ -1057,7 +1057,7 @@ fn placement(record: usize) -> Option<Placement> {
     Some(Placement { def, chunk, slot })
 }
 
-fn component_address(p: &Placement, index: usize) -> Option<(usize, usize)> {
+pub(super) fn component_address(p: &Placement, index: usize) -> Option<(usize, usize)> {
     if index >= COMPONENT_SLOTS || !bit_set(p.def, index) {
         return None;
     }
@@ -1188,7 +1188,7 @@ fn guess_client_transform(manager: usize, id: u32) {
     }
 }
 
-fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
+pub(super) fn transform_of(manager: usize, id: u32) -> Option<Vec<u8>> {
     let index = transform_cell(manager).load(Ordering::SeqCst);
     if index < 0 || id == 0 || manager == 0 {
         return None;
@@ -1221,7 +1221,7 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1234,6 +1234,7 @@ pub fn before(manager: usize, edx: u32) {
         spawn_now(manager);
     }
     run_aura_queue(manager);
+    super::vfx::run(manager);
     BUSY.store(false, Ordering::SeqCst);
 }
 
@@ -3640,6 +3641,49 @@ pub fn scan_players_once(manager: usize) -> usize {
         found += 1;
     }
     found
+}
+
+pub(super) fn server_manager() -> usize {
+    SERVER_MGR.load(Ordering::SeqCst)
+}
+
+pub(super) fn host_player() -> u32 {
+    PLAYER_ID.load(Ordering::SeqCst)
+}
+
+/// Entity ids of every player character in `manager` (host and connected players).
+pub(super) fn player_entities(manager: usize) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Some(head) = read_bytes(manager + 0x148, 0x58) else { return out };
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return out;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let Some(bitmap) = read_bytes(u64_at(&head, 8) as usize, words * 8) else { return out };
+    let Some(keys) = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4) else { return out };
+    let Some(values) = read_bytes(u64_at(&head, 0x40) as usize, capacity as usize * 8) else { return out };
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 || values.len() < capacity as usize * 8 {
+        return out;
+    }
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 0 {
+            continue;
+        }
+        let id = u32_at(&keys, slot * 4);
+        let record = u64_at(&values, slot * 8) as usize;
+        if id == 0 || record < 0x10000 {
+            continue;
+        }
+        let Some(p) = placement(record) else { continue };
+        if def_is_player(manager, id, &p) && !faction_addresses(manager, id).is_empty() {
+            out.push(id);
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out
 }
 
 fn players_loop() {
