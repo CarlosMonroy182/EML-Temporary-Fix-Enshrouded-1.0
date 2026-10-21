@@ -82,16 +82,33 @@ fn charge_repeats_and_release_fires_once() {
 #[test]
 fn defaults_keep_the_staff_aura_and_drop_flashes() {
     let cfg = vfx::parse_config("{}").unwrap();
+    assert!(cfg.auto);
     assert!(!cfg.charge.effects.is_empty());
     assert!(cfg.release.effects.is_empty());
     assert!(cfg.melee_charge.effects.is_empty());
     assert!(cfg.melee_release.effects.is_empty());
-    assert!(!cfg.weapon_tip.effects.is_empty());
-    assert_eq!(vfx::slot_value("head"), Some(1));
-    assert_eq!(vfx::slot_value("HandR"), Some(8));
-    assert_eq!(vfx::slot_value("nope"), None);
-    for name in vfx::TIP_CANDIDATES {
-        assert!(config::parse_guid(name).is_none());
+}
+
+#[test]
+fn elements_follow_the_damage_columns() {
+    use vfx::Element::*;
+    assert_eq!(vfx::element_of([0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]), Fire);
+    assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), Lightning);
+    assert_eq!(vfx::element_of([0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0]), Ice);
+    assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), Shroud);
+    assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0]), Healing);
+    assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]), Poison);
+    assert_eq!(vfx::element_of([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Bone);
+    assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]), Arcane);
+    assert_eq!(vfx::element_of([0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Physical);
+    let csv = "item_id,guid,debug_name,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison\n518418528,x,Weapon_T4_1H_SwordEpic_01,0.5,0,0,0.5,0,0,0,0,0\n1048548069,y,Ammo_T2_Spell_Lightning_Chain_lvl12,0,0,0,0,0,0,1,0,0\nbad,line\n";
+    let t = vfx::parse_items(csv);
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[&518418528], Fire);
+    assert_eq!(t[&1048548069], Lightning);
+    for e in [Lightning, Fire, Ice, Shroud, Healing, Poison, Bone, Arcane, Physical] {
+        assert!(!vfx::staff_effects(e).is_empty());
+        assert!(!vfx::blade_effect(e).is_empty());
     }
 }
 
@@ -277,31 +294,38 @@ fn pump_hook_keeps_arguments_and_runs_the_queue() {
 }
 
 #[test]
-fn weapon_tip_effects_are_glued_to_the_weapon_with_a_short_life() {
+fn reads_spell_weapon_and_hand_of_the_player() {
     let _g = LOCK.lock().unwrap();
-    let mut equipment = vec![0u8; 1380];
-    equipment[16..20].copy_from_slice(&5555u32.to_le_bytes());
-    equipment[1372..1376].copy_from_slice(&3u32.to_le_bytes());
-    let w = world(1, 0, &[(5, 56, 0x200, vec![0u8; 56]), (40, 1380, 0x2000, equipment)]);
+    let m = 4294967296.0f64;
+    let mut player = [0u8; 56];
+    player[0..8].copy_from_slice(&((100.0 * m) as i64).to_le_bytes());
+    player[8..16].copy_from_slice(&((20.0 * m) as i64).to_le_bytes());
+    player[16..24].copy_from_slice(&((-50.0 * m) as i64).to_le_bytes());
+    let mut ranged = vec![0u8; 112];
+    ranged[0] = 2;
+    ranged[56..60].copy_from_slice(&777u32.to_le_bytes());
+    ranged[68..72].copy_from_slice(&1048548069u32.to_le_bytes());
+    let mut cursor = vec![7u8; 112];
+    cursor[0] = 9;
+    let mut slots = vec![0u8; 1760];
+    slots[0..8].copy_from_slice(&(1u64 << 8).to_le_bytes());
+    slots[8..16].copy_from_slice(&((100.0 * m) as i64).to_le_bytes());
+    slots[16..24].copy_from_slice(&((20.0 * m) as i64).to_le_bytes());
+    slots[24..32].copy_from_slice(&((-50.0 * m) as i64).to_le_bytes());
+    let base = 32 + 8 * 48;
+    let vals: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.3, 1.2, 0.4];
+    for (k, v) in vals.iter().enumerate() {
+        slots[base + k * 4..base + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let w = world(1, 0, &[(5, 56, 0x100, player.to_vec()), (60, 112, 0x400, cursor), (61, 112, 0x800, ranged), (70, 1760, 0x1000, slots)]);
     let mgr = w.mem.as_ptr() as usize;
-    assert_eq!(vfx::main_hand(mgr, 1), Some((3, 5555)));
+    spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
-    spawn_probe::set_trampoline(fake_create as usize);
-    SEEN.lock().unwrap().clear();
-    let a = vfx::Attach { entity: 1, slot: 8, offset: [0.0, 0.5, 0.0], life_ms: 450 };
-    assert!(vfx::queue_attached("VFX_SubEntity_Projectile_Enemy_WilloWisp_Fireball_Deflected", a));
-    vfx::server_tick();
-    let seen = SEEN.lock().unwrap();
-    assert_eq!(seen.len(), 1);
-    let (_, desc, data) = &seen[0];
-    assert_eq!(&desc[4..20], &config::parse_guid("038a7a31-9901-4745-9b05-2f9da575dcdd").unwrap());
-    assert_eq!(u64::from_le_bytes(desc[0x20..0x28].try_into().unwrap()), 2);
-    assert_eq!(&data[0..4], &0x0956_1436u32.to_le_bytes());
-    let slot = &data[4..52];
-    assert_eq!(f32::from_le_bytes(slot[4..8].try_into().unwrap()), 0.5);
-    assert_eq!(f32::from_le_bytes(slot[36..40].try_into().unwrap()), 1.0);
-    assert_eq!(slot[41], 8);
-    assert_eq!(u32::from_le_bytes(slot[44..48].try_into().unwrap()), 1);
-    assert_eq!(&data[52..56], &0xf22c_253cu32.to_le_bytes());
-    assert_eq!(u64::from_le_bytes(data[56..64].try_into().unwrap()), 450_000_000);
+    assert_eq!(vfx::ranged_items(mgr, 1), Some((1048548069, 777)));
+    let (hand, axes) = vfx::slot_world(mgr, 1, 8).unwrap();
+    assert!((hand.0 as f64 / m - 100.3).abs() < 1e-6);
+    assert!((hand.1 as f64 / m - 21.2).abs() < 1e-6);
+    assert!((hand.2 as f64 / m + 49.6).abs() < 1e-6);
+    assert_eq!(axes[1], [0.0, 1.0, 0.0]);
+    assert!(vfx::slot_world(mgr, 1, 9).is_none(), "slot not initialised");
 }

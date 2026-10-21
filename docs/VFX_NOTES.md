@@ -16,3 +16,8 @@
 - Effects: VFX_ entity templates (CurrentTransform + LifeTime, no damage components) created on the server from the spawner's create hook (`spawner::before` drains `vfx::run`). CurrentTransform scale (+40 float3) = `scale`. Built-in name->guid catalog in vfx.rs.
 - Test key (host only): `test_key` (default F9) bursts the release effects on the host.
 - Not confirmed in game: heuristic picks the right component, scale applies to VFX, effects replicate to clients.
+
+## Elements and weapon position (Oct 21)
+- SlotAttachment is client_only: server-created effects cannot be glued to a weapon or bone. Server-side bone positions come from the player's `ServerAnimationGraphSlotComponent` (1760 bytes: slot mask u64, origin WorldPosition, 36 x float3x4 local slots indexed by AttachmentSlot; HandR = 8). Blade tip = HandR + axis[BLADE_AXIS] * BLADE_LENGTH (axis still being confirmed with F10 logs).
+- Element of the item in use: staff spell from `NetworkRangedWeapon` (+68 ammunition item, +56 weapon item), melee weapon from `Equipment` (+16 main-hand impact item). Damage columns come from `export/m182_items.csv`; `element_of` picks the strongest magic damage, blunt-only = bone, no damage = arcane, else physical.
+- Effects per element are built in (`staff_effects`, `blade_effect`); `"auto": true` (default) ignores the effect lists in the json.
