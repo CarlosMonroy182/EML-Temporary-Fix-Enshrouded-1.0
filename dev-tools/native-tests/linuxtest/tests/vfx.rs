@@ -112,10 +112,14 @@ fn elements_follow_the_damage_columns() {
     let mut seen = std::collections::HashSet::new();
     for e in [Lightning, Fire, Ice, Shroud, Healing, Poison, Bone, Arcane, Physical] {
         assert!(!vfx::staff_effects(e).is_empty());
-        assert!(seen.insert(vfx::hand_template(e)));
+        seen.insert(vfx::staff_effects(e)[0]);
+        for name in vfx::staff_effects(e) {
+            assert!(vfx::is_vanilla(name), "{name} must be a game effect");
+        }
     }
     assert!(!vfx::staff_effects(Summon).is_empty());
-    assert_eq!(vfx::hand_template(Fire), config::parse_guid("182e1e00-0000-4000-8000-000000000002").unwrap());
+    assert!(vfx::hand_effect(Fire).is_none(), "no custom templates: clients without the mod would be kicked");
+    assert_eq!(vfx::hand_effect(Poison), config::parse_guid("eee801de-8da6-4e11-b5f7-159205ffb139"));
     assert!(vfx::staff_scale(Shroud) < 1.0);
 }
 
@@ -346,7 +350,7 @@ fn hand_glow_is_created_glued_to_the_players_right_hand() {
     spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
     spawn_probe::set_trampoline(fake_create as usize);
     SEEN.lock().unwrap().clear();
-    let t = vfx::hand_template(vfx::Element::Ice);
+    let t = vfx::hand_effect(vfx::Element::Poison).unwrap();
     vfx::queue_hand(t, 42, (7 << 32, 8 << 32, 9 << 32));
     vfx::server_tick();
     let seen = SEEN.lock().unwrap();
@@ -367,30 +371,34 @@ fn hand_glow_is_created_glued_to_the_players_right_hand() {
 }
 
 #[test]
-fn crouch_toggles_and_victory_switches_the_aura() {
-    let sneak = READY | 1 << vfx::FLAG_SNEAK;
+fn greet_toggles_and_victory_switches_the_aura() {
+    let sneak = READY | 1 << 21;
     let v = vfx::EMOTE_VICTORY;
+    let g = vfx::EMOTE_GREET;
     let mut st = vfx::AuraState::default();
     assert_eq!(vfx::gesture_step(&mut st, READY, Some((5, 99)), 0), vfx::Gesture::None);
-    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((5, 99)), 10), vfx::Gesture::Toggle);
-    assert!(st.on);
-    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((5, 99)), 20), vfx::Gesture::None);
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((5, 99)), 30), vfx::Gesture::None, "standing up does nothing");
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, v)), 40), vfx::Gesture::Next);
-    assert_eq!(st.index, 1);
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, v)), 50), vfx::Gesture::None, "same emote seen again");
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((7, 1773809286)), 60), vfx::Gesture::None, "another emote");
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((8, v)), 70), vfx::Gesture::Next);
-    assert_eq!(st.index, 2);
-    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((8, v)), 80), vfx::Gesture::Toggle);
+    assert_eq!(vfx::gesture_step(&mut st, sneak, Some((5, 99)), 10), vfx::Gesture::None, "crouching does nothing now");
     assert!(!st.on);
-    assert_eq!(vfx::gesture_step(&mut st, READY, Some((9, v)), 90), vfx::Gesture::Next);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, g)), 20), vfx::Gesture::Toggle);
+    assert!(st.on);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((6, g)), 30), vfx::Gesture::None, "same emote seen again");
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((7, v)), 40), vfx::Gesture::Next);
+    assert_eq!(st.index, 1);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((8, 12345)), 50), vfx::Gesture::None, "another emote");
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((9, v)), 60), vfx::Gesture::Next);
+    assert_eq!(st.index, 2);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((10, g)), 70), vfx::Gesture::Toggle);
+    assert!(!st.on);
+    assert_eq!(vfx::gesture_step(&mut st, READY, Some((11, v)), 80), vfx::Gesture::Next);
     assert!(st.on);
     assert_eq!(st.index, 2, "turning on with victory keeps the last effect");
     let mut fresh = vfx::AuraState::default();
-    assert_eq!(vfx::gesture_step(&mut fresh, sneak, Some((3, v)), 0), vfx::Gesture::None, "state already present when first seen");
+    assert_eq!(vfx::gesture_step(&mut fresh, READY, Some((3, g)), 0), vfx::Gesture::None, "state already present when first seen");
     for a in vfx::AURAS.iter() {
-        assert!(!a.effects.is_empty() || a.glow.is_some());
+        assert!(!a.effects.is_empty());
+        for name in a.effects {
+            assert!(vfx::is_vanilla(name), "{name} must be a game effect");
+        }
     }
 }
 

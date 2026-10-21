@@ -288,6 +288,11 @@ pub fn pending() -> bool {
     QUEUED.load(Ordering::Relaxed) != 0
 }
 
+/// True when the name is one of the game's own effect templates (known to every client).
+pub fn is_vanilla(name: &str) -> bool {
+    CATALOG.iter().any(|(n, _)| *n == name)
+}
+
 fn template_guid(name: &str) -> Option<[u8; 16]> {
     if let Ok(known) = GUIDS.lock() {
         if let Some((_, g)) = known.iter().find(|(n, _)| n == name) {
@@ -565,28 +570,15 @@ pub fn staff_scale(e: Element) -> f32 {
 
 /// Template made by the M182 VFX Lua mod: the element's glow, attached on the server to the
 /// player's weapon hand.
-pub fn glow_template(n: u8) -> [u8; 16] {
-    let mut g = super::config::parse_guid("182e1e00-0000-4000-8000-000000000000").unwrap_or([0; 16]);
-    g[15] = n;
-    g
-}
-
-pub fn hand_template(e: Element) -> [u8; 16] {
-    let n: u8 = match e {
-        Element::Lightning => 1,
-        Element::Fire => 2,
-        Element::Ice => 3,
-        Element::Shroud => 4,
-        Element::Healing => 5,
-        Element::Poison => 6,
-        Element::Bone => 7,
-        Element::Arcane => 8,
-        Element::Summon => 7,
-        Element::Physical => 9,
+/// Game effect glued (by the server) to the weapon hand while a melee attack is charged.
+/// Only the game's own templates are used, so every player can see them.
+pub fn hand_effect(e: Element) -> Option<[u8; 16]> {
+    let guid = match e {
+        Element::Poison => "eee801de-8da6-4e11-b5f7-159205ffb139",
+        Element::Physical => "155a3096-7dbf-429c-b909-4f6096f7e1ec",
+        _ => return None,
     };
-    let mut g = super::config::parse_guid("182e1e00-0000-4000-8000-000000000000").unwrap_or([0; 16]);
-    g[15] = n;
-    g
+    super::config::parse_guid(guid)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -786,48 +778,35 @@ pub const SLOT_CHEST: u8 = 2;
 // server sees for every player (PC or console) without any key or chat message.
 // ---------------------------------------------------------------------------------------------
 
-pub const FLAG_SNEAK: u32 = 21;
-static SNEAK_LOGS: AtomicU32 = AtomicU32::new(0);
 
 pub struct Aura {
     pub name: &'static str,
     pub effects: &'static [&'static str],
     pub scale: f32,
-    pub glow: Option<u8>,
     pub life_ms: Option<u64>,
     pub every_ms: u64,
 }
 
 pub const LINGER_MS: u64 = 1200;
 
-const fn glow(name: &'static str, n: u8) -> Aura {
-    Aura { name, effects: &[], scale: 1.0, glow: Some(n), life_ms: None, every_ms: HAND_EVERY_MS }
+const fn aura(name: &'static str, effects: &'static [&'static str], scale: f32, life_ms: Option<u64>, every_ms: u64) -> Aura {
+    Aura { name, effects, scale, life_ms, every_ms }
 }
 
-pub const AURAS: [Aura; 16] = [
-    glow("fire", 2),
-    glow("lightning", 1),
-    glow("frost", 3),
-    glow("shroud", 4),
-    glow("holy glow", 5),
-    glow("poison", 6),
-    glow("ectoplasm tendrils", 7),
-    glow("arcane", 8),
-    glow("blood rage", 9),
-    glow("water", 10),
-    glow("death fog", 11),
-    glow("ectoplasm", 12),
-    glow("stars", 13),
-    glow("fire ring", 14),
-    Aura { name: "mana", effects: &["VFX_Spell_ManaDrain_Mana_OnPlayer"], scale: 1.5, glow: None, life_ms: Some(LINGER_MS), every_ms: 150 },
-    Aura { name: "necromancy", effects: &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], scale: 1.0, glow: None, life_ms: None, every_ms: 400 },
+pub const AURAS: [Aura; 7] = [
+    aura("fire", &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fire"], 1.5, Some(LINGER_MS), 250),
+    aura("lightning", &["VFX_Trap_Electro_Impact"], 1.5, Some(LINGER_MS), 250),
+    aura("frost", &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"], 1.5, Some(LINGER_MS), 250),
+    aura("shroud", &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"], 1.0, Some(LINGER_MS), 250),
+    aura("holy light", &["VFX_Resource_Increase_Health_NoSound"], 1.5, Some(LINGER_MS), 250),
+    aura("mana", &["VFX_Spell_ManaDrain_Mana_OnPlayer"], 1.5, Some(LINGER_MS), 150),
+    aura("necromancy", &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"], 1.0, None, 400),
 ];
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct AuraState {
     pub on: bool,
     pub index: usize,
-    pub sneak: Option<bool>,
     pub emote: Option<(u32, u32)>,
     pub last_spawn: u64,
 }
@@ -840,6 +819,7 @@ pub enum Gesture {
 }
 
 pub const EMOTE_VICTORY: u32 = 1_355_035_795;
+pub const EMOTE_GREET: u32 = 1_773_809_286;
 const PLAYER_INPUT_SIZE: usize = 1472;
 const EMOTE_AT: usize = 696;
 
@@ -850,29 +830,29 @@ pub fn last_emote(manager: usize, id: u32) -> Option<(u32, u32)> {
     Some((u32_at(&b, EMOTE_AT), u32_at(&b, EMOTE_AT + 4)))
 }
 
-/// Crouching turns the aura on or off; the victory emote switches to the next effect
+/// The greeting emote turns the aura on or off; the victory emote switches to the next effect
 /// (and turns it on).
 pub fn gesture_step(st: &mut AuraState, flags: u64, emote: Option<(u32, u32)>, now: u64) -> Gesture {
-    let _ = now;
-    let sneak = flags & (1 << FLAG_SNEAK) != 0;
-    let previous = st.sneak.replace(sneak);
-    let new_emote = match (st.emote, emote) {
-        (Some(old), Some(cur)) => cur != old && cur.1 == EMOTE_VICTORY,
-        _ => false,
+    let _ = (flags, now);
+    let fresh = match (st.emote, emote) {
+        (Some(old), Some(cur)) if cur != old => Some(cur.1),
+        _ => None,
     };
     if emote.is_some() {
         st.emote = emote;
     }
-    if new_emote {
-        st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
-        st.on = true;
-        return Gesture::Next;
+    match fresh {
+        Some(EMOTE_VICTORY) => {
+            st.index = if st.on { (st.index + 1) % AURAS.len() } else { st.index };
+            st.on = true;
+            Gesture::Next
+        }
+        Some(EMOTE_GREET) => {
+            st.on = !st.on;
+            Gesture::Toggle
+        }
+        _ => Gesture::None,
     }
-    if previous == Some(false) && sneak {
-        st.on = !st.on;
-        return Gesture::Toggle;
-    }
-    Gesture::None
 }
 
 fn position_of(manager: usize, id: u32) -> Option<((i64, i64, i64), (f64, f64))> {
@@ -1006,8 +986,6 @@ fn run_loop(dir: std::path::PathBuf) {
                 100
             } else if cfg.auto && st.element == Some(Element::Arcane) {
                 150
-            } else if cfg.auto && st.element == Some(Element::Fire) {
-                HAND_EVERY_MS
             } else {
                 cfg.charge_every_ms
             };
@@ -1025,20 +1003,15 @@ fn run_loop(dir: std::path::PathBuf) {
                             st.element = Some(element);
                             log(&format!("vfx: entity {id} staff element {element:?}"));
                         }
-                        if cfg.auto && element == Element::Fire {
-                            let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
-                            queue_slot(hand_template(Element::Fire), id, SLOT_CHEST, chest, HAND_LIFE_MS);
-                        } else {
-                            let mut burst = cfg.charge.clone();
-                            if cfg.auto {
-                                burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
-                                burst.scale *= staff_scale(element);
-                                if element == Element::Arcane {
-                                    burst.life_ms = Some(LINGER_MS);
-                                }
+                        let mut burst = cfg.charge.clone();
+                        if cfg.auto {
+                            burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
+                            burst.scale *= staff_scale(element);
+                            if matches!(element, Element::Arcane | Element::Fire) {
+                                burst.life_ms = Some(LINGER_MS);
                             }
-                            queue_burst(at, facing, &burst);
                         }
+                        queue_burst(at, facing, &burst);
                     }
                 }
                 Event::Charge { melee: true } => {
@@ -1054,8 +1027,8 @@ fn run_loop(dir: std::path::PathBuf) {
                         if now.saturating_sub(st.last_hand) >= HAND_EVERY_MS {
                             st.last_hand = now;
                             let at = slot_world(manager, id, SLOT_HAND_R).map(|(h, _)| h).or_else(|| position_of(manager, id).map(|(p, _)| p));
-                            if let Some(at) = at {
-                                queue_hand(hand_template(element), id, at);
+                            if let (Some(at), Some(template)) = (at, hand_effect(element)) {
+                                queue_hand(template, id, at);
                             }
                         }
                     }
@@ -1075,10 +1048,6 @@ fn run_loop(dir: std::path::PathBuf) {
             }
             let charging = st.since.is_some();
             let aura = auras.entry(id).or_default();
-            let sneak_now = flags & (1 << FLAG_SNEAK) != 0;
-            if aura.sneak.is_some() && aura.sneak != Some(sneak_now) && SNEAK_LOGS.fetch_add(1, Ordering::Relaxed) < 12 {
-                log(&format!("vfx: entity {id} crouch {} (flags {flags:#x})", if sneak_now { "on" } else { "off" }));
-            }
             match gesture_step(aura, flags, last_emote(manager, id), now) {
                 Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, AURAS[aura.index].name)),
                 Gesture::Next => log(&format!("vfx: entity {id} aura {}/{} {}", aura.index + 1, AURAS.len(), AURAS[aura.index].name)),
@@ -1088,10 +1057,6 @@ fn run_loop(dir: std::path::PathBuf) {
             if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
                 aura.last_spawn = now;
                 if let Some((at, facing)) = position_of(manager, id) {
-                    if let Some(n) = a.glow {
-                        let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
-                        queue_slot(glow_template(n), id, SLOT_CHEST, chest, HAND_LIFE_MS);
-                    }
                     if !a.effects.is_empty() {
                         let burst = Burst { effects: a.effects.iter().map(|e| e.to_string()).collect(), life_ms: a.life_ms, scale: a.scale, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
                         queue_burst(at, facing, &burst);
