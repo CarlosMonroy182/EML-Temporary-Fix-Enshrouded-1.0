@@ -23,8 +23,4 @@ Spawns only create creatures with a player within 150 m. If one does not show up
 Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
 Personal powers (god mode, energy) only last while that player is connected.
 
-LIMITS (honesty)
-- Not confirmed in the real game: the chest and building block for visitors of a protected base. At startup m182_spawner.log should say "permissions hooked"; when someone becomes restricted it says "is a visitor now".
-- If something fails, send me m182_spawner.log and the server's EML log ("chat: client ..." appears for every message received).
-
 Made by M182.

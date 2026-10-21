@@ -25,7 +25,7 @@ The panel detects by itself whether you are in your own game or on the server. T
 
 TABS
 - Creatures: summon creatures or create spawns that respawn on their own (at your position or at a saved place), with the level, health and damage you want.
-- Many spawns: you can create 50 or more (up to 20 creatures each). A spawn only creates its creatures when a player is within 150 m; when nobody is near it stays idle, and when someone returns the missing creatures come back at once. That way the server does not carry them all at the same time. The list shows how many metres you are from each spawn. When you create or delete one, only that change is sent to the server (about 5 chat messages), not the whole list; "Resend all" does send the full list (about 3 messages per spawn, it takes a while).
+- Many spawns: you can create 50 or more (up to 20 creatures each). You can place several in the same spot. A spawn only creates its creatures when a player is within 150 m; when nobody is near it stays idle, and when someone returns the missing creatures come back at once. That way the server does not carry them all at the same time. The list shows how many metres you are from each spawn. When you create or delete one, only that change is sent to the server (about 5 chat messages), not the whole list; "Resend all" does send the full list (about 3 messages per spawn, it takes a while).
 - Items: give items with level, rarity and amount, and edit their stats. Changing an item's stats changes that item for everyone (applied when the server restarts); "Restore original values" puts it back as in the game.
 - Places: save positions to use for spawns and zones.
 - Admin: god mode, infinite stamina and mana, heal yourself instantly.
@@ -35,15 +35,13 @@ TABS
 
 ZONES AND BASES
 - Safe zone: nobody loses health inside. On entering you hear and see the game's healing effect on the player, and while you stay inside a soft flash repeats every few seconds.
-- Protected base: create the zone where the base is, pick the "Owner team" and tick "Protected base". Anyone not in that team is a visitor inside: the game denies them opening chests and building or editing (it is applied where the server checks the player's permissions; the server's m182_spawner.log says "permissions hooked" at startup and "is a visitor now" when someone becomes restricted). Administrators are exempt (tick "Also applies to administrators" only to test it).
+- Protected base: create the zone where the base is, pick the "Owner team" and tick "Protected base". Anyone not in that team is a visitor inside: the game denies them opening chests and building or editing. Administrators are exempt (tick "Also applies to administrators" only to test it). If two bases overlap, the smaller one rules in the shared part (if they are the same size, the one whose centre is nearer to the player).
 
 TEAMS
 - On the server press "Find server players": the server answers in the chat with the connected names (everyone sees it, it is one short line). If a name could not be read it appears as "ID N". If you are alone on the server, you are listed with your name and your Steam ID (taken from Steam on your PC) and the server recognizes you by that name. You can also add a name by hand.
 - Chat typing speed: if the server loses letters, add "typing_burst": 1 and "typing_gap_ms": 4 to m182_panel.json.
 
-LIMITS (honesty)
-- Not confirmed in the real game: the chest and building block for visitors of a protected base, the flash when entering a safe zone, and recognition by name when you are alone on the server. If something does not respond, send me m182_panel.log, m182_spawner.log and the EML log from the logs folder so I can fix it.
-- Server answers only come back for the player list. If something does not show up, check the server's m182_spawner.log.
+NOTES
 - Loot: summoned creatures drop the game's normal loot.
 - Skills without cost and item/player levels are applied when the game or the server starts: after changing them in Settings the panel also saves them on the server (mods\zz_m182_item_stats\src\m182_data.lua) and you only have to restart the server. Nothing needs to be uploaded by FTP.
 

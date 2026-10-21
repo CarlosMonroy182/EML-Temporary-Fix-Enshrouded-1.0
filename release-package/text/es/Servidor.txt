@@ -23,8 +23,4 @@ Las apariciones solo crean criaturas con un jugador a menos de 150 m. Si una no 
 Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor.
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
-LIMITES (sinceridad)
-- Sin confirmar en el juego real: el bloqueo de cofres y construccion para visitantes de una base protegida. Al arrancar, m182_spawner.log debe decir "permissions hooked"; cuando alguien queda restringido dice "is a visitor now".
-- Si algo falla, mandame m182_spawner.log y el log de EML del servidor (aparece "chat: client ..." por cada mensaje recibido).
-
 Hecho por M182.
