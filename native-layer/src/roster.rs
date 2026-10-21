@@ -291,6 +291,19 @@ pub fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
     out
 }
 
+/// File the panel writes once the server's player list shows which entity is this game's own character.
+pub const SELF_FILE: &str = "m182_self.json";
+
+/// `{"entity":5}`: the entity number of the character this game controls.
+pub fn parse_self(text: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let n = value.get("entity")?.as_u64()?;
+    if n == 0 || n >= 0x8000_0000 {
+        return None;
+    }
+    Some(n as u32)
+}
+
 pub fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
@@ -416,6 +429,14 @@ mod tests {
         let wide: Vec<u8> = "[M182#9] 1=Ana".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let marker: Vec<u8> = "[M182#9]".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         assert_eq!(find_all(&wide, &marker), vec![0]);
+    }
+
+    #[test]
+    fn the_own_character_file_is_read() {
+        assert_eq!(parse_self(r#"{"entity":5}"#), Some(5));
+        assert_eq!(parse_self(r#"{"entity":0}"#), None);
+        assert_eq!(parse_self(r#"{"entity":-1}"#), None);
+        assert_eq!(parse_self("nonsense"), None);
     }
 
     #[test]

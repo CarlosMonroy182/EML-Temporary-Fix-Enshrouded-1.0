@@ -42,3 +42,9 @@ Chest/building block for visitors, safe zone entry cue, solo-player roster by St
 - Mitigation: the opening key is held (`typing_hold_ms`, default 120 ms) and the chat gets 300 ms to open; each line is confirmed by a new `closeVirtualKeyboard` in `enshrouded.log` (`LogAcks`). Once one confirmation was seen in the session, a missing one stops the job (no retry, `[stop]` marker) instead of typing on. If no confirmation ever shows, the check switches itself off.
 - Not solved at the root: there is no way to see that the chat is open before typing. A real fix would be calling the game's chat enqueue from the client's native layer (needs the context pointer of a genuine call).
 
+
+## Own character on a remote server (client side)
+
+A game connected to a dedicated server sees every player's character. The creation hook used to take the first player entity it saw (usually the server's oldest player) as "me", so `m182_player.json`, "Create where I am" for zones/spawners/places and the distance notes used another player's position. Evidence: the client's logged position equalled the server's position of the first player to two decimals at the same moment.
+
+Fix: entity numbers are shared between server and client. The panel reads the server's player list (`m182_online.json`), finds this account by Steam id (or by unique name) and writes `m182_self.json` (`{"entity":N}`). The native layer (`apply_own_character`) switches `CLIENT_PLAYER_ID` to that entity once the client world has its record, ignores the file if it is older than the process, and `after()` stops overwriting it until the client manager changes. Log line: `client: this game's character is entity N`.

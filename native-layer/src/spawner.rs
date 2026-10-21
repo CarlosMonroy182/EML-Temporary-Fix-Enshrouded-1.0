@@ -84,6 +84,8 @@ static SERVER_MGR: AtomicUsize = AtomicUsize::new(0);
 static PLAYER_ID: AtomicU32 = AtomicU32::new(0);
 static CLIENT_MGR: AtomicUsize = AtomicUsize::new(0);
 static CLIENT_PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+/// Entity of this game's own character, as the panel read it from the server's player list.
+static CLIENT_SELF: AtomicU32 = AtomicU32::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
 static CLIENT_TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
@@ -194,6 +196,7 @@ fn key_loop() {
             last_file = Instant::now();
             check_hosted_world();
             write_mode();
+            apply_own_character();
             if remote_world() && CLIENT_TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 {
                 if let Some((m, id)) = world_pair() {
                     guess_client_transform(m, id);
@@ -860,6 +863,43 @@ pub fn check_hosted_world() {
     }
 }
 
+/// A game connected to a dedicated server sees every player's character, and the first one it
+/// meets is not necessarily its own. The panel reads the server's player list, finds this
+/// account in it and writes the entity number; from then on that character is "me".
+fn apply_own_character() {
+    static LOADED_AT: OnceLock<std::time::SystemTime> = OnceLock::new();
+    static REFUSED: AtomicU32 = AtomicU32::new(0);
+    let started = *LOADED_AT.get_or_init(std::time::SystemTime::now);
+    if SERVER_MGR.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    let manager = CLIENT_MGR.load(Ordering::SeqCst);
+    if manager == 0 {
+        return;
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(roster::SELF_FILE);
+    let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+    if modified < started {
+        return;
+    }
+    let Some(entity) = std::fs::read_to_string(&path).ok().and_then(|t| roster::parse_self(&t)) else { return };
+    if CLIENT_SELF.load(Ordering::SeqCst) == entity && CLIENT_PLAYER_ID.load(Ordering::SeqCst) == entity {
+        return;
+    }
+    if find_record(manager, entity).is_none() {
+        if REFUSED.swap(entity, Ordering::Relaxed) != entity {
+            log(&format!("client: entity {entity} from the player list is not in this game's world yet"));
+        }
+        return;
+    }
+    CLIENT_SELF.store(entity, Ordering::SeqCst);
+    let before = CLIENT_PLAYER_ID.swap(entity, Ordering::SeqCst);
+    CLIENT_TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
+    CLIENT_GUESSES.store(0, Ordering::SeqCst);
+    log(&format!("client: this game's character is entity {entity} (it was following entity {before})"));
+}
+
 fn write_mode() {
     let hosting = if SERVER_MGR.load(Ordering::SeqCst) != 0 {
         1
@@ -1511,6 +1551,12 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
             if drop_stale_world(manager, previous_client, now_ms(), SERVER_PLAYER_MS.load(Ordering::SeqCst)) && SERVER_MGR.swap(0, Ordering::SeqCst) != 0 {
                 PLAYER_ID.store(0, Ordering::SeqCst);
                 log("the world this game hosted is gone; now connected to a remote server");
+            }
+            if previous_client != manager {
+                CLIENT_SELF.store(0, Ordering::SeqCst);
+            }
+            if CLIENT_SELF.load(Ordering::SeqCst) != 0 {
+                return;
             }
             CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
             CLIENT_TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
