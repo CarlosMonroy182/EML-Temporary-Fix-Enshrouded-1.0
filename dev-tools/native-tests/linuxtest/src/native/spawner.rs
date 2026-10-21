@@ -48,7 +48,7 @@ const HASH_PICKUP_ITEM: u32 = 0x0877_5a90;
 const PICKUP_ITEM_SIZE: usize = 28;
 
 const TRANSFORM_SIZE: usize = 56;
-const COMPONENT_SLOTS: usize = 640;
+pub const COMPONENT_SLOTS: usize = 640;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
 const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
@@ -76,6 +76,8 @@ pub static SERVER_MGR: AtomicUsize = AtomicUsize::new(0);
 pub static PLAYER_ID: AtomicU32 = AtomicU32::new(0);
 pub static CLIENT_MGR: AtomicUsize = AtomicUsize::new(0);
 pub static CLIENT_PLAYER_ID: AtomicU32 = AtomicU32::new(0);
+/// Entity of this game's own character, as the panel read it from the server's player list.
+static CLIENT_SELF: AtomicU32 = AtomicU32::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 pub static TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
 pub static CLIENT_TRANSFORM_INDEX: AtomicI32 = AtomicI32::new(-1);
@@ -125,7 +127,7 @@ pub fn start() {
     }
 }
 
-fn game_has_focus() -> bool {
+pub fn game_has_focus() -> bool {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
@@ -186,6 +188,7 @@ fn key_loop() {
             last_file = Instant::now();
             check_hosted_world();
             write_mode();
+            apply_own_character();
             if remote_world() && CLIENT_TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 {
                 if let Some((m, id)) = world_pair() {
                     guess_client_transform(m, id);
@@ -852,6 +855,43 @@ pub fn check_hosted_world() {
     }
 }
 
+/// A game connected to a dedicated server sees every player's character, and the first one it
+/// meets is not necessarily its own. The panel reads the server's player list, finds this
+/// account in it and writes the entity number; from then on that character is "me".
+fn apply_own_character() {
+    static LOADED_AT: OnceLock<std::time::SystemTime> = OnceLock::new();
+    static REFUSED: AtomicU32 = AtomicU32::new(0);
+    let started = *LOADED_AT.get_or_init(std::time::SystemTime::now);
+    if SERVER_MGR.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    let manager = CLIENT_MGR.load(Ordering::SeqCst);
+    if manager == 0 {
+        return;
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let path = dir.join(roster::SELF_FILE);
+    let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else { return };
+    if modified < started {
+        return;
+    }
+    let Some(entity) = std::fs::read_to_string(&path).ok().and_then(|t| roster::parse_self(&t)) else { return };
+    if CLIENT_SELF.load(Ordering::SeqCst) == entity && CLIENT_PLAYER_ID.load(Ordering::SeqCst) == entity {
+        return;
+    }
+    if find_record(manager, entity).is_none() {
+        if REFUSED.swap(entity, Ordering::Relaxed) != entity {
+            log(&format!("client: entity {entity} from the player list is not in this game's world yet"));
+        }
+        return;
+    }
+    CLIENT_SELF.store(entity, Ordering::SeqCst);
+    let before = CLIENT_PLAYER_ID.swap(entity, Ordering::SeqCst);
+    CLIENT_TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
+    CLIENT_GUESSES.store(0, Ordering::SeqCst);
+    log(&format!("client: this game's character is entity {entity} (it was following entity {before})"));
+}
+
 fn write_mode() {
     let hosting = if SERVER_MGR.load(Ordering::SeqCst) != 0 {
         1
@@ -1173,7 +1213,7 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1186,6 +1226,7 @@ pub fn before(manager: usize, edx: u32) {
         spawn_now(manager);
     }
     run_aura_queue(manager);
+    super::vfx::run(manager);
     BUSY.store(false, Ordering::SeqCst);
 }
 
@@ -1503,6 +1544,12 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
             if drop_stale_world(manager, previous_client, now_ms(), SERVER_PLAYER_MS.load(Ordering::SeqCst)) && SERVER_MGR.swap(0, Ordering::SeqCst) != 0 {
                 PLAYER_ID.store(0, Ordering::SeqCst);
                 log("the world this game hosted is gone; now connected to a remote server");
+            }
+            if previous_client != manager {
+                CLIENT_SELF.store(0, Ordering::SeqCst);
+            }
+            if CLIENT_SELF.load(Ordering::SeqCst) != 0 {
+                return;
             }
             CLIENT_PLAYER_ID.store(ret, Ordering::SeqCst);
             CLIENT_TRANSFORM_INDEX.store(-1, Ordering::SeqCst);
@@ -2492,17 +2539,15 @@ pub fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     inside_at.push((id, le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)));
                     shielded.extend(faction_addresses(manager, id));
                 }
-                for zone in st.groups.zones.iter().filter(|z| z.locks() && z.owner() != 0) {
-                    if !groups::inside(std::slice::from_ref(zone), x, z) || team == zone.owner() as u8 {
-                        continue;
-                    }
-                    let entry = table.iter().find(|e| e.entity() == id);
-                    let admin = entry.map(|e| roster::is_admin(e.permissions)).unwrap_or(false);
-                    if admin && !zone.lock_admins.unwrap_or(false) {
-                        continue;
-                    }
-                    if let Some(e) = entry {
-                        visitors.push(e.index);
+                if let Some(zone) = groups::ruling_zone(&st.groups.zones, x, z) {
+                    if team != zone.owner() as u8 {
+                        let entry = table.iter().find(|e| e.entity() == id);
+                        let admin = entry.map(|e| roster::is_admin(e.permissions)).unwrap_or(false);
+                        if !admin || zone.lock_admins.unwrap_or(false) {
+                            if let Some(e) = entry {
+                                visitors.push(e.index);
+                            }
+                        }
                     }
                 }
                 let wanted = if team != 0 { lent.get(team as usize - 1).copied().unwrap_or(super::faction::PLAYER) } else { super::faction::PLAYER };
@@ -2579,7 +2624,7 @@ pub fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     }
 }
 
-pub fn roster_line(seq: u32) -> String {
+pub fn roster_line(seq: u32, client: u32) -> String {
     let table = super::table::entries();
     let mut ids: Vec<u32> = tracked_ids();
     for e in &table {
@@ -2596,7 +2641,12 @@ pub fn roster_line(seq: u32) -> String {
             (id, roster::label_with_id(&name, entry.and_then(|e| e.id.as_deref())))
         })
         .collect();
-    super::roster::reply_text(seq, &entries)
+    // Chat client 64 is entity 1, 65 entity 2, ...: the asking player is known for certain.
+    let asking = (client & 0x3f) + 1;
+    let own = transform_of(SERVER_MGR.load(Ordering::SeqCst), asking).map(|t| {
+        (asking, [le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS])
+    });
+    super::roster::reply_text_with_own(seq, &entries, own)
 }
 
 pub fn record_trail(pos: (i64, i64, i64)) {
@@ -3230,7 +3280,7 @@ fn decode_after(bytes: &[u8], wide: bool) -> String {
     }
 }
 
-pub fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<Vec<(u32, String)>> {
+pub fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String)>, Option<(u32, [f64; 3])>)> {
     let marker = roster::tag(seq);
     let narrow = marker.as_bytes().to_vec();
     let wide = utf16le(&marker);
@@ -3251,7 +3301,7 @@ pub fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<Vec<(u32, Str
                     let tail = &b[hit..b.len().min(hit + 2200)];
                     let text = decode_after(tail, is_wide);
                     if let Some(list) = roster::parse_reply(&text, seq) {
-                        return Some(list);
+                        return Some((list, roster::parse_own(&text, seq)));
                     }
                 }
             }
@@ -3267,8 +3317,8 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
     let found = loop {
         passes += 1;
         let regions = data_regions();
-        if let Some(list) = find_roster(&regions, seq) {
-            break Some(list);
+        if let Some(found) = find_roster(&regions, seq) {
+            break Some(found);
         }
         if started.elapsed() > Duration::from_secs(60) {
             break None;
@@ -3276,12 +3326,16 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
         std::thread::sleep(Duration::from_millis(400));
     };
     match found {
-        Some(list) => {
+        Some((list, own)) => {
             let players: Vec<String> = list
                 .iter()
                 .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
                 .collect();
-            let text = format!("{{\"seq\":{seq},\"players\":[{}]}}", players.join(","));
+            let me = match own {
+                Some((n, p)) => format!(",\"me\":{{\"n\":{n},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1}}}", p[0], p[1], p[2]),
+                None => String::new(),
+            };
+            let text = format!("{{\"seq\":{seq},\"players\":[{}]{me}}}", players.join(","));
             let tmp = dir.join("m182_online.json.tmp");
             if std::fs::write(&tmp, text).is_ok() {
                 let _ = std::fs::rename(&tmp, dir.join(ONLINE_FILE));
@@ -3579,6 +3633,49 @@ pub fn scan_players_once(manager: usize) -> usize {
         found += 1;
     }
     found
+}
+
+pub fn server_manager() -> usize {
+    SERVER_MGR.load(Ordering::SeqCst)
+}
+
+pub fn host_player() -> u32 {
+    PLAYER_ID.load(Ordering::SeqCst)
+}
+
+/// Entity ids of every player character in `manager` (host and connected players).
+pub fn player_entities(manager: usize) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Some(head) = read_bytes(manager + 0x148, 0x58) else { return out };
+    let capacity = u64_at(&head, 0x10);
+    if capacity == 0 || capacity > (1 << 22) || capacity & (capacity - 1) != 0 {
+        return out;
+    }
+    let words = (capacity as usize).div_ceil(64);
+    let Some(bitmap) = read_bytes(u64_at(&head, 8) as usize, words * 8) else { return out };
+    let Some(keys) = read_bytes(u64_at(&head, 0x28) as usize, capacity as usize * 4) else { return out };
+    let Some(values) = read_bytes(u64_at(&head, 0x40) as usize, capacity as usize * 8) else { return out };
+    if bitmap.len() < words * 8 || keys.len() < capacity as usize * 4 || values.len() < capacity as usize * 8 {
+        return out;
+    }
+    for slot in 0..capacity as usize {
+        if (u64_at(&bitmap, (slot >> 6) * 8) >> (slot & 63)) & 1 == 0 {
+            continue;
+        }
+        let id = u32_at(&keys, slot * 4);
+        let record = u64_at(&values, slot * 8) as usize;
+        if id == 0 || record < 0x10000 {
+            continue;
+        }
+        let Some(p) = placement(record) else { continue };
+        if def_is_player(manager, id, &p) && !faction_addresses(manager, id).is_empty() {
+            out.push(id);
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out
 }
 
 fn players_loop() {

@@ -8,7 +8,7 @@ def wr(f,t): open(D+f,'w').write(t)
 for f in ['faction.rs','signatures.rs','config.rs','groups.rs','chat.rs','roster.rs']:
     wr(f,rd(f))
 wr('signatures.rs',rd('signatures.rs'))
-m=rd('mod.rs').replace('#[cfg(windows)]','#[cfg(all())]').replace('#[cfg(not(windows))]','#[cfg(any())]').replace('\nmod patch;','\npub mod patch;').replace('\nmod signatures;','\npub mod signatures;').replace('\nmod spawn_probe;','\npub mod spawn_probe;').replace('\nmod spawner;','\npub mod spawner;').replace('\nmod table;','\npub mod table;')
+m=rd('mod.rs').replace('#[cfg(windows)]','#[cfg(all())]').replace('#[cfg(not(windows))]','#[cfg(any())]').replace('\nmod patch;','\npub mod patch;').replace('\nmod signatures;','\npub mod signatures;').replace('\nmod spawn_probe;','\npub mod spawn_probe;').replace('\nmod spawner;','\npub mod spawner;').replace('\nmod table;','\npub mod table;').replace('\nmod vfx;','\npub mod vfx;')
 m+='\npub fn sig_spawn() -> &\'static [u8] { &signatures::SPAWN_CREATE }\n'
 wr('mod.rs',m)
 wr('table.rs',rd('table.rs'))
@@ -69,6 +69,7 @@ s3=ffi.sub(sub3,s3)
 # expose internals for tests
 for name in ['entity_layout','apply_stats','dump_entity','snapshot','find_record','placement','component_address','calibrate','player_transform','spawn_now','hash_slot','write_bytes','toggle_watch','poll_request','census','entity_ids','write_position','facing_update','facing_direction','refill_health','refill_stamina','refill_mana','set_player_position','power_tick','new_power_state','fly_step','record_trail','run_command','refresh_powers','find_gravity','scan_regions','patch_item_stats','patch_item_struct_by_id','readable_regions','read_window','hex_to_bytes','set_gravity','client_pair','set_client_position','near','track_player','groups_tick','scan_request','roster_line','refresh_client_powers','apply_client_powers','world_pair','remote_world','guess_client_transform','transform_of','is_client_manager','find_roster']:
     s3=s3.replace('\nfn '+name+'(','\npub fn '+name+'(')
+s3=s3.replace('pub(super) ','pub ')
 s3=s3.replace('\nstruct Placement','\npub struct Placement').replace('    def: usize,\n    chunk: usize,\n    slot: usize,','    pub def: usize,\n    pub chunk: usize,\n    pub slot: usize,')
 s3=s3.replace('static PLAYER_ID','pub static PLAYER_ID').replace('static SERVER_MGR','pub static SERVER_MGR').replace('static TRANSFORM_INDEX','pub static TRANSFORM_INDEX').replace('static CLIENT_MGR','pub static CLIENT_MGR').replace('static CLIENT_PLAYER_ID','pub static CLIENT_PLAYER_ID').replace('static CLIENT_TRANSFORM_INDEX','pub static CLIENT_TRANSFORM_INDEX').replace('static PENDING','pub static PENDING').replace('\nstatic REQUEST:','\npub static REQUEST:').replace('static TRACKED_MGR','pub static TRACKED_MGR').replace('\nstruct GroupState','\npub struct GroupState').replace('\nstruct Tracked','\npub struct Tracked')
 import re as _re
@@ -78,4 +79,7 @@ blk=_re.search(r'\nstruct Powers \{.*?\n\}',s3,_re.S).group(0)
 s3=s3.replace(blk,_re.sub(r'\n    (\w+):',r'\n    pub \1:',blk).replace('\nstruct','\npub struct'))
 s3=s3.replace('static POWER_FLY_FORCE','pub static POWER_FLY_FORCE')
 wr('spawner.rs',s3)
+vx=rd('vfx.rs')
+vx=ffi.sub(lambda m:'pub static KEY_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\nunsafe fn GetAsyncKeyState(_vk: i32) -> i16 { if KEY_DOWN.load(Ordering::SeqCst) { 0x8000u16 as i16 } else { 0 } }\n',vx,count=1)
+wr('vfx.rs',vx)
 print('synced')
