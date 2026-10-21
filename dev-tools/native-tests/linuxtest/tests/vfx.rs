@@ -364,3 +364,39 @@ fn hand_glow_is_created_glued_to_the_players_right_hand() {
     assert_eq!(&life[0..4], &0xf22c_253cu32.to_le_bytes());
     assert_eq!(u64::from_le_bytes(life[4..12].try_into().unwrap()), vfx::HAND_LIFE_MS * 1_000_000);
 }
+
+#[test]
+fn crouch_gestures_toggle_and_switch_the_aura() {
+    let sneak = READY | 1 << vfx::FLAG_SNEAK;
+    let mut st = vfx::AuraState::default();
+    let mut t = 0u64;
+    let mut feed = |st: &mut vfx::AuraState, f: u64, t: &mut u64, dt: u64| { *t += dt; vfx::gesture_step(st, f, *t) };
+    assert_eq!(feed(&mut st, READY, &mut t, 10), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, READY, &mut t, 200), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, READY, &mut t, 300), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, READY, &mut t, 400), vfx::Gesture::Toggle);
+    assert!(st.on);
+    assert_eq!(st.index, 0);
+    for f in [sneak, READY, sneak, READY] {
+        assert_eq!(feed(&mut st, f, &mut t, 150), vfx::Gesture::None);
+    }
+    assert_eq!(feed(&mut st, READY, &mut t, 700), vfx::Gesture::Next);
+    assert!(st.on);
+    assert_eq!(st.index, 1);
+    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, sneak, &mut t, 3000), vfx::Gesture::None, "one crouch is not a gesture");
+    assert_eq!(feed(&mut st, READY, &mut t, 100), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, sneak, &mut t, 100), vfx::Gesture::None);
+    assert_eq!(feed(&mut st, sneak, &mut t, 700), vfx::Gesture::Toggle);
+    assert!(!st.on);
+    for f in [READY, sneak, READY, sneak] {
+        feed(&mut st, f, &mut t, 100);
+    }
+    assert_eq!(feed(&mut st, sneak, &mut t, 700), vfx::Gesture::Next);
+    assert!(st.on);
+    assert_eq!(st.index, 1, "turning on with the switch gesture keeps the last effect");
+    for a in vfx::AURAS.iter() {
+        assert!(!a.effects.is_empty());
+    }
+}
