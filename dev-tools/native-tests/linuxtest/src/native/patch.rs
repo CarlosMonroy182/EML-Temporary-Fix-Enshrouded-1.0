@@ -445,13 +445,16 @@ pub fn install() -> Outcome {
         return Outcome::Retry;
     };
 
-    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() {
+    let vfx = super::vfx::wanted();
+    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx {
         super::spawn_probe::install(&sections);
     }
 
     install_chat(&sections);
-    if super::config::LIVE.spawner() {
+    if super::config::LIVE.spawner() || vfx {
         install_pump(&sections);
+    }
+    if super::config::LIVE.spawner() {
         install_permissions(&sections);
     }
 

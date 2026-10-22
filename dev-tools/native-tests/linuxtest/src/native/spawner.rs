@@ -1526,8 +1526,10 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     if ret == 0 {
         return;
     }
-    loot_container_check(manager, desc, ret);
-    harvest_loot_node(manager, edx, desc);
+    if LIVE.spawner() {
+        loot_container_check(manager, desc, ret);
+        harvest_loot_node(manager, edx, desc);
+    }
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
     let server = is_server(manager);
     if settled && edx != 1 && !server {
