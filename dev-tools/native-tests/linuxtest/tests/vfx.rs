@@ -108,7 +108,7 @@ fn elements_follow_the_damage_columns() {
     assert_eq!(t[&78].element, Healing);
     assert_eq!(vfx::staff_effects(Healing)[0], "VFX_Resource_Increase_Health");
     assert!(!vfx::body_glow(Healing) && vfx::body_glow(Fire) && !vfx::body_glow(Arcane));
-    assert_eq!(vfx::staff_effects(Ice), &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"]);
+    assert_eq!(vfx::staff_effects(Ice), &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Ice"]);
     assert_eq!(t[&518418528].element, Fire);
     assert!(!t[&518418528].wand);
     assert_eq!(t[&1048548069].element, Lightning);

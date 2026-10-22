@@ -552,7 +552,7 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
     match e {
         Element::Lightning | Element::Physical => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Electro_Impact"],
         Element::Fire => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Fireball_Impact"],
-        Element::Ice => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"],
+        Element::Ice => &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Ice"],
         Element::Shroud => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"],
         Element::Healing => &["VFX_Resource_Increase_Health"],
         Element::Poison => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Blunt"],
