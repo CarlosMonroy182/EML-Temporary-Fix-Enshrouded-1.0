@@ -479,3 +479,14 @@ fn custom_glows_need_the_current_lua_mod_next_to_the_game() {
     assert!(vfx::glow_mod_installed(&dir));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn dedicated_server_is_recognised_by_its_exe() {
+    use std::path::Path;
+    assert!(vfx::is_server_exe(Path::new("C:/srv/enshrouded_server.exe")));
+    assert!(vfx::is_server_exe(Path::new("/home/x/EnshroudedServer.exe")));
+    assert!(!vfx::is_server_exe(Path::new("D:/SteamLibrary/steamapps/common/Enshrouded/enshrouded.exe")));
+    vfx::set_dedicated(true);
+    assert!(vfx::dedicated());
+    vfx::set_dedicated(false);
+}
