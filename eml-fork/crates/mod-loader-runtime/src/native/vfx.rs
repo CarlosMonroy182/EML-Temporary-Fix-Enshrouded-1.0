@@ -567,21 +567,6 @@ pub fn body_glow(e: Element) -> bool {
     matches!(e, Element::Fire)
 }
 
-/// Effects shown one by one with the test key (when no release effects are configured), to pick
-/// new looks in game without restarting.
-pub const TEST_EFFECTS: [(&str, &str); 10] = [
-    ("heal: Resource_Increase_Health", "2c411630-8a38-41a3-b3d2-a263609a1bdb"),
-    ("heal: Elite_Heal_Ally", "100772b0-a866-4d80-b9a8-a6052ccd0149"),
-    ("heal: ChainHeal_SourceTarget_player", "fc4f8028-078d-4051-8cf1-33ddb08e72a6"),
-    ("heal: ChainHeal_SourceTarget_NoTarget", "c15e5bc4-6dc7-4b86-a27c-91d1db7cd5aa"),
-    ("heal: Vukah_Shaman_Heal_SourceTarget", "e26d09f9-b199-4200-a7c0-7e311a096b65"),
-    ("ice: Wand_Heavy_Piercing_Impact_Ice", "b567533b-89a4-439b-a405-67f68b3034d1"),
-    ("ice: Snowball_Impact", "9d95e5c6-a285-4136-9779-27be2ce217fa"),
-    ("ice: Totem_Projectile_Shoot_Ice", "777de934-91c7-4efd-beb2-1a5124870be1"),
-    ("ice: EvadeAttack_Impact_Ice", "aea9621e-914f-4838-bf0e-076046a82a2d"),
-    ("ice: Icicle_Explosion", "13c71898-b4ad-4783-aadd-aeae447b9c3f"),
-];
-
 /// Size of the staff aura of an element relative to the configured scale.
 pub fn staff_scale(e: Element) -> f32 {
     match e {
@@ -1066,7 +1051,6 @@ fn run_loop(dir: std::path::PathBuf) {
     let mut states: HashMap<u32, PlayerCharge> = HashMap::new();
     let mut auras: HashMap<u32, AuraState> = HashMap::new();
     let mut key_was_down = false;
-    let mut test_index = 0usize;
     let mut reported_players = usize::MAX;
     let mut waiting_logged = false;
     loop {
@@ -1105,13 +1089,6 @@ fn run_loop(dir: std::path::PathBuf) {
         if down && !key_was_down {
             let host = spawner::host_player();
             match position_of(manager, host) {
-                Some((at, facing)) if cfg.release.effects.is_empty() => {
-                    let (name, guid) = TEST_EFFECTS[test_index % TEST_EFFECTS.len()];
-                    log(&format!("vfx: test key {}/{}: {name}", test_index % TEST_EFFECTS.len() + 1, TEST_EFFECTS.len()));
-                    test_index += 1;
-                    let burst = Burst { effects: vec![guid.to_string()], life_ms: Some(LINGER_MS), scale: 1.5, height: 0.9, distance: 0.0, ring: 1, radius: 0.0 };
-                    queue_burst(at, facing, &burst);
-                }
                 Some((at, facing)) => {
                     log("vfx: test key, release burst on the host");
                     queue_burst(at, facing, &cfg.release);
