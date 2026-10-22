@@ -287,6 +287,14 @@ fn now_ms() -> u64 {
     CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+static WANTED: AtomicBool = AtomicBool::new(false);
+
+/// True when the module runs, so the creation and tick hooks are installed even without the
+/// admin panel's spawner.
+pub fn wanted() -> bool {
+    WANTED.load(Ordering::Relaxed)
+}
+
 pub fn pending() -> bool {
     QUEUED.load(Ordering::Relaxed) != 0
 }
@@ -677,6 +685,10 @@ pub struct ItemKind {
 
 static ITEMS: Mutex<Option<HashMap<u32, ItemKind>>> = Mutex::new(None);
 
+/// Weapons and spells of the game with their damage columns, so the mod works without the
+/// `export` folder (the export file, when present, adds or overrides entries).
+pub const BUILTIN_ITEMS: &str = include_str!("vfx_items.csv");
+
 /// Reads `item_id`, `debug_name`, `slot` and the damage columns of `export/m182_items.csv`.
 pub fn parse_items(text: &str) -> HashMap<u32, ItemKind> {
     let mut out = HashMap::new();
@@ -713,8 +725,11 @@ pub fn parse_items(text: &str) -> HashMap<u32, ItemKind> {
 pub fn item_kind(item: u32) -> Option<ItemKind> {
     let mut guard = ITEMS.lock().ok()?;
     if guard.is_none() {
+        let mut table = parse_items(BUILTIN_ITEMS);
         let path = std::env::current_dir().ok()?.join("export").join("m182_items.csv");
-        let table = std::fs::read_to_string(path).map(|t| parse_items(&t)).unwrap_or_default();
+        if let Ok(text) = std::fs::read_to_string(path) {
+            table.extend(parse_items(&text));
+        }
         log(&format!("vfx: {} items with damage types loaded", table.len()));
         *guard = Some(table);
     }
@@ -1028,6 +1043,7 @@ pub fn start() {
         return;
     }
     let _ = CLOCK.get_or_init(Instant::now);
+    WANTED.store(true, Ordering::SeqCst);
     let server = std::env::current_exe().map(|p| is_server_exe(&p)).unwrap_or(false);
     set_dedicated(server);
     let glows = !server && glow_mod_installed(&dir);

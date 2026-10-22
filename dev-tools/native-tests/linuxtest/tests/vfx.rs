@@ -495,3 +495,14 @@ fn dedicated_server_is_recognised_by_its_exe() {
     assert!(vfx::dedicated());
     vfx::set_dedicated(false);
 }
+
+#[test]
+fn elements_are_known_without_the_export_folder() {
+    let t = vfx::parse_items(vfx::BUILTIN_ITEMS);
+    assert!(t.len() > 600);
+    use vfx::Element::*;
+    assert_eq!(t[&1899806950].element, Healing, "T1 Heal Channel");
+    assert_eq!(t[&1008092854].element, Poison, "poison daggers");
+    assert!(t.values().any(|k| k.wand));
+    assert!(t.values().filter(|k| k.element == Healing).count() > 10, "heal and vine spells");
+}
