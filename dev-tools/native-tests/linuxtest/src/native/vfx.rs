@@ -549,7 +549,7 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
         Element::Fire => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Fireball_Impact"],
         Element::Ice => &["VFX_Spell_Icicle_Explosion", "VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"],
         Element::Shroud => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"],
-        Element::Healing => &["VFX_Resource_Increase_Health_NoSound", "VFX_Skill_Aura_SunFire_Trigger_OnPlayer"],
+        Element::Healing => &["VFX_Resource_Increase_Health_NoSound"],
         Element::Poison => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Blunt"],
         Element::Bone => &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Blunt"],
         Element::Arcane => &["VFX_Spell_ManaDrain_Mana_OnPlayer", "VFX_Resource_Increase_Mana"],
@@ -562,6 +562,7 @@ pub fn staff_scale(e: Element) -> f32 {
     match e {
         Element::Shroud => 0.6,
         Element::Arcane => 1.25,
+        Element::Healing => 1.5,
         _ => 1.0,
     }
 }
@@ -686,7 +687,13 @@ pub fn parse_items(text: &str) -> HashMap<u32, ItemKind> {
         }
         let name = name_col.and_then(|c| f.get(c)).copied().unwrap_or("");
         let slot = slot_col.and_then(|c| f.get(c)).copied().unwrap_or("");
-        let element = if name.contains("_Spell_Skeleton") { Element::Summon } else { element_of(d) };
+        let element = if name.contains("_Spell_Skeleton") {
+            Element::Summon
+        } else if name.contains("_Spell_Root") || name.contains("_Spell_Heal") {
+            Element::Healing
+        } else {
+            element_of(d)
+        };
         let weapon = matches!(slot, "MeleeWeapon" | "RangeWeapon" | "MidRangeWeapon") || name.starts_with("Weapon_");
         out.insert(id, ItemKind { element, wand: slot == "MidRangeWeapon" || name.contains("_Wand"), weapon });
     }
@@ -1127,7 +1134,7 @@ fn run_loop(dir: std::path::PathBuf) {
                             if cfg.auto {
                                 burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
                                 burst.scale *= staff_scale(element);
-                                if matches!(element, Element::Arcane | Element::Fire) {
+                                if matches!(element, Element::Arcane | Element::Fire | Element::Healing) {
                                     burst.life_ms = Some(LINGER_MS);
                                 }
                             }
