@@ -101,9 +101,12 @@ fn elements_follow_the_damage_columns() {
     assert_eq!(vfx::element_of([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Bone);
     assert_eq!(vfx::element_of([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]), Arcane);
     assert_eq!(vfx::element_of([0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), Physical);
-    let csv = "item_id,guid,debug_name,slot,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison\n518418528,x,Weapon_T4_1H_SwordEpic_01,MeleeWeapon,0.5,0,0,0.5,0,0,0,0,0\n1048548069,y,Ammo_T2_Spell_Lightning_Chain_lvl12,Ammunition,0,0,0,0,0,0,1,0,0\n1250423976,z,Ammo_T3_Spell_Skeleton_lvl17,Ammunition,0.5,0,0,0,0.5,0,0,0,0\n42,w,Weapon_T1_1H_Wand_02_Ice,MidRangeWeapon,0,0,0,0,1,0,0,0,0\nbad,line\n";
+    let csv = "item_id,guid,debug_name,slot,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison\n518418528,x,Weapon_T4_1H_SwordEpic_01,MeleeWeapon,0.5,0,0,0.5,0,0,0,0,0\n1048548069,y,Ammo_T2_Spell_Lightning_Chain_lvl12,Ammunition,0,0,0,0,0,0,1,0,0\n1250423976,z,Ammo_T3_Spell_Skeleton_lvl17,Ammunition,0.5,0,0,0,0.5,0,0,0,0\n42,w,Weapon_T1_1H_Wand_02_Ice,MidRangeWeapon,0,0,0,0,1,0,0,0,0\n77,r,Ammo_T3_Spell_Root_lvl17,Spell,0,0,0,0,0,0,0,-1,0\n78,h,Ammo_T1_Spell_Heal_Channel_lvl5,Spell,0,0,0,0,0,0,0,0.55,0\nbad,line\n";
     let t = vfx::parse_items(csv);
-    assert_eq!(t.len(), 4);
+    assert_eq!(t.len(), 6);
+    assert_eq!(t[&77].element, Healing, "vine (root) ammo gets the green heal flash");
+    assert_eq!(t[&78].element, Healing);
+    assert_eq!(vfx::staff_effects(Healing), &["VFX_Resource_Increase_Health_NoSound"]);
     assert_eq!(t[&518418528].element, Fire);
     assert!(!t[&518418528].wand);
     assert_eq!(t[&1048548069].element, Lightning);
