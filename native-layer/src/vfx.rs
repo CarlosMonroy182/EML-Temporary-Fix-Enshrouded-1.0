@@ -552,9 +552,9 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
     match e {
         Element::Lightning | Element::Physical => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Electro_Impact"],
         Element::Fire => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Fireball_Impact"],
-        Element::Ice => &["VFX_Spell_Icicle_Explosion", "VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"],
+        Element::Ice => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"],
         Element::Shroud => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"],
-        Element::Healing => &["VFX_Resource_Increase_Health", "VFX_Resource_Increase_Health_NoSound"],
+        Element::Healing => &["VFX_Resource_Increase_Health"],
         Element::Poison => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Blunt"],
         Element::Bone => &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Blunt"],
         Element::Arcane => &["VFX_Spell_ManaDrain_Mana_OnPlayer", "VFX_Resource_Increase_Mana"],
@@ -564,7 +564,7 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
 
 /// Staff elements shown as a glow on the body (when the glow mod is installed) instead of bursts.
 pub fn body_glow(e: Element) -> bool {
-    matches!(e, Element::Fire | Element::Healing)
+    matches!(e, Element::Fire)
 }
 
 /// Effects shown one by one with the test key (when no release effects are configured), to pick
@@ -587,7 +587,7 @@ pub fn staff_scale(e: Element) -> f32 {
     match e {
         Element::Shroud => 0.6,
         Element::Arcane => 1.25,
-        Element::Healing => 1.5,
+        Element::Healing | Element::Ice => 0.75,
         _ => 1.0,
     }
 }
