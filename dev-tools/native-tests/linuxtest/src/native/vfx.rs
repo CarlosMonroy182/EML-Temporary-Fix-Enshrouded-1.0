@@ -1114,6 +1114,13 @@ fn run_loop(dir: std::path::PathBuf) {
         if scanned.elapsed() >= Duration::from_secs(3) {
             scanned = Instant::now();
             players = spawner::player_entities(manager);
+            for id in spawner::tracked_players(manager) {
+                if !players.contains(&id) {
+                    note_once("vfx: players taken from the creation hook (player table scan missed them)");
+                    players.push(id);
+                }
+            }
+            players.sort_unstable();
             states.retain(|id, _| players.contains(id));
             auras.retain(|id, _| players.contains(id));
             if players.len() != reported_players {
