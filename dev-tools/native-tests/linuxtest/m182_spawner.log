@@ -4,258 +4,258 @@
 [0ms] zones: 1 active (0 safe, 1 owned bases)
 [0ms] teams: 1 defined [TeamDef { members: [], names: ["ana"], ids: [] }]
 [0ms] player table: slot 0 client 128 state 3 permissions 0x3e name "Bob" (inline utf-8 at +0x20) id unreadable bytes 800000000000000000000300000000003e000000000000000000000000000000426f620000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1ms] player table: slot 1 client 65 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 410000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1ms] teams: entity 2 is in a team but its faction cannot be found, so teammates may still hurt it
-[1ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[0]
-[1ms] base: Bob (slot 0) is a visitor now (permissions 0x3e -> 0x20)
+[0ms] player table: slot 1 client 65 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 410000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[0ms] teams: entity 2 is in a team but its faction cannot be found, so teammates may still hurt it
+[0ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[0]
+[0ms] base: Bob (slot 0) is a visitor now (permissions 0x3e -> 0x20)
 [251ms] teams: 1 defined [TeamDef { members: [], names: ["ana", "BOB"], ids: [] }]
-[252ms] teams: entity 1 is in a team but its faction cannot be found, so teammates may still hurt it
-[252ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 1), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
-[252ms] base: Bob (slot 0) is no longer a visitor (permissions back to 0x3e)
-[508ms] teams: 1 defined [TeamDef { members: [], names: ["ana"], ids: [] }]
-[509ms] teams: the faction of entity 1 is found now
-[509ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
-[759ms] zones: 1 active (0 safe, 1 owned bases)
-[759ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[0]
-[759ms] base: Bob (slot 0) is a visitor now (permissions 0x3f -> 0x21)
-[1012ms] zones: 1 active (0 safe, 1 owned bases)
-[1012ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
-[1012ms] base: Bob (slot 0) is no longer a visitor (permissions back to 0x3f)
-[1014ms] transform component found by position: index=5 of 2 candidates, player at x=10.0 y=20.0 z=30.0 (client)
-[1015ms] powers: god=true stamina=true fly=false
-[1015ms] powers: resource 3 found at component 17 (client)
-[1015ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[1015ms] powers: resource 0 found at component 11 (client)
-[1015ms] powers: resource 1 found at component 12 (client)
-[1016ms] diag server: stamina=490300000000000049030000d0070000f40100006b000000d002000079000000 heat=
-[1016ms] diag server: 4-byte components 
-[1017ms] the world this game hosted is gone; now connected to a remote server
-[1017ms] powers: god=false stamina=true fly=false
-[1017ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 0)] me=1 teams=0 visitors=[]
-[1018ms] powers: resource 1 found at component 12 (server)
-[1018ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
-[1019ms] diag server: 4-byte components 
-[1020ms] loot: first loot node taken from a creature of the world
-[1020ms] spawn requested from the panel
-[1020ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=9.00
-[1020ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 71 m away)
-[1020ms] create returned entity id=777
+[251ms] teams: entity 1 is in a team but its faction cannot be found, so teammates may still hurt it
+[251ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 1), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
+[251ms] base: Bob (slot 0) is no longer a visitor (permissions back to 0x3e)
+[502ms] teams: 1 defined [TeamDef { members: [], names: ["ana"], ids: [] }]
+[502ms] teams: the faction of entity 1 is found now
+[502ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
+[752ms] zones: 1 active (0 safe, 1 owned bases)
+[753ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[0]
+[753ms] base: Bob (slot 0) is a visitor now (permissions 0x3f -> 0x21)
+[1004ms] zones: 1 active (0 safe, 1 owned bases)
+[1004ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 1)] me=1 teams=0 visitors=[]
+[1004ms] base: Bob (slot 0) is no longer a visitor (permissions back to 0x3f)
+[1006ms] transform component found by position: index=5 of 2 candidates, player at x=10.0 y=20.0 z=30.0 (client)
+[1006ms] powers: god=true stamina=true fly=false
+[1006ms] powers: resource 3 found at component 17 (client)
+[1006ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[1007ms] powers: resource 0 found at component 11 (client)
+[1007ms] powers: resource 1 found at component 12 (client)
+[1009ms] diag server: stamina=490300000000000049030000d0070000f40100006b000000d002000079000000 heat=
+[1009ms] diag server: 4-byte components 
+[1011ms] the world this game hosted is gone; now connected to a remote server
+[1011ms] powers: god=false stamina=true fly=false
+[1011ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 0)] me=1 teams=0 visitors=[]
+[1011ms] powers: resource 1 found at component 12 (server)
+[1013ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
+[1014ms] diag server: 4-byte components 
+[1016ms] loot: first loot node taken from a creature of the world
+[1016ms] spawn requested from the panel
+[1016ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=9.00
+[1016ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 71 m away)
+[1016ms] create returned entity id=777
+[1016ms] spawn requested from the panel
+[1016ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=5.00 y=7.00 z=9.00
+[1016ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 4 m away)
+[1017ms] create returned entity id=777
+[1017ms] players: entity 12 is player 12
+[1017ms] player entity id=12 mgr=0x7ff4d8000d60 created with kind 0
+[1017ms] transform component found: index=5 id=2 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=2 (server)
+[1017ms] players: entity 2 is player 2
+[1017ms] spawn requested from the panel
+[1017ms] spawn: placed next to chat client 65 (entity 2)
+[1017ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=40.00 y=7.00 z=60.00
+[1017ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 19 m away)
+[1017ms] create returned entity id=777
+[1017ms] player table: slot 8 client 136 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 880000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[1017ms] players: connected slot 8 (client 136) is not tracked yet: the entity of its slot is not a player (entity 9)
+[1018ms] stats: entity 1 health 1031/1031 -> 50000 (written=true, times=1)
+[1018ms] stats: entity 1 damage 1 -> 3 (x3, written=true)
+[1018ms] transform component found: index=5 id=1 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=2 (server)
+[1018ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=3.00
+[1018ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 76 m away)
+[1018ms] create returned entity id=777
+[1018ms] transform component found: index=5 id=1 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=3 (server)
+[1018ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x2 level 33 near x=5.00 y=7.00 z=-9.00
+[1018ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 82 m away)
+[1018ms] create returned entity id=777
+[1018ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 95 m away)
+[1018ms] create returned entity id=777
+[1019ms] calibration failed (no 56-byte component matched) id=1 mgr=0x7ff4d8000d60 record=0x7ff4d800a730 bytes=000000000000000000000000000000000100000000000000b06d00d8f47f000080ad00d8f47f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 def=0x7ff4d8006db0 defbytes=a00200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002
+[1019ms] calibration failed (record lookup failed) id=99 mgr=0x7ff4d8000d60
+[1020ms] census saved: 1 server and 0 client entities. Do your action, then press the key again.
+[1020ms] census server: 0 new, 0 removed
+[1020ms] census server removed ids: []
+[1020ms] census server new ids: []
+[1020ms] census client: 0 new, 0 removed
+[1020ms] census client removed ids: []
+[1020ms] census client new ids: []
+[1020ms] players: entity definition 0x7ff4d8004f80 (first seen on entity 78) looks like a player
+[1020ms] players: entity 78 (5 components) shares 20% of the host player's 25 components: ignored
+[1020ms] players: entity definition 0x7ff4d8003770 (first seen on entity 77) looks like a player
+[1020ms] players: entity 77 (25 components) shares 100% of the host player's 25 components: accepted
+[1020ms] players: entity 77 is player 18
+[1021ms] transform component found: index=5 id=1 record=0x7ff4d800a730 chunk=0x7ff4d800ad80 slot=2 (server)
 [1021ms] spawn requested from the panel
-[1021ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=5.00 y=7.00 z=9.00
-[1021ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 4 m away)
+[1021ms] spawning c15a5c9d-4956-49ff-9d72-9f522229cf1c (9d5c5ac15649ff499d729f522229cf1c) x1 level 20 near x=5.00 y=7.00 z=3.00
 [1021ms] create returned entity id=777
-[1021ms] players: entity 12 is player 12
-[1021ms] player entity id=12 mgr=0x7f9278000d60 created with kind 0
-[1021ms] transform component found: index=5 id=2 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=2 (server)
-[1021ms] players: entity 2 is player 2
-[1021ms] spawn requested from the panel
-[1021ms] spawn: placed next to chat client 65 (entity 2)
-[1021ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=40.00 y=7.00 z=60.00
-[1021ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 19 m away)
-[1021ms] create returned entity id=777
-[1021ms] player table: slot 8 client 136 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 880000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1021ms] players: connected slot 8 (client 136) is not tracked yet: the entity of its slot is not a player (entity 9)
-[1022ms] stats: entity 1 health 1031/1031 -> 50000 (written=true, times=1)
-[1022ms] stats: entity 1 damage 1 -> 3 (x3, written=true)
-[1022ms] transform component found: index=5 id=1 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=2 (server)
-[1022ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=3.00
-[1022ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 76 m away)
-[1022ms] create returned entity id=777
-[1022ms] transform component found: index=5 id=1 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=3 (server)
-[1022ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x2 level 33 near x=5.00 y=7.00 z=-9.00
-[1022ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 82 m away)
-[1022ms] create returned entity id=777
-[1022ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 95 m away)
-[1022ms] create returned entity id=777
-[1023ms] calibration failed (no 56-byte component matched) id=1 mgr=0x7f9278000d60 record=0x7f927800a730 bytes=000000000000000000000000000000000100000000000000b06d0078927f000080ad0078927f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 def=0x7f9278006db0 defbytes=a00200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002
-[1023ms] calibration failed (record lookup failed) id=99 mgr=0x7f9278000d60
-[1023ms] census saved: 1 server and 0 client entities. Do your action, then press the key again.
-[1023ms] census server: 0 new, 0 removed
-[1023ms] census server removed ids: []
-[1023ms] census server new ids: []
-[1023ms] census client: 0 new, 0 removed
-[1023ms] census client removed ids: []
-[1023ms] census client new ids: []
-[1024ms] players: entity definition 0x7f9278004f80 (first seen on entity 78) looks like a player
-[1024ms] players: entity 78 (5 components) shares 20% of the host player's 25 components: ignored
-[1024ms] players: entity definition 0x7f9278003770 (first seen on entity 77) looks like a player
-[1024ms] players: entity 77 (25 components) shares 100% of the host player's 25 components: accepted
-[1024ms] players: entity 77 is player 18
-[1024ms] transform component found: index=5 id=1 record=0x7f927800a730 chunk=0x7f927800ad80 slot=2 (server)
-[1024ms] spawn requested from the panel
-[1024ms] spawning c15a5c9d-4956-49ff-9d72-9f522229cf1c (9d5c5ac15649ff499d729f522229cf1c) x1 level 20 near x=5.00 y=7.00 z=3.00
-[1024ms] create returned entity id=777
-[1024ms] delivery: entity 777 not readable
-[1025ms] dump #1 player id=1 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=1
-[1025ms] dump #1 idx=5 size=56 data=0000000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
-[1025ms] dump #1 idx=7 size=56 data=ff00000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
-[1025ms] dump #1 idx=9 size=24 data=000000000000000000000000000000000000000000000000
-[1025ms] dump #1 end
-[1025ms] dump #2 player: entity 99 not available
-[1025ms] players: entity 1 is player 1
-[1025ms] player table: slot 0 client 64 state 3 permissions 0x3f name "Bob" (inline utf-8 at +0x20) id unreadable bytes 400000000000000000000300000000003f000000000000000000000000000000426f620000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1025ms] player table: slot 1 client 129 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 810000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1025ms] player table: slot 2 client 130 state 3 permissions 0x3e name "Eve" (inline utf-8 at +0x20) id unreadable bytes 820000000000000000000300000000003e0000000000000000000000000000004576650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-[1025ms] players: entity definition 0x7f9278006db0 (first seen on entity 2) looks like a player
-[1025ms] players: entity 2 is player 2
-[1025ms] players: connected slot 2 (client 130) is not tracked yet: its entity does not exist yet
-[1026ms] zones: 1 active (0 safe, 1 owned bases)
-[1026ms] teams: 1 defined [TeamDef { members: [], names: ["bob"], ids: [] }]
-[1026ms] teams: the faction of entity 2 is found now
-[1026ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 1), (2, 2, "Ana", 0)] me=1 teams=1 visitors=[1]
-[1026ms] base: Ana (slot 1) is a visitor now (permissions 0x3e -> 0x20)
-[1027ms] transform component found: index=5 id=1 record=0x7f9278008a20 chunk=0x7f927800ad80 slot=2 (server)
-[1027ms] spawn requested from the panel
-[1027ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=15.00 y=0.00 z=3.00
-[1027ms] create returned entity id=777
-[1027ms] powers: god=false stamina=false fly=true
-[1027ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 0)] me=1 teams=0 visitors=[]
-[1028ms] fly: gravity switched off
-[1028ms] fly: locomotion found (server) state=true network=true
-[1028ms] fly: locomotion found (server) state=true network=true
-[1028ms] powers: god=false stamina=false fly=true
-[1028ms] fly: gravity switched off
-[1029ms] powers: god=false stamina=false fly=true
-[1029ms] fly: gravity switched off
-[1030ms] fly: client position copies updated = 0
-[1061ms] powers: god=false stamina=false fly=false
-[1062ms] fly: gravity restored
-[1063ms] powers: god=true stamina=false fly=false
-[1063ms] powers: resource 3 found at component 17 (server)
-[1063ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[1063ms] shield: fall damage found at component 18 (server)
-[1063ms] powers: resource 0 found at component 11 (server)
-[1063ms] powers: god=false stamina=false fly=false
-[1063ms] shield: entity 1 restored
-[1066ms] powers: god=false stamina=true fly=false
-[1066ms] states: buff container found (entity 1)
-[1066ms] states: debuff type 5 (entity 77) cleansed at slot offset 240
-[1066ms] states: debuff type 9 (entity 78) cleansed at slot offset 276
-[1067ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
-[1067ms] diag server: 4-byte components 
-[1070ms] stats: entity 1 health 1031/1031 -> 50000 (written=true, times=1)
-[1070ms] stats: entity 1 ready after 0 ms
-[1070ms] stats: entity 1 health 7718/7718 -> 50000 (written=true, times=2)
-[1070ms] loot: spawned creature 1 died
-[1070ms] powers: god=false stamina=true fly=false
-[1071ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0)] me=1 teams=0 visitors=[]
-[1072ms] diag server: stamina=e803000000000000e8030000d0070000f40100006b000000d002000018010000 heat=
-[1073ms] diag server: 4-byte components 
-[1074ms] diag client: stamina= heat=
-[1074ms] diag client: 4-byte components 15:a203d007 20:0000803f
-[1077ms] transform component found: index=5 id=1 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=2 (server)
-[1077ms] spawn requested from the panel
-[1077ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=100.50 y=20.00 z=-30.25
-[1077ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 99 m away)
-[1077ms] create returned entity id=777
-[1078ms] transform component found: index=5 id=1 record=0x7f92780008e0 chunk=0x7f927800ad80 slot=2 (server)
+[1021ms] delivery: entity 777 not readable
+[1021ms] dump #1 player id=1 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=1
+[1021ms] dump #1 idx=5 size=56 data=0000000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
+[1021ms] dump #1 idx=7 size=56 data=ff00000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
+[1021ms] dump #1 idx=9 size=24 data=000000000000000000000000000000000000000000000000
+[1021ms] dump #1 end
+[1021ms] dump #2 player: entity 99 not available
+[1022ms] players: entity 1 is player 1
+[1022ms] player table: slot 0 client 64 state 3 permissions 0x3f name "Bob" (inline utf-8 at +0x20) id unreadable bytes 400000000000000000000300000000003f000000000000000000000000000000426f620000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[1022ms] player table: slot 1 client 129 state 3 permissions 0x3e name "Ana" (inline utf-8 at +0x20) id unreadable bytes 810000000000000000000300000000003e000000000000000000000000000000416e610000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[1022ms] player table: slot 2 client 130 state 3 permissions 0x3e name "Eve" (inline utf-8 at +0x20) id unreadable bytes 820000000000000000000300000000003e0000000000000000000000000000004576650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[1022ms] players: entity definition 0x7ff4d8006db0 (first seen on entity 2) looks like a player
+[1022ms] players: entity 2 is player 2
+[1022ms] players: connected slot 2 (client 130) is not tracked yet: its entity does not exist yet
+[1022ms] zones: 1 active (0 safe, 1 owned bases)
+[1022ms] teams: 1 defined [TeamDef { members: [], names: ["bob"], ids: [] }]
+[1022ms] teams: the faction of entity 2 is found now
+[1022ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 1), (2, 2, "Ana", 0)] me=1 teams=1 visitors=[1]
+[1022ms] base: Ana (slot 1) is a visitor now (permissions 0x3e -> 0x20)
+[1023ms] transform component found: index=5 id=1 record=0x7ff4d8008a20 chunk=0x7ff4d800ad80 slot=2 (server)
+[1023ms] spawn requested from the panel
+[1023ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=15.00 y=0.00 z=3.00
+[1023ms] create returned entity id=777
+[1023ms] powers: god=false stamina=false fly=true
+[1023ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0), (2, 2, "Ana", 0)] me=1 teams=0 visitors=[]
+[1024ms] fly: gravity switched off
+[1024ms] fly: locomotion found (server) state=true network=true
+[1024ms] fly: locomotion found (server) state=true network=true
+[1024ms] powers: god=false stamina=false fly=true
+[1024ms] fly: gravity switched off
+[1024ms] powers: god=false stamina=false fly=true
+[1025ms] fly: gravity switched off
+[1025ms] fly: client position copies updated = 0
+[1056ms] powers: god=false stamina=false fly=false
+[1058ms] fly: gravity restored
+[1059ms] powers: god=true stamina=false fly=false
+[1059ms] powers: resource 3 found at component 17 (server)
+[1059ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[1059ms] shield: fall damage found at component 18 (server)
+[1059ms] powers: resource 0 found at component 11 (server)
+[1059ms] powers: god=false stamina=false fly=false
+[1059ms] shield: entity 1 restored
+[1060ms] powers: god=false stamina=true fly=false
+[1060ms] states: buff container found (entity 1)
+[1060ms] states: debuff type 5 (entity 77) cleansed at slot offset 240
+[1060ms] states: debuff type 9 (entity 78) cleansed at slot offset 276
+[1062ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
+[1063ms] diag server: 4-byte components 
+[1066ms] stats: entity 1 health 1031/1031 -> 50000 (written=true, times=1)
+[1066ms] stats: entity 1 ready after 0 ms
+[1066ms] stats: entity 1 health 7718/7718 -> 50000 (written=true, times=2)
+[1067ms] loot: spawned creature 1 died
+[1067ms] powers: god=false stamina=true fly=false
+[1067ms] players: listed (number, entity, name, team) [(1, 1, "Bob", 0)] me=1 teams=0 visitors=[]
+[1070ms] diag server: stamina=e803000000000000e8030000d0070000f40100006b000000d002000018010000 heat=
+[1071ms] diag server: 4-byte components 
+[1072ms] diag client: stamina= heat=
+[1073ms] diag client: 4-byte components 15:a203d007 20:0000803f
+[1078ms] transform component found: index=5 id=1 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=2 (server)
 [1078ms] spawn requested from the panel
-[1078ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x3 level 33 near x=5.00 y=7.00 z=3.00
-[1078ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 10 m away)
+[1078ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 20 near x=100.50 y=20.00 z=-30.25
+[1078ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 99 m away)
 [1078ms] create returned entity id=777
-[1078ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 6 m away)
-[1078ms] create returned entity id=777
-[1078ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 15 m away)
-[1078ms] create returned entity id=777
-[1078ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=3.00
-[1078ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 76 m away)
-[1078ms] create returned entity id=777
-[1079ms] panel request ignored: invalid file
-[1079ms] players: entity definition 0x7f9278006db0 (first seen on entity 55) looks like a player
-[1079ms] players: entity 55 is player 18
-[1079ms] players: entity 1 is player 1
-[1079ms] zones: 1 active (1 safe, 0 owned bases)
-[1079ms] zones: 1 player(s) inside a safe zone
-[1081ms] zones: effect VFX_Resource_Increase_Health_NoSound found
-[1081ms] zones: effect VFX_Resource_Increase_Health found
-[4433ms] players: listed (number, entity, name, team) [(1, 1, "", 0)] me=1 teams=0 visitors=[]
-[4685ms] zones: 1 active (1 safe, 0 owned bases)
-[4685ms] zones: 0 player(s) inside a safe zone
-[4686ms] powers: god=true stamina=true fly=false
-[4688ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
-[4689ms] diag server: 4-byte components 15:94010000
-[4721ms] powers: god=false stamina=false fly=false
-[4721ms] command: heal
-[4723ms] powers: removed m182_powers_77.json left from an earlier run
-[4723ms] powers: god=false stamina=false fly=false
-[4723ms] powers (chat client 66, entity 3): god=true stamina=true fly=false
-[4723ms] zones: 0 active (0 safe, 0 owned bases)
-[4843ms] powers: chat client 66 left, its powers were dropped
-[4844ms] powers: resource 2 found at component 13 (server)
-[4845ms] powers (chat client 65, entity 2): god=true stamina=true fly=false
-[4845ms] shield: entity 2 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[4876ms] powers (chat client 65, entity 2): god=false stamina=false fly=false
-[4876ms] shield: entity 2 restored
-[4878ms] players: entity 1 is player 1
-[4878ms] zones: 1 active (1 safe, 0 owned bases)
-[5129ms] zones: 1 active (1 safe, 0 owned bases)
-[5129ms] zones: 1 player(s) inside a safe zone
-[5129ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[5381ms] zones: 1 active (1 safe, 0 owned bases)
-[5381ms] zones: 0 player(s) inside a safe zone
-[5381ms] shield: entity 1 restored
-[5382ms] powers: god=true stamina=false fly=false
-[5383ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[5383ms] powers: god=false stamina=false fly=false
-[5383ms] shield: entity 1 restored
-[5385ms] powers: god=true stamina=false fly=false
-[5385ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
-[5385ms] powers: god=false stamina=false fly=false
-[5385ms] shield: entity 1 restored
-[5386ms] players: listed (number, entity, name, team) [(1, 1, "", 0)] me=777 teams=0 visitors=[]
-[5386ms] spawners: 1 active
-[5386ms] spawners: creating 1 for s1
-[5386ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 50 near x=100.00 y=5.00 z=200.00
-[5386ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 146 m away)
-[5386ms] create returned entity id=777
-[10792ms] spawners: s1 creature 777 is at x=110.0 y=5.0 z=205.0, 0 m from the nearest player
-[11892ms] players: listed (number, entity, name, team) [] me=777 teams=0 visitors=[]
-[11893ms] spawners: s1 lost a creature, it comes back in 1 s
-[13995ms] spawners: creating 1 for s1
-[13995ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 50 near x=100.00 y=5.00 z=200.00
-[13995ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 146 m away)
-[13995ms] create returned entity id=777
-[16096ms] spawners: 0 active
-[16098ms] spawners: 2 active
-[16098ms] spawners: creating 1 for near
-[16098ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 10 near x=10.00 y=5.00 z=10.00
-[16098ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 4 m away)
-[16098ms] create returned entity id=777
-[19300ms] spawners: creating 1 for far
-[19300ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 10 near x=1000.00 y=5.00 z=2000.00
-[19300ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 2156 m away)
-[19300ms] create returned entity id=777
-[19303ms] powers: god=false stamina=true fly=false
-[19303ms] players: listed (number, entity, name, team) [] me=1 teams=0 visitors=[]
-[19311ms] diag server: stamina=770200000000000077020000d0070000f40100006b000000d0020000a7ffffff heat=
-[19312ms] diag server: 4-byte components 
-[19314ms] powers: god=false stamina=true fly=false
-[19315ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
-[19316ms] diag server: 4-byte components 
-[19317ms] players: entity 1 is player 1
-[19317ms] players: entity 2 is player 2
-[19317ms] teams: 1 defined [TeamDef { members: [1, 2], names: [], ids: [] }]
-[19317ms] teams: faction at 0x7f927800cde3 7 -> 8
-[19317ms] teams: faction at 0x7f927800cde4 7 -> 8
-[19317ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 1)] me=1 teams=2 visitors=[]
-[19567ms] teams: 1 defined [TeamDef { members: [1], names: [], ids: [] }]
-[19568ms] teams: faction at 0x7f927800cde3 8 -> 7
-[19568ms] teams: faction at 0x7f927800cde4 8 -> 7
-[19568ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 0)] me=1 teams=1 visitors=[]
-[19819ms] teams: 1 defined [TeamDef { members: [1, 2], names: [], ids: [] }]
-[19819ms] teams: faction at 0x7f927800cde3 7 -> 8
-[19819ms] teams: faction at 0x7f927800cde4 7 -> 8
-[19819ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 1)] me=1 teams=2 visitors=[]
-[20069ms] teams: faction at 0x7f927800cde3 8 -> 7
-[20069ms] teams: faction at 0x7f927800cde4 8 -> 7
-[20072ms] watch started: measuring which components change on their own (3 seconds), then reporting the rest
-[23145ms] watch ready: 1 constantly changing components ignored. Do your action now.
-[23528ms] watch server idx=5 old=0000000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000 new=0000000001000077000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
-[24138ms] watch stopped
-[24146ms] watch ended
-[24239ms] players: entity 1 is player 1
-[24239ms] zones: 1 active (1 safe, 0 owned bases)
-[24239ms] teams: 1 defined [TeamDef { members: [1], names: [], ids: [] }]
-[24239ms] players: listed (number, entity, name, team) [(1, 1, "", 1)] me=1 teams=1 visitors=[]
-[24490ms] zones: 1 active (1 safe, 0 owned bases)
-[24490ms] zones: 1 player(s) inside a safe zone
+[1079ms] transform component found: index=5 id=1 record=0x7ff4d80008e0 chunk=0x7ff4d800ad80 slot=2 (server)
+[1079ms] spawn requested from the panel
+[1079ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x3 level 33 near x=5.00 y=7.00 z=3.00
+[1079ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 10 m away)
+[1079ms] create returned entity id=777
+[1079ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 6 m away)
+[1079ms] create returned entity id=777
+[1079ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 15 m away)
+[1079ms] create returned entity id=777
+[1079ms] spawning 642098d4-fc09-48e2-811e-782d438bf551 (d498206409fce248811e782d438bf551) x1 level 20 near x=5.00 y=7.00 z=3.00
+[1079ms] loot: creature rolls from loot node 0000abcd of a creature of the world (same kind, 76 m away)
+[1079ms] create returned entity id=777
+[1080ms] panel request ignored: invalid file
+[1080ms] players: entity definition 0x7ff4d8006db0 (first seen on entity 55) looks like a player
+[1080ms] players: entity 55 is player 18
+[1080ms] players: entity 1 is player 1
+[1080ms] zones: 1 active (1 safe, 0 owned bases)
+[1080ms] zones: 1 player(s) inside a safe zone
+[1083ms] zones: effect VFX_Resource_Increase_Health_NoSound found
+[1083ms] zones: effect VFX_Resource_Increase_Health found
+[4436ms] players: listed (number, entity, name, team) [(1, 1, "", 0)] me=1 teams=0 visitors=[]
+[4690ms] zones: 1 active (1 safe, 0 owned bases)
+[4690ms] zones: 0 player(s) inside a safe zone
+[4692ms] powers: god=true stamina=true fly=false
+[4696ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
+[4697ms] diag server: 4-byte components 15:94010000
+[4731ms] powers: god=false stamina=false fly=false
+[4731ms] command: heal
+[4732ms] powers: removed m182_powers_77.json left from an earlier run
+[4733ms] powers: god=false stamina=false fly=false
+[4733ms] powers (chat client 66, entity 3): god=true stamina=true fly=false
+[4733ms] zones: 0 active (0 safe, 0 owned bases)
+[4853ms] powers: chat client 66 left, its powers were dropped
+[4855ms] powers: resource 2 found at component 13 (server)
+[4855ms] powers (chat client 65, entity 2): god=true stamina=true fly=false
+[4855ms] shield: entity 2 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[4887ms] powers (chat client 65, entity 2): god=false stamina=false fly=false
+[4887ms] shield: entity 2 restored
+[4888ms] players: entity 1 is player 1
+[4888ms] zones: 1 active (1 safe, 0 owned bases)
+[5139ms] zones: 1 active (1 safe, 0 owned bases)
+[5139ms] zones: 1 player(s) inside a safe zone
+[5139ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[5390ms] zones: 1 active (1 safe, 0 owned bases)
+[5390ms] zones: 0 player(s) inside a safe zone
+[5390ms] shield: entity 1 restored
+[5391ms] powers: god=true stamina=false fly=false
+[5391ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[5392ms] powers: god=false stamina=false fly=false
+[5392ms] shield: entity 1 restored
+[5392ms] powers: god=true stamina=false fly=false
+[5392ms] shield: entity 1 original susceptibility 000000000000803f0000803f0000803f0000803f0000000000000000000000000000803f0000803f0000803f000000000000803f000000000000803f0000803f0000803f0000803f0000803f
+[5392ms] powers: god=false stamina=false fly=false
+[5392ms] shield: entity 1 restored
+[5393ms] players: listed (number, entity, name, team) [(1, 1, "", 0)] me=777 teams=0 visitors=[]
+[5393ms] spawners: 1 active
+[5393ms] spawners: creating 1 for s1
+[5393ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 50 near x=100.00 y=5.00 z=200.00
+[5393ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 146 m away)
+[5393ms] create returned entity id=777
+[10798ms] spawners: s1 creature 777 is at x=110.0 y=5.0 z=205.0, 0 m from the nearest player
+[11898ms] players: listed (number, entity, name, team) [] me=777 teams=0 visitors=[]
+[11899ms] spawners: s1 lost a creature, it comes back in 1 s
+[14000ms] spawners: creating 1 for s1
+[14000ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 50 near x=100.00 y=5.00 z=200.00
+[14000ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 146 m away)
+[14000ms] create returned entity id=777
+[16101ms] spawners: 0 active
+[16103ms] spawners: 2 active
+[16103ms] spawners: creating 1 for near
+[16103ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 10 near x=10.00 y=5.00 z=10.00
+[16103ms] loot: creature rolls from loot node 00001111 of a creature of the world (other kind, 4 m away)
+[16103ms] create returned entity id=777
+[19305ms] spawners: creating 1 for far
+[19305ms] spawning c3db66d6-89a5-4a6c-a8e3-d9a1f6009812 (d666dbc3a5896c4aa8e3d9a1f6009812) x1 level 10 near x=1000.00 y=5.00 z=2000.00
+[19305ms] loot: creature rolls from loot node 0000abcd of a creature of the world (other kind, 2156 m away)
+[19305ms] create returned entity id=777
+[19306ms] powers: god=false stamina=true fly=false
+[19306ms] players: listed (number, entity, name, team) [] me=1 teams=0 visitors=[]
+[19308ms] diag server: stamina=770200000000000077020000d0070000f40100006b000000d0020000a7ffffff heat=
+[19308ms] diag server: 4-byte components 
+[19310ms] powers: god=false stamina=true fly=false
+[19312ms] diag server: stamina=d002000000000000d0020000d0070000f40100006b000000d002000000000000 heat=
+[19313ms] diag server: 4-byte components 
+[19314ms] players: entity 1 is player 1
+[19314ms] players: entity 2 is player 2
+[19314ms] teams: 1 defined [TeamDef { members: [1, 2], names: [], ids: [] }]
+[19314ms] teams: faction at 0x7ff4d800cde3 7 -> 8
+[19314ms] teams: faction at 0x7ff4d800cde4 7 -> 8
+[19314ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 1)] me=1 teams=2 visitors=[]
+[19565ms] teams: 1 defined [TeamDef { members: [1], names: [], ids: [] }]
+[19565ms] teams: faction at 0x7ff4d800cde3 8 -> 7
+[19565ms] teams: faction at 0x7ff4d800cde4 8 -> 7
+[19565ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 0)] me=1 teams=1 visitors=[]
+[19816ms] teams: 1 defined [TeamDef { members: [1, 2], names: [], ids: [] }]
+[19816ms] teams: faction at 0x7ff4d800cde3 7 -> 8
+[19816ms] teams: faction at 0x7ff4d800cde4 7 -> 8
+[19816ms] players: listed (number, entity, name, team) [(1, 1, "", 1), (2, 2, "", 1)] me=1 teams=2 visitors=[]
+[20066ms] teams: faction at 0x7ff4d800cde3 8 -> 7
+[20066ms] teams: faction at 0x7ff4d800cde4 8 -> 7
+[20068ms] watch started: measuring which components change on their own (3 seconds), then reporting the rest
+[23117ms] watch ready: 1 constantly changing components ignored. Do your action now.
+[23508ms] watch server idx=5 old=0000000001000000000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000 new=0000000001000077000000000200000000000000030000000000000000000000000000000000803f0000803f0000803f0000803f00000000
+[24106ms] watch stopped
+[24115ms] watch ended
+[24208ms] players: entity 1 is player 1
+[24208ms] zones: 1 active (1 safe, 0 owned bases)
+[24208ms] teams: 1 defined [TeamDef { members: [1], names: [], ids: [] }]
+[24208ms] players: listed (number, entity, name, team) [(1, 1, "", 1)] me=1 teams=1 visitors=[]
+[24458ms] zones: 1 active (1 safe, 0 owned bases)
+[24459ms] zones: 1 player(s) inside a safe zone
