@@ -48,6 +48,8 @@ struct ZonesFile {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct Team {
+    name: String,
+    leaders: Vec<String>,
     members: Vec<u32>,
     names: Vec<String>,
     people: Vec<Person>,
@@ -63,6 +65,8 @@ struct Person {
 /// A team as the native layer needs it: the old player numbers plus the names of its people.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TeamDef {
+    pub name: String,
+    pub leaders: Vec<String>,
     pub members: Vec<u32>,
     pub names: Vec<String>,
     pub ids: Vec<String>,
@@ -104,9 +108,59 @@ pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
             }
             names.extend(t.people.into_iter().map(|p| p.name));
             names.retain(|n| !n.trim().is_empty());
-            TeamDef { members: t.members, names, ids }
+            let leaders = t.leaders.into_iter().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
+            TeamDef { name: t.name, leaders, members: t.members, names, ids }
         })
         .collect()
+}
+
+/// One person of the invitation file (`m182_members.json`): who joined or left which team by chat.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Member {
+    pub team: String,
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MembersFile {
+    pub joined: Vec<Member>,
+    pub left: Vec<Member>,
+}
+
+pub const MEMBERS_FILE: &str = "m182_members.json";
+
+/// Puts the people who joined by invitation into their teams and takes out those who left,
+/// on top of what the admin's panel defined. Teams are found by name.
+pub fn apply_members(teams: &mut [TeamDef], text: &str) {
+    let Ok(file) = serde_json::from_str::<MembersFile>(text) else { return };
+    let find = |teams: &mut [TeamDef], name: &str| teams.iter().position(|t| !t.name.trim().is_empty() && super::roster::same_name(&t.name, name));
+    for m in &file.left {
+        if let Some(i) = find(teams, &m.team) {
+            let t = &mut teams[i];
+            let id = m.id.trim().to_lowercase();
+            if !id.is_empty() {
+                t.ids.retain(|x| *x != id);
+            }
+            if !m.name.trim().is_empty() {
+                t.names.retain(|n| !super::roster::same_name(n, &m.name));
+            }
+        }
+    }
+    for m in &file.joined {
+        if let Some(i) = find(teams, &m.team) {
+            let t = &mut teams[i];
+            let id = m.id.trim().to_lowercase();
+            if !id.is_empty() && !t.ids.contains(&id) {
+                t.ids.push(id);
+            }
+            if !m.name.trim().is_empty() && !t.names.iter().any(|n| super::roster::same_name(n, &m.name)) {
+                t.names.push(m.name.trim().to_string());
+            }
+        }
+    }
 }
 
 /// Team (1-based) of a connected player; 0 when in none. Names win over numbers because
@@ -296,6 +350,17 @@ mod tests {
         assert_eq!(team_for_player(&teams, 9, Some("Otro"), 5, Some("STEAMID:76561199474170255")), 1);
         assert_eq!(team_for_player(&teams, 9, Some("Luis"), 5, Some("steamid:1")), 2);
         assert_eq!(team_for_player(&teams, 9, Some("Nadie"), 5, None), 0);
+    }
+
+    #[test]
+    fn invited_people_join_and_left_people_go() {
+        let mut teams = parse_team_defs(r#"{"teams":[{"name":"Rojo","leaders":["steamid:1"],"people":[{"key":"steamid:1","name":"Ana"},{"key":"steamid:2","name":"Luis"}]},{"name":"Azul","people":[]}]}"#);
+        assert_eq!(teams[0].leaders, vec!["steamid:1".to_string()]);
+        apply_members(&mut teams, r#"{"joined":[{"team":"azul","id":"STEAMID:9","name":"Pedro"}],"left":[{"team":"Rojo","id":"steamid:2","name":"luis"}]}"#);
+        assert_eq!(team_for_player(&teams, 99, Some("Pedro"), 5, Some("steamid:9")), 2);
+        assert_eq!(team_for_player(&teams, 99, Some("Luis"), 6, Some("steamid:2")), 0);
+        assert_eq!(team_for_player(&teams, 99, Some("Ana"), 7, Some("steamid:1")), 1);
+        apply_members(&mut teams, "not json");
     }
 
     #[test]

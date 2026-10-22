@@ -10,6 +10,7 @@ pub mod chat;
 pub mod config;
 pub mod faction;
 pub mod groups;
+pub mod invites;
 pub mod roster;
 mod signatures;
 

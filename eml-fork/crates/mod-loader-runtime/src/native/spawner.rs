@@ -2366,6 +2366,7 @@ struct GroupState {
     teams: Vec<groups::TeamDef>,
     zones_mtime: Option<std::time::SystemTime>,
     teams_mtime: Option<std::time::SystemTime>,
+    members_mtime: Option<std::time::SystemTime>,
     last_fast: Option<Instant>,
     last_slow: Option<Instant>,
     aura_last: Option<Instant>,
@@ -2373,7 +2374,7 @@ struct GroupState {
 
 impl GroupState {
     fn new() -> Self {
-        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, last_fast: None, last_slow: None, aura_last: None }
+        Self { zones: Vec::new(), teams: Vec::new(), zones_mtime: None, teams_mtime: None, members_mtime: None, last_fast: None, last_slow: None, aura_last: None }
     }
 }
 
@@ -2477,9 +2478,15 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     }
     let teams_path = dir.join(groups::TEAMS_FILE);
     let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
-    if teams_mtime != st.groups.teams_mtime {
+    let members_path = dir.join(groups::MEMBERS_FILE);
+    let members_mtime = std::fs::metadata(&members_path).and_then(|m| m.modified()).ok();
+    if teams_mtime != st.groups.teams_mtime || members_mtime != st.groups.members_mtime {
         st.groups.teams_mtime = teams_mtime;
+        st.groups.members_mtime = members_mtime;
         st.groups.teams = std::fs::read_to_string(&teams_path).map(|t| groups::parse_team_defs(&t)).unwrap_or_default();
+        if let Ok(text) = std::fs::read_to_string(&members_path) {
+            groups::apply_members(&mut st.groups.teams, &text);
+        }
         log(&format!("teams: {} defined {:?}", st.groups.teams.len(), st.groups.teams));
     }
 

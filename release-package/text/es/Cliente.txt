@@ -39,6 +39,7 @@ ZONAS Y BASES
 
 EQUIPOS
 - En el servidor pulsa "Buscar jugadores del servidor": el servidor contesta en el chat con los nombres conectados (lo ven todos, es una linea corta). Si no pudo leer algun nombre aparece como "ID N". Si estas tu solo en el servidor, te lista con tu nombre y tu ID de Steam (los toma de Steam en tu PC) y el servidor te reconoce por ese nombre. Tambien puedes añadir un nombre a mano.
+- Lideres de equipo: junto a cada persona de un equipo hay una casilla "lider". Los lideres pueden manejar su equipo desde el chat del juego, sin panel ni administrador: "!equipo invitar <nombre>" (el jugador debe estar conectado), el invitado escribe "!equipo aceptar" (o "!equipo rechazar") antes de 2 minutos, "!equipo salir" para salir, "!equipo expulsar <nombre>" (lider). Todos en el chat ven la respuesta. En ingles: !team invite / accept / decline / leave / kick. Un jugador solo puede estar en un equipo; para cambiar primero sale. Quienes entran o salen asi se guardan en el servidor (m182_members.json) y aplican al instante; el panel no los lista y volver a enviar los equipos desde el panel no los quita. Quita a un lider desde el panel desmarcando la casilla.
 - Velocidad de escritura del chat: si el servidor pierde letras, en m182_panel.json añade "typing_burst": 1 y "typing_gap_ms": 4.
 
 NOTAS

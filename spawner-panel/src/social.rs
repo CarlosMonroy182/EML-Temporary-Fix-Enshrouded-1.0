@@ -57,6 +57,8 @@ pub struct Person {
 pub struct Team {
     pub name: String,
     pub members: Vec<Person>,
+    /// Keys of the people who may invite and remove players by chat.
+    pub leaders: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,7 +308,12 @@ pub fn parse_teams(text: &str) -> Vec<Team> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Some(Team { name: v.get("name")?.as_str()?.to_string(), members })
+            let leaders = v
+                .get("leaders")
+                .and_then(|l| l.as_array())
+                .map(|l| l.iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            Some(Team { name: v.get("name")?.as_str()?.to_string(), members, leaders })
         })
         .collect()
 }
@@ -317,6 +324,7 @@ pub fn teams_json(teams: &[Team], numbers: &[Vec<u32>]) -> Value {
             "name": t.name,
             "members": numbers.get(i).cloned().unwrap_or_default(),
             "people": t.members.iter().map(|p| json!({"key": p.key, "name": p.name})).collect::<Vec<_>>(),
+            "leaders": t.leaders.iter().filter(|k| t.members.iter().any(|m| &m.key == *k)).collect::<Vec<_>>(),
         })).collect::<Vec<_>>()
     })
 }
@@ -346,6 +354,7 @@ pub fn zone_at<'a>(zones: &'a [Zone], x: f64, z: f64) -> Option<&'a Zone> {
 pub fn set_member(teams: &mut [Team], team: usize, person: &Person, member: bool) {
     for (i, t) in teams.iter_mut().enumerate() {
         t.members.retain(|m| m.key != person.key);
+        t.leaders.retain(|k| *k != person.key);
         if member && i == team {
             t.members.push(person.clone());
         }
@@ -752,6 +761,16 @@ impl App {
                             if ui.checkbox(&mut on, label).changed() {
                                 membership.push((i, person.clone(), on));
                             }
+                            if on {
+                                let mut lead = team.leaders.contains(&person.key);
+                                if ui.checkbox(&mut lead, "líder").on_hover_text("Puede invitar y expulsar jugadores desde el chat del juego: !equipo invitar <nombre>").changed() {
+                                    team.leaders.retain(|k| *k != person.key);
+                                    if lead {
+                                        team.leaders.push(person.key.clone());
+                                    }
+                                    changed = true;
+                                }
+                            }
                         }
                         if candidates.is_empty() {
                             ui.label(RichText::new("Sin jugadores.").color(MUTED));
@@ -791,7 +810,7 @@ impl App {
                 } else {
                     self.social.team_name.trim().to_string()
                 };
-                self.social.teams.push(Team { name, members: Vec::new() });
+                self.social.teams.push(Team { name, members: Vec::new(), leaders: Vec::new() });
                 self.social.team_name.clear();
                 changed = true;
             }
@@ -812,6 +831,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaders_are_saved_only_while_they_are_members() {
+        let a = Person { key: "steamid:1".into(), name: "Ana".into() };
+        let mut teams = vec![Team { name: "Rojo".into(), members: vec![a.clone()], leaders: vec!["steamid:1".into()] }];
+        let json = teams_json(&teams, &[vec![]]);
+        assert_eq!(json["teams"][0]["leaders"][0], "steamid:1");
+        assert_eq!(parse_teams(&json.to_string())[0].leaders, vec!["steamid:1".to_string()]);
+        set_member(&mut teams, 0, &a, false);
+        assert!(teams[0].leaders.is_empty());
+        assert_eq!(teams_json(&teams, &[vec![]])["teams"][0]["leaders"], json!([]));
+    }
 
     #[test]
     fn zones_roundtrip_and_lookup() {
@@ -839,7 +870,7 @@ mod tests {
         let a = person("steamid:1", "A");
         let b = person("steamid:2", "B");
         let c = person("name:C", "C");
-        let mut teams = vec![Team { name: "A".into(), members: vec![a.clone()] }, Team { name: "B".into(), members: vec![] }];
+        let mut teams = vec![Team { name: "A".into(), members: vec![a.clone()], leaders: Vec::new() }, Team { name: "B".into(), members: vec![], leaders: Vec::new() }];
         set_member(&mut teams, 1, &a, true);
         assert!(teams[0].members.is_empty());
         assert_eq!(teams[1].members, vec![a.clone()]);
@@ -872,7 +903,7 @@ mod tests {
         // a stray extra entity never becomes a listed player
         let extra = vec![online[0].clone(), online[1].clone(), Online { number: 3, x: 0.0, y: 0.0, z: 0.0, me: false }];
         assert_eq!(pair_players(&log[..1], &extra).len(), 1);
-        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[1].person()] }];
+        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[1].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &seen), vec![vec![1, 2]]);
         assert_eq!(team_numbers(&teams, &loading), vec![vec![1]]);
         // without a readable log the characters of the world are listed by number
@@ -912,7 +943,7 @@ mod tests {
         state.seen.insert(0, Seen { member, online: None });
         assert_eq!(state.seen[0].member.key(), "steamid:76561199474170255");
         assert_eq!(state.seen[0].member.id_label(), "Steam 76561199474170255");
-        let teams = vec![Team { name: "Casa".into(), members: vec![state.seen[0].person()] }];
+        let teams = vec![Team { name: "Casa".into(), members: vec![state.seen[0].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &state.seen), vec![Vec::<u32>::new()]);
         let json = teams_json(&teams, &team_numbers(&teams, &state.seen));
         assert_eq!(json["teams"][0]["people"][0]["name"], "moradoox");
@@ -922,7 +953,7 @@ mod tests {
     fn manual_players_give_team_numbers_without_a_player_list() {
         let seen = manual_players();
         assert_eq!(seen.len(), MANUAL_PLAYERS as usize);
-        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[2].person()] }];
+        let teams = vec![Team { name: "Rojo".into(), members: vec![seen[0].person(), seen[2].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &seen), vec![vec![1, 3]]);
     }
 
@@ -935,7 +966,7 @@ mod tests {
         let seen = roster_seen(&list);
         assert_eq!(seen[1].member.key(), "name:Ana");
         assert!(!seen[0].online.as_ref().unwrap().located());
-        let teams = vec![Team { name: "Casa".into(), members: vec![seen[1].person()] }];
+        let teams = vec![Team { name: "Casa".into(), members: vec![seen[1].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &seen), vec![vec![2]]);
         let json = teams_json(&teams, &team_numbers(&teams, &seen));
         assert_eq!(json["teams"][0]["people"][0]["name"], "Ana");
@@ -991,7 +1022,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut s = SocialState::default();
         s.zones.push(Zone::new("Torre".into(), 5.0, 6.0, 20.0));
-        s.teams.push(Team { name: "Rojo".into(), members: vec![Person { key: "name:Nacht".into(), name: "Nacht".into() }] });
+        s.teams.push(Team { name: "Rojo".into(), members: vec![Person { key: "name:Nacht".into(), name: "Nacht".into() }], leaders: Vec::new() });
         s.save_zones(&dir);
         s.save_teams(&dir);
         let loaded = SocialState::load(&dir);
