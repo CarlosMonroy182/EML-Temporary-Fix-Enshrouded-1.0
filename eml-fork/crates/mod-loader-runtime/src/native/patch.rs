@@ -210,6 +210,20 @@ fn replace_text(text: usize, line: &str) -> bool {
     super::spawner::write_bytes(text, &head)
 }
 
+/// `!equipo ...`: the answer replaces the typed line, so everyone in the chat sees it.
+fn team_command(text: usize, message: &str, client: u32) -> u8 {
+    let asking = (client & 0x3f) + 1;
+    let online: Vec<super::invites::Person> = super::table::entries()
+        .into_iter()
+        .filter_map(|e| Some(super::invites::Person { entity: e.entity(), name: e.name.clone()?, id: e.id.clone() }))
+        .collect();
+    let Some(who) = online.iter().find(|p| p.entity == asking).cloned() else { return 1 };
+    let Ok(dir) = std::env::current_dir() else { return 1 };
+    let Some(line) = super::invites::handle(message, &who, &online, &dir) else { return 1 };
+    super::spawner::log(&format!("teams: {} -> {line}", who.name));
+    if replace_text(text, &line) { 0 } else { 1 }
+}
+
 extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
     if key.is_empty() {
@@ -222,6 +236,9 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     }
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
+    if super::invites::is_command(&message) {
+        return team_command(text, &message, client as u32);
+    }
     if !super::chat::has_prefix(&message) {
         super::chat::note_other(&message, client as u32);
         return 0;

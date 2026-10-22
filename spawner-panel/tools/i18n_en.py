@@ -244,4 +244,6 @@ EN = {
 "Apareciendo…": "Spawning…",
 "Esperando a que cargue el mundo": "Waiting for the world to load",
 "Preparando…": "Preparing…",
+"líder": "leader",
+"Puede invitar y expulsar jugadores desde el chat del juego: !equipo invitar <nombre>": "Can invite and remove players from the in-game chat: !team invite <name>",
 }
