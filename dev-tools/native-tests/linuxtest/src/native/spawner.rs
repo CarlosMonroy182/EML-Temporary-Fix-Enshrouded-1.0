@@ -3508,6 +3508,26 @@ fn resembles_host(p: &Placement, id: u32) -> bool {
     verdict
 }
 
+/// Players created in `manager` that the creation hook saw (the host and joined players),
+/// checked on every call: the entity must still exist and carry the player stamina component.
+pub fn tracked_players(manager: usize) -> Vec<u32> {
+    if TRACKED_MGR.load(Ordering::SeqCst) != manager {
+        return Vec::new();
+    }
+    tracked_ids()
+        .into_iter()
+        .filter(|&id| {
+            entity_layout(manager, id)
+                .map(|(_, _, slots)| {
+                    slots.iter().any(|slot| {
+                        slot.stride == 40 && matches!(read_bytes(slot.addr, 4), Some(b) if b.len() >= 4 && u32_at(&b, 0) == STAMINA_SIGNATURE)
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 pub fn tracked_ids() -> Vec<u32> {
     TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default()
 }
