@@ -106,7 +106,8 @@ fn elements_follow_the_damage_columns() {
     assert_eq!(t.len(), 6);
     assert_eq!(t[&77].element, Healing, "vine (root) ammo gets the green heal flash");
     assert_eq!(t[&78].element, Healing);
-    assert_eq!(vfx::staff_effects(Healing)[0], "VFX_Skill_Martyr_Heal");
+    assert_eq!(vfx::staff_effects(Healing)[0], "VFX_Resource_Increase_Health");
+    assert!(vfx::body_glow(Healing) && vfx::body_glow(Fire) && !vfx::body_glow(Arcane));
     assert_eq!(t[&518418528].element, Fire);
     assert!(!t[&518418528].wand);
     assert_eq!(t[&1048548069].element, Lightning);
