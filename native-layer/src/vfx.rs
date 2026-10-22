@@ -601,6 +601,22 @@ pub fn glows_ready() -> bool {
     GLOWS.load(Ordering::Relaxed)
 }
 
+static DEDICATED: AtomicBool = AtomicBool::new(false);
+
+/// True on a dedicated server: only the staff charge effects (game effects, seen by everyone)
+/// are created there, so the server is not loaded with per-player effects.
+pub fn dedicated() -> bool {
+    DEDICATED.load(Ordering::Relaxed)
+}
+
+pub fn set_dedicated(on: bool) {
+    DEDICATED.store(on, Ordering::Relaxed);
+}
+
+pub fn is_server_exe(path: &std::path::Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).map(|n| n.to_ascii_lowercase().contains("server")).unwrap_or(false)
+}
+
 pub fn set_glows_ready(on: bool) {
     GLOWS.store(on, Ordering::Relaxed);
 }
@@ -997,10 +1013,16 @@ pub fn start() {
         return;
     }
     let _ = CLOCK.get_or_init(Instant::now);
-    let glows = glow_mod_installed(&dir);
+    let server = std::env::current_exe().map(|p| is_server_exe(&p)).unwrap_or(false);
+    set_dedicated(server);
+    let glows = !server && glow_mod_installed(&dir);
     set_glows_ready(glows);
-    tracing::info!(target: "m182::vfx", dir = ?dir, log = LOG_FILE, glows, "M182 VFX started");
-    log(&format!("vfx: started (custom glows {})", if glows { "on" } else { "off: mods/m182_vfx not installed, game effects only" }));
+    tracing::info!(target: "m182::vfx", dir = ?dir, log = LOG_FILE, glows, server, "M182 VFX started");
+    if server {
+        log("vfx: started on a dedicated server: staff charge effects only");
+    } else {
+        log(&format!("vfx: started (custom glows {})", if glows { "on" } else { "off: mods/m182_vfx not installed, game effects only" }));
+    }
     if let Err(e) = std::thread::Builder::new().name("m182-vfx".into()).spawn(move || run_loop(dir)) {
         tracing::warn!(target: "m182::vfx", error = %e, "could not start vfx thread");
     }
@@ -1079,7 +1101,7 @@ fn run_loop(dir: std::path::PathBuf) {
                 100
             } else if cfg.auto && st.element == Some(Element::Arcane) {
                 150
-            } else if cfg.auto && st.element == Some(Element::Fire) && glows_ready() {
+            } else if cfg.auto && st.element == Some(Element::Fire) && glows_ready() && !dedicated() {
                 HAND_EVERY_MS
             } else {
                 cfg.charge_every_ms
@@ -1098,7 +1120,7 @@ fn run_loop(dir: std::path::PathBuf) {
                             st.element = Some(element);
                             log(&format!("vfx: entity {id} staff element {element:?}"));
                         }
-                        let burning = if cfg.auto && element == Element::Fire && glows_ready() { hand_template(Element::Fire) } else { None };
+                        let burning = if cfg.auto && element == Element::Fire && glows_ready() && !dedicated() { hand_template(Element::Fire) } else { None };
                         if let Some(template) = burning {
                             let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
                             queue_slot(template, id, SLOT_CHEST, chest, HAND_LIFE_MS);
@@ -1119,7 +1141,7 @@ fn run_loop(dir: std::path::PathBuf) {
                     if let Some((at, facing)) = position_of(manager, id) {
                         queue_burst(at, facing, &cfg.melee_charge);
                     }
-                    if cfg.auto {
+                    if cfg.auto && !dedicated() {
                         let element = main_hand(manager, id).and_then(|(_, item)| item_element(item)).unwrap_or(Element::Physical);
                         if st.element != Some(element) {
                             st.element = Some(element);
@@ -1156,7 +1178,7 @@ fn run_loop(dir: std::path::PathBuf) {
                 Gesture::None => {}
             }
             let a = &aura_list()[aura.index % aura_list().len()];
-            if aura.on && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
+            if aura.on && !dedicated() && !charging && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(aura.last_spawn) >= a.every_ms {
                 aura.last_spawn = now;
                 if let Some((at, facing)) = position_of(manager, id) {
                     if let Some(template) = a.glow.and_then(glow_template) {

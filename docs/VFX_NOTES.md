@@ -48,3 +48,8 @@
 - The native module only uses the glows when `mods/m182_vfx/src/mod.lua` (with the "glow carriers ready"
   marker) is next to the game; otherwise game effects only (7 walking auras).
 - Offline check passed: `emm run --patch` + `kfc-parser unpack -f <guid>_39768775_0` shows the added parts.
+
+## Dedicated server mode (2026-10-21, night)
+- The server lagged with per-player glows and walking auras. On a dedicated server (exe name contains
+  "server") the module now creates only the staff charge effects (game effects, seen by everyone). Glows,
+  hand glow and walking auras run only when hosting a world locally.
