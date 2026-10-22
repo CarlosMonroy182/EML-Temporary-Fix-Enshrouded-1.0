@@ -59,6 +59,7 @@ const CATALOG: &[(&str, &str)] = &[
     ("VFX_Consumable_LightWisp", "ba445d10-0b7b-402e-853b-e49b7ff50876"),
     ("VFX_Resource_Increase_Health_NoSound", "b8e9aca9-8713-4c4c-b51c-1591e74873b4"),
     ("VFX_Skill_Martyr_Heal", "21443035-d89f-40c5-bf61-009b8aaa413a"),
+    ("VFX_Resource_Increase_Health", "2c411630-8a38-41a3-b3d2-a263609a1bdb"),
     ("VFX_Enemy_Skeleton_Melee_Elite_Heal_Ally_Player_Companion", "35183e7f-6b43-45da-a58c-c057f0c2f82e"),
     ("VFX_Spell_ManaDrain_Mana_OnPlayer", "e39c8dd9-d54a-4bef-8a09-8c5d739ea4e5"),
     ("VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn", "9852b802-6210-4122-82f6-d2bf5e0c277a"),
@@ -551,12 +552,17 @@ pub fn staff_effects(e: Element) -> &'static [&'static str] {
         Element::Fire => &["VFX_Skill_Aura_SunFire_Trigger_OnPlayer", "VFX_Trap_Fireball_Impact"],
         Element::Ice => &["VFX_Spell_Icicle_Explosion", "VFX_Player_Projectile_Wand_EvadeAttack_Impact_Ice"],
         Element::Shroud => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fog"],
-        Element::Healing => &["VFX_Skill_Martyr_Heal", "VFX_Enemy_Skeleton_Melee_Elite_Heal_Ally_Player_Companion"],
+        Element::Healing => &["VFX_Resource_Increase_Health", "VFX_Resource_Increase_Health_NoSound"],
         Element::Poison => &["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Blunt"],
         Element::Bone => &["VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Blunt"],
         Element::Arcane => &["VFX_Spell_ManaDrain_Mana_OnPlayer", "VFX_Resource_Increase_Mana"],
         Element::Summon => &["VFX_Player_Companion_Skeleton_GemOfNecromancy_Spawn"],
     }
+}
+
+/// Staff elements shown as a glow on the body (when the glow mod is installed) instead of bursts.
+pub fn body_glow(e: Element) -> bool {
+    matches!(e, Element::Fire | Element::Healing)
 }
 
 /// Size of the staff aura of an element relative to the configured scale.
@@ -1108,7 +1114,7 @@ fn run_loop(dir: std::path::PathBuf) {
                 100
             } else if cfg.auto && st.element == Some(Element::Arcane) {
                 150
-            } else if cfg.auto && st.element == Some(Element::Fire) && glows_ready() && !dedicated() {
+            } else if cfg.auto && st.element.map(body_glow).unwrap_or(false) && glows_ready() && !dedicated() {
                 HAND_EVERY_MS
             } else {
                 cfg.charge_every_ms
@@ -1127,7 +1133,7 @@ fn run_loop(dir: std::path::PathBuf) {
                             st.element = Some(element);
                             log(&format!("vfx: entity {id} staff element {element:?}"));
                         }
-                        let burning = if cfg.auto && element == Element::Fire && glows_ready() && !dedicated() { hand_template(Element::Fire) } else { None };
+                        let burning = if cfg.auto && body_glow(element) && glows_ready() && !dedicated() { hand_template(element) } else { None };
                         if let Some(template) = burning {
                             let chest = slot_world(manager, id, SLOT_CHEST as usize).map(|(c, _)| c).unwrap_or(at);
                             queue_slot(template, id, SLOT_CHEST, chest, HAND_LIFE_MS);
