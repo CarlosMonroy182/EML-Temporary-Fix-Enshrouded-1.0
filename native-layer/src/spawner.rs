@@ -545,6 +545,55 @@ static SPAWN_TAG: Mutex<Option<String>> = Mutex::new(None);
 static CREATED: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
 const REQUEST_FILE: &str = "m182_spawn.request";
 
+static DELIVERIES: Mutex<std::collections::VecDeque<(GiveSpec, String, u32)>> = Mutex::new(std::collections::VecDeque::new());
+
+/// Queues the pickups of a market purchase; they are dropped next to the buyer one at a time.
+pub fn queue_delivery(d: &super::market::Delivery) {
+    let guid = super::config::parse_guid(&d.offer.guid).unwrap_or([0u8; 16]);
+    let spec = GiveSpec { item: d.offer.item, level: d.offer.level.clamp(1, 255), rarity: d.offer.rarity.min(4), amount: d.offer.amount.clamp(1, 65535), guid };
+    if let Ok(mut q) = DELIVERIES.lock() {
+        for _ in 0..d.copies.min(20) {
+            q.push_back((spec, d.template.clone(), d.entity));
+        }
+    }
+}
+
+fn deliveries_tick() {
+    if PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true) {
+        return;
+    }
+    let Some((spec, template, entity)) = DELIVERIES.lock().ok().and_then(|mut q| q.pop_front()) else { return };
+    let settings = SpawnSettings {
+        template,
+        level: 1,
+        count: 1,
+        distance: 2.0,
+        health: 0,
+        damage: 1.0,
+        key: 0,
+        dump_player_key: 0,
+        dump_spawned_key: 0,
+        watch_key: 0,
+    };
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(settings);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = Some(spec);
+    }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = None;
+    }
+    REQUEST_SENDER.store(entity, Ordering::SeqCst);
+    REQUEST_OBJECT.store(true, Ordering::SeqCst);
+    REQUEST_FORWARD.store(false, Ordering::SeqCst);
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = None;
+    }
+    PENDING.store(1, Ordering::SeqCst);
+    log(&format!("market: dropping item {} next to entity {entity}", spec.item));
+}
+
 pub fn poll_request() {
     let Ok(dir) = std::env::current_dir() else { return };
     let path = dir.join(REQUEST_FILE);
@@ -2550,6 +2599,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     id,
                     serde_json::Value::String(p.name.clone().unwrap_or_default())
                 ));
+                super::market::note_position(id, st.groups.zones.iter().filter(|zone| groups::inside(std::slice::from_ref(zone), x, z)).map(|zone| zone.name.clone()).collect());
                 let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
                 if in_safe {
                     inside_ids.push(id);
@@ -3015,6 +3065,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
     }
     let Some((manager, id)) = world_pair() else { return };
     let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
+    if hosting && tick % 8 == 0 {
+        deliveries_tick();
+    }
     if hosting && tick % 4 == 0 {
         groups_tick(st, dir);
     }

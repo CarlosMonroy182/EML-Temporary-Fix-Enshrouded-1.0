@@ -5,6 +5,7 @@ pub mod rawguard;
 mod emblems;
 mod icons;
 mod items;
+mod market;
 mod powers;
 pub mod remote;
 mod server;
@@ -93,6 +94,7 @@ pub enum Tab {
     Pvp,
     SafeZones,
     Teams,
+    Market,
     Places,
     Settings,
 }
@@ -126,6 +128,7 @@ pub struct App {
     downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
     social: social::SocialState,
+    market: market::MarketState,
     level: u32,
     count: u32,
     distance: f32,
@@ -516,6 +519,7 @@ impl App {
             Ok("places") => Tab::Places,
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
+            Ok("market") => Tab::Market,
             Ok("zones") => Tab::SafeZones,
             Ok("items") => Tab::Items,
             Ok("powers") => Tab::Powers,
@@ -533,6 +537,7 @@ impl App {
             downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
             social: social::SocialState::load(&dir),
+            market: market::MarketState::load(&dir),
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
             distance: get_f("spawn_distance", 5.0).clamp(1.0, 60.0),
@@ -784,7 +789,7 @@ impl App {
     /// Manual button: sends the server everything the panel has configured.
     pub fn resend_state(&mut self) -> usize {
         let mut sent = 0;
-        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json"] {
+        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json", market::MARKET_FILE] {
             if let Ok(text) = std::fs::read_to_string(self.dir.join(name)) {
                 if remote::submit(name, &text).is_ok() {
                     sent += 1;
@@ -827,6 +832,7 @@ impl App {
             (Tab::Pvp, "PvP", false),
             (Tab::SafeZones, "Zonas y bases", false),
             (Tab::Teams, "Equipos", false),
+            (Tab::Market, "Mercado", false),
             (Tab::Settings, "Ajustes", false),
         ] {
             let selected = self.tab == tab;
@@ -1289,6 +1295,7 @@ impl eframe::App for App {
                     Tab::Pvp => self.pvp_tab(ui),
                     Tab::SafeZones => self.zones_tab(ui),
                     Tab::Settings => self.settings_tab(ui),
+                    Tab::Market => self.market_tab(ui),
                     _ => self.teams_tab(ui),
                 });
             }
@@ -1343,6 +1350,7 @@ mod tests {
             downloader: None,
             powers: Default::default(),
             social: Default::default(),
+            market: Default::default(),
             level: 30,
             count: 2,
             distance: 7.0,

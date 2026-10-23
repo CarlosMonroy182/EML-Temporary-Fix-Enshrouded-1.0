@@ -1,0 +1,11 @@
+# M182 VFX log
+[0ms] vfx: combat state found on entity 9: index=130 flags=0x4000020000001 (1 candidate(s): [130])
+[0ms] vfx: effect created id=4321 scale=1.0
+[1ms] vfx: effect VFX_Spell_ManaDrain_Mana_OnPlayer found
+[1ms] vfx: effect created id=4321 scale=1.5
+[1ms] vfx: effect VFX_Trap_Electro_Impact found
+[1ms] vfx: effect created id=4321 scale=2.0
+[1ms] vfx: effect VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion found
+[1ms] vfx: effect missing_effect is not in export/m182_objects.csv
+[1ms] vfx: effect created id=4321 scale=4.0
+[1ms] vfx: effect created id=4321 scale=4.0

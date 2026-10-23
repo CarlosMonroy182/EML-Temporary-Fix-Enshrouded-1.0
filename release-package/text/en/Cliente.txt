@@ -42,6 +42,11 @@ TEAMS
 - Team leaders: next to each person of a team there is a "leader" box. Leaders can manage their team from the game chat, with no panel and no administrator: "!team invite <name>" (the player must be connected), the invited player types "!team accept" (or "!team decline") within 2 minutes, "!team leave" to leave, "!team kick <name>" (leader). Everyone in the chat sees the answer. In Spanish: !equipo invitar / aceptar / rechazar / salir / expulsar. A player can only be in one team; to change team they leave first. People who join or leave this way are saved on the server (m182_members.json) and take effect at once; the panel does not list them, and sending the teams again from the panel does not remove them. Remove a leader from the panel by unticking the box.
 - Chat typing speed: if the server loses letters, add "typing_burst": 1 and "typing_gap_ms": 4 to m182_panel.json.
 
+MARKET
+- "Market" tab: pick the currency name, the starting money, the zone where buying works (or anywhere), add items with the search box, set price, amount per purchase, level and rarity, then press "Save and send to the server". Give or take coins under "Give or take coins" (Steam ID or name).
+- Players use the game chat, no key needed: "!market balance", "!market list [page]", "!market buy <number or name> [amount]", "!market pay <player> <amount>". In Spanish: !mercado saldo / lista / comprar / pagar. What they buy drops next to them.
+- Balances are saved on the server (m182_wallets.json); the catalog and grants in m182_market.json.
+
 NOTES
 - Loot: summoned creatures drop the game's normal loot.
 - Skills without cost and item/player levels are applied when the game or the server starts: after changing them in Settings the panel also saves them on the server (mods\zz_m182_item_stats\src\m182_data.lua) and you only have to restart the server. Nothing needs to be uploaded by FTP.

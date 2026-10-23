@@ -14,7 +14,7 @@ pub const PREFIXES: [&str; 2] = ["/m182", "!m182"];
 pub const MIN_KEY_LEN: usize = 6;
 
 /// Files a chat command may write; each one is polled by the native layer.
-pub const FILES: [&str; 8] = [
+pub const FILES: [&str; 9] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -23,6 +23,7 @@ pub const FILES: [&str; 8] = [
     "m182_spawners.json",
     "m182_data.json",
     "m182_spawner_op.json",
+    "m182_market.json",
 ];
 
 pub const SPAWNER_OP_FILE: &str = "m182_spawner_op.json";
