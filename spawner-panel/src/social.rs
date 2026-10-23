@@ -770,44 +770,77 @@ impl App {
         let mut remove = None;
         let mut reapply: Option<usize> = None;
         let mut membership: Vec<(usize, Person, bool)> = Vec::new();
+        let columns = ((ui.available_width() / 340.0).floor() as usize).clamp(1, 4);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (i, team) in self.social.teams.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        changed |= ui.add(egui::TextEdit::singleline(&mut team.name).desired_width(200.0)).changed();
-                        if button(ui, "Borrar equipo", Vec2::new(130.0, 26.0), true, false) {
-                            remove = Some(i);
-                        }
-                        if button(ui, "Reaplicar a todos", Vec2::new(170.0, 26.0), !team.members.is_empty(), false) {
-                            reapply = Some(i);
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        for person in &candidates {
-                            let mut on = team.members.iter().any(|m| m.key == person.key);
-                            let found = seen.iter().find(|s| s.member.key() == person.key);
-                            let tag = found.map(|s| s.member.id_label()).unwrap_or_default();
-                            let shown = if tag.is_empty() { person.name.clone() } else { format!("{} · {}", person.name, tag) };
-                            let label = if found.is_some() { shown } else { format!("{} (desconectado)", person.name) };
-                            if ui.checkbox(&mut on, label).changed() {
-                                membership.push((i, person.clone(), on));
-                            }
-                            if on {
-                                let mut lead = team.leaders.contains(&person.key);
-                                if ui.checkbox(&mut lead, "líder").on_hover_text("Puede invitar y expulsar jugadores desde el chat del juego: !equipo invitar <nombre>").changed() {
-                                    team.leaders.retain(|k| *k != person.key);
-                                    if lead {
-                                        team.leaders.push(person.key.clone());
+            let width = ((ui.available_width() - 12.0 * (columns as f32 - 1.0)) / columns as f32).max(240.0);
+            let count = self.social.teams.len();
+            let mut first = 0;
+            while first < count {
+                ui.horizontal_top(|ui| {
+                    for i in first..(first + columns).min(count) {
+                        ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
+                            ui.set_width(width);
+                            let team = &mut self.social.teams[i];
+                            ui.group(|ui| {
+                                ui.set_width(width - 16.0);
+                                changed |= ui.add(egui::TextEdit::singleline(&mut team.name).desired_width(width - 40.0)).changed();
+                                ui.horizontal(|ui| {
+                                    if button(ui, "Reaplicar a todos", Vec2::new(150.0, 24.0), !team.members.is_empty(), false) {
+                                        reapply = Some(i);
                                     }
-                                    changed = true;
+                                    if button(ui, "Borrar equipo", Vec2::new(120.0, 24.0), true, false) {
+                                        remove = Some(i);
+                                    }
+                                });
+                                ui.separator();
+                                if team.members.is_empty() {
+                                    ui.label(RichText::new("Sin miembros.").color(MUTED));
                                 }
-                            }
-                        }
-                        if candidates.is_empty() {
-                            ui.label(RichText::new("Sin jugadores.").color(MUTED));
-                        }
-                    });
+                                for person in team.members.clone() {
+                                    ui.horizontal(|ui| {
+                                        let online = seen.iter().find(|s| s.member.key() == person.key);
+                                        let color = if online.is_some() { PARCHMENT } else { MUTED };
+                                        ui.label(RichText::new(&person.name).color(color));
+                                        if online.is_none() {
+                                            ui.label(RichText::new("(desconectado)").color(MUTED).size(13.0));
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.small_button("✕").on_hover_text("Sacar del equipo").clicked() {
+                                                membership.push((i, person.clone(), false));
+                                            }
+                                            let lead = team.leaders.contains(&person.key);
+                                            if ui
+                                                .selectable_label(lead, "★ líder")
+                                                .on_hover_text("Los líderes pueden invitar y expulsar desde el chat del juego: !equipo invitar <nombre>. Puede haber varios.")
+                                                .clicked()
+                                            {
+                                                team.leaders.retain(|k| *k != person.key);
+                                                if !lead {
+                                                    team.leaders.push(person.key.clone());
+                                                }
+                                                changed = true;
+                                            }
+                                        });
+                                    });
+                                }
+                                let free: Vec<&Person> = candidates.iter().filter(|c| !team.members.iter().any(|m| m.key == c.key)).collect();
+                                if !free.is_empty() {
+                                    egui::ComboBox::from_id_salt(("team_add", i)).selected_text("Añadir jugador…").width(width - 40.0).show_ui(ui, |ui| {
+                                        for person in free {
+                                            let online = seen.iter().any(|s| s.member.key() == person.key);
+                                            let label = if online { person.name.clone() } else { format!("{} (desconectado)", person.name) };
+                                            if ui.selectable_label(false, label).clicked() {
+                                                membership.push((i, person.clone(), true));
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    }
                 });
+                ui.add_space(8.0);
+                first += columns;
             }
         });
         for (team, person, on) in membership {

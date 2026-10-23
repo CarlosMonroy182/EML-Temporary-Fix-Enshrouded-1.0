@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use serde::Deserialize;
 
 use super::invites::Person;
-use super::roster::same_name;
+use super::roster::{clean_typed_name, same_name};
 
 pub const PREFIXES: [&str; 4] = ["!mercado", "/mercado", "!market", "/market"];
 pub const CONFIG_FILE: &str = "m182_market.json";
@@ -204,7 +204,8 @@ fn find_offer(cfg: &Config, what: &str) -> Result<usize, bool> {
 }
 
 fn find_online<'a>(online: &'a [Person], typed: &str) -> Result<&'a Person, bool> {
-    let typed = typed.trim();
+    let typed = clean_typed_name(typed);
+    let typed = typed.as_str();
     if typed.is_empty() {
         return Err(false);
     }
@@ -212,12 +213,17 @@ fn find_online<'a>(online: &'a [Person], typed: &str) -> Result<&'a Person, bool
         return Ok(p);
     }
     let lower = typed.to_lowercase();
-    let starts: Vec<&Person> = online.iter().filter(|p| p.name.to_lowercase().starts_with(&lower)).collect();
-    match starts.as_slice() {
-        [one] => Ok(one),
-        [] => Err(false),
-        _ => Err(true),
+    for hits in [
+        online.iter().filter(|p| p.name.to_lowercase().starts_with(&lower)).collect::<Vec<&Person>>(),
+        online.iter().filter(|p| p.name.to_lowercase().contains(&lower)).collect::<Vec<&Person>>(),
+    ] {
+        match hits.as_slice() {
+            [one] => return Ok(one),
+            [] => {}
+            _ => return Err(true),
+        }
     }
+    Err(false)
 }
 
 pub fn handle(text: &str, who: &Person, online: &[Person], dir: &Path) -> Option<Reply> {
@@ -242,8 +248,8 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
     match sub.as_str() {
         "" | "help" | "ayuda" => say(
             w.pick(
-                "[Mercado] !mercado saldo | lista [página] | comprar <número o nombre> [cantidad] | pagar <jugador> <monto>",
-                "[Market] !market balance | list [page] | buy <number or name> [quantity] | pay <player> <amount>",
+                "[Mercado] !mercado saldo | lista [página] | comprar número o nombre [cantidad] | pagar jugador monto",
+                "[Market] !market balance | list [page] | buy number or name [quantity] | pay player amount",
             )
             .to_string(),
         ),
@@ -272,7 +278,7 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
             }
             let what = words.join(" ");
             if what.is_empty() {
-                return say(w.pick("[Mercado] Uso: !mercado comprar <número o nombre> [cantidad]", "[Market] Use: !market buy <number or name> [quantity]").to_string());
+                return say(w.pick("[Mercado] Uso: !mercado comprar número o nombre [cantidad]", "[Market] Use: !market buy number or name [quantity]").to_string());
             }
             if !(1..=MAX_QTY).contains(&qty) {
                 return say(format!("{} {}.", w.pick("[Mercado] La cantidad va de 1 a", "[Market] Quantity must be 1 to"), MAX_QTY));
@@ -320,7 +326,7 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
                     Some(a) => (a, words[..words.len() - 1].join(" ")),
                     None => match words.first().and_then(|f| f.parse::<u64>().ok()) {
                         Some(a) => (a, words[1..].join(" ")),
-                        None => return say(w.pick("[Mercado] Uso: !mercado pagar <jugador> <monto>", "[Market] Use: !market pay <player> <amount>").to_string()),
+                        None => return say(w.pick("[Mercado] Uso: !mercado pagar jugador monto", "[Market] Use: !market pay player amount").to_string()),
                     },
                 }
             };
@@ -432,6 +438,7 @@ mod tests {
         assert!(r.line.contains("paid 20 Gold to Bea"), "{}", r.line);
         assert!(run(&d, &bea, &online, "!market balance").line.contains("35 Gold"));
         assert!(run(&d, &ana, &online, "!market balance").line.contains("100 Gold"));
+        assert!(run(&d, &ana, &online, "!market pay <Bea> 1").line.contains("paid 1 Gold to Bea"));
         assert!(run(&d, &ana, &online, "!market pay Ana 5").line.contains("yourself"));
         assert!(run(&d, &ana, &online, "!market pay Bea 500").line.contains("Not enough"));
         assert!(run(&d, &ana, &online, "!market pay Zed 5").line.contains("cannot find"));

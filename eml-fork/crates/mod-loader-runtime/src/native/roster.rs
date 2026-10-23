@@ -330,6 +330,12 @@ pub fn parse_self(text: &str) -> Option<u32> {
     Some(n as u32)
 }
 
+/// A name as people type it in chat: the `<name>` of the help text, quotes, an `@` or a final dot are dropped.
+pub fn clean_typed_name(typed: &str) -> String {
+    let t = typed.trim().trim_matches(|c: char| matches!(c, '<' | '>' | '[' | ']' | '(' | ')' | '"' | '\'' | '@' | '`' | '*' | '.' | ',' | ';' | ':' | '!')).trim();
+    t.to_string()
+}
+
 pub fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
