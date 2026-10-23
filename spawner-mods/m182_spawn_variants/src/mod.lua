@@ -267,7 +267,7 @@ local function content_buffer(ref)
     return nil, lastErr
 end
 
-local function read_loca(ref, label)
+local function read_loca(ref, label, force)
     local buffer, how = content_buffer(ref)
     if buffer == nil then
         dlog("loca " .. label .. ": no content (" .. str(how) .. ")")
@@ -287,7 +287,7 @@ local function read_loca(ref, label)
                     for _, tag in ipairs(tags) do
                         local h = hash_of(try(function() return tag.id end))
                         local text = try(function() return tag.text end)
-                        if h ~= nil and text ~= nil and translations[h] == nil then
+                        if h ~= nil and text ~= nil and text ~= "" and (force or translations[h] == nil) then
                             translations[h] = tostring(text)
                             added = added + 1
                         end
@@ -313,19 +313,23 @@ pcall(function()
     for ci, res in ipairs(locaResources) do
         local d = try(function() return res.data end)
         if d ~= nil then
-            local eng = try(function() return d.keenglishData end)
-            if eng ~= nil then read_loca(eng, ci .. "/keenglish") end
+            -- real in-game names live in the En_Us language data; keenglish only has developer strings
             local langs = try(function() return d.languages end)
-            if type(langs) == "table" then
-                for li, entry in ipairs(langs) do
-                    local name = str(try(function() return entry.language end))
-                    if li <= 3 then dlog("loca: language entry " .. name) end
-                    if string.find(string.lower(name), "en", 1, true) == 1 then
-                        local ref = try(function() return entry.data end)
-                        if ref ~= nil then read_loca(ref, ci .. "/" .. name) end
+            if langs ~= nil then
+                pcall(function()
+                    for li, entry in ipairs(langs) do
+                        local name = str(try(function() return entry.language end))
+                        if li <= 3 then dlog("loca: language entry " .. name) end
+                        local low = string.lower(name)
+                        if low == "en_us" or low == "enus" or low == "en-us" then
+                            local ref = try(function() return entry.data end)
+                            if ref ~= nil then read_loca(ref, ci .. "/" .. name, true) end
+                        end
                     end
-                end
+                end)
             end
+            local eng = try(function() return d.keenglishData end)
+            if eng ~= nil then read_loca(eng, ci .. "/keenglish", false) end
         end
     end
 end)

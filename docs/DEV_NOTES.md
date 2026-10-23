@@ -52,3 +52,8 @@ Fix: entity numbers are shared between server and client. The panel reads the se
 ### Position comes from the server
 
 The server's player-list answer now ends with ` ^<entity>@x,y,z`: the entity of whoever asked (chat client `(n & 0x3f) + 1`) and its position as the server sees it. The client writes it to `m182_online.json` as `"me"`. "Create where I am" (zones) and "Save my position" (places) ask for a fresh list and use that position (`App::ask_here`), falling back to the game's own position only when the server did not send one. The same `me.n` is what the panel writes to `m182_self.json`. The panel log has a `position check:` line comparing both positions.
+
+## Every dbghelp.dll build must keep
+- the EML 0.2.0 loader fixes (commit e36ae2f: no crash/errors on close; markers "KFCWriter is no longer available", "Failed to apply resource")
+- the M182 VFX module.
+The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 VFX" fails the build if a marker is missing.

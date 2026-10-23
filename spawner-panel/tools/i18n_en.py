@@ -4,7 +4,7 @@ EN = {
 "Recursos y naturaleza": "Resources and nature",
 "Materiales": "Materials",
 "Gemas": "Gems",
-"Abre el panel con Insert desde dentro del juego antes de enviar.": "Open the panel with Insert from inside the game before sending.",
+"Abre el panel desde dentro del juego antes de enviar.": "Open the panel from inside the game before sending.",
 "No pude pasar el control al juego. Deja el juego visible.": "Could not hand control to the game. Keep the game window visible.",
 "El juego perdió el control mientras se escribía. No toques el teclado ni el ratón durante el envío.": "The game lost control while typing. Do not touch the keyboard or mouse while sending.",
 "Imágenes: leyendo el índice de la wiki ({} páginas)…": "Images: reading the wiki index ({} pages)…",

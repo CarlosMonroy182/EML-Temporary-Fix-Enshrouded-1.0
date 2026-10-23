@@ -76,6 +76,9 @@ pub fn start(dir: PathBuf) -> i32 {
         return 1;
     }
     let host = Host::new(Arc::new(Os));
+    if let Ok(text) = std::fs::read_to_string(dir.join(remote::SETTINGS_FILE)) {
+        crate::host::apply_panel_key(&text);
+    }
     let pace = std::fs::read_to_string(dir.join(remote::SETTINGS_FILE)).map(|t| crate::host::Pace::from_settings(&t)).unwrap_or_default();
     remote::install_typist(Box::new(ChatTypist::new(host.clone(), &chat_key(&dir)).with_pace(pace).with_acks(Box::new(crate::host::LogAcks::new(dir.join("enshrouded.log"))))));
     let guard = crate::rawguard::RawGuard::new(RawOs);
