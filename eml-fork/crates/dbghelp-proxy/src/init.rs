@@ -8,10 +8,15 @@ use crate::{log::error, logging};
 pub fn init(config: Config) {
     logging::setup();
 
-    let current_dir = std::env::current_dir()
-        .expect("Failed to get current directory");
-    let current_dir = Utf8PathBuf::from_path_buf(current_dir)
-        .expect("Current directory path is not valid UTF-8");
+    // Whatever goes wrong here, the game must still start: the mods are simply skipped.
+    let Ok(current_dir) = std::env::current_dir() else {
+        error!("Could not read the current directory, mods are off");
+        return;
+    };
+    let Ok(current_dir) = Utf8PathBuf::from_path_buf(current_dir) else {
+        error!("The game folder path is not valid UTF-8, mods are off");
+        return;
+    };
 
     let env = match ModEnvironment::load(&current_dir) {
         Ok(env) => env,
@@ -21,7 +26,7 @@ pub fn init(config: Config) {
                     error = %error,
                     "Error loading mod environment"
                 );
-                panic!("Error loading mod environment: {error}");
+                return;
             }
 
             let mut report = String::from("Errors loading some mods:");
@@ -45,9 +50,9 @@ pub fn init(config: Config) {
 
             error!(
                 report = %report,
-                "Error loading mod environment"
+                "Error loading mod environment, mods are off"
             );
-            panic!("{report}");
+            return;
         }
     };
 
@@ -76,17 +81,20 @@ pub fn init(config: Config) {
         }
     };
 
-    runtime::loader_attach(
+    if let Err(e) = runtime::loader_attach(
         &env,
         runtime::RuntimeOptions {
             dlls: result.dlls,
         },
-    ).expect("Failed to attach runtime loader");
+    ) {
+        error!(error = %e, "Failed to attach the runtime loader, native features are off");
+    }
 }
 
 pub fn deinit() {
-    runtime::loader_detach()
-        .expect("Failed to detach runtime loader");
+    if let Err(e) = runtime::loader_detach() {
+        error!(error = %e, "Failed to detach the runtime loader");
+    }
 }
 
 fn get_file_name(
@@ -116,6 +124,6 @@ fn get_file_name(
             game_dir = %game_dir,
             "Could not find required game files"
         );
-        panic!("Could not find required game files in {game_dir}");
+        "enshrouded".into()
     }
 }

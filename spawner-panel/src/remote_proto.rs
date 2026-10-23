@@ -80,10 +80,6 @@ pub fn teams(key: &str, seq: u32) -> String {
     format!("{PREFIX} {key} teams {seq}")
 }
 
-pub fn wallets(key: &str, seq: u32) -> String {
-    format!("{PREFIX} {key} wallets {seq}")
-}
-
 pub fn valid_key(key: &str) -> bool {
     key.len() >= 6 && !key.chars().any(char::is_whitespace)
 }

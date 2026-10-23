@@ -136,6 +136,12 @@ fn standing_in(entity: u32, zone: &str) -> bool {
     PRESENT.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&entity).cloned())).is_some_and(|zs| zs.iter().any(|z| same_name(z, zone)))
 }
 
+/// The market only exists where an admin set it up (its config file is next to the game); anywhere
+/// else `!market` is an ordinary chat message.
+pub fn configured() -> bool {
+    std::env::current_dir().map(|d| d.join(CONFIG_FILE).exists()).unwrap_or(false)
+}
+
 pub fn is_command(text: &str) -> bool {
     let t = text.trim_start();
     PREFIXES.iter().any(|p| {

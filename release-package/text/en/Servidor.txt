@@ -24,9 +24,6 @@ Item settings, levels and skills without cost are applied when the server starts
 Personal powers (god mode, energy) only last while that player is connected.
 
 
-MARKET
-- The folder includes the market: balances are saved in m182_wallets.json and the catalog and coin grants in m182_market.json (the panel sends them). Players buy with "!market list" and "!market buy <number or name>", check "!market balance" and give coins with "!market pay <player> <amount>". Spanish: !mercado lista / comprar / saldo / pagar.
-
 VFX
 - The folder mods\m182_vfx is part of this package. On a dedicated server it makes the staff charge effects appear for everyone; nothing else is needed. Upload it with the rest of the folder. To turn it off, delete mods\m182_vfx. Its log is m182_vfx.log.
 - Light mode: on a dedicated server the effects are lighter by default (one effect per charge, at most one every 0.4 s, slower watching while nobody is charging). To use the full effects anyway, create m182_vfx.json in the server folder with {"server_light": false}.
