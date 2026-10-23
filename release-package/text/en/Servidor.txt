@@ -29,5 +29,6 @@ MARKET
 
 VFX
 - The folder mods\m182_vfx is part of this package. On a dedicated server it makes the staff charge effects appear for everyone; nothing else is needed. Upload it with the rest of the folder. To turn it off, delete mods\m182_vfx. Its log is m182_vfx.log.
+- Light mode: on a dedicated server the effects are lighter by default (one effect per charge, at most one every 0.4 s, slower watching while nobody is charging). To use the full effects anyway, create m182_vfx.json in the server folder with {"server_light": false}.
 
 Made by M182.

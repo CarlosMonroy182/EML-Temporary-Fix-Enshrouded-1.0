@@ -112,6 +112,8 @@ pub struct VfxConfig {
     pub min_charge_ms: u64,
     pub test_key: String,
     pub auto: bool,
+    /// On a dedicated server: fewer, shorter effects and a slower watch, to spare the server.
+    pub server_light: bool,
 }
 
 impl Default for Burst {
@@ -143,6 +145,7 @@ impl Default for VfxConfig {
             min_charge_ms: 300,
             test_key: "F9".into(),
             auto: true,
+            server_light: true,
         }
     }
 }
@@ -376,6 +379,12 @@ pub fn server_tick() {
     }
 }
 
+/// Set by the watch loop: the dedicated server runs in light mode (see `VfxConfig::server_light`).
+static LIGHT: AtomicBool = AtomicBool::new(false);
+const LIGHT_BATCH: usize = 8;
+const LIGHT_MIN_EVERY_MS: u64 = 400;
+const LIGHT_IDLE_PAUSE_MS: u64 = 120;
+
 fn run_queue(manager: usize) {
     if QUEUED.swap(0, Ordering::SeqCst) == 0 {
         return;
@@ -386,7 +395,7 @@ fn run_queue(manager: usize) {
     };
     let now = now_ms();
     let fresh: Vec<Spawn> = work.into_iter().filter(|s| now.saturating_sub(s.queued) <= MAX_DELAY_MS).collect();
-    for s in fresh.into_iter().take(24) {
+    for s in fresh.into_iter().take(if LIGHT.load(Ordering::Relaxed) { LIGHT_BATCH } else { 24 }) {
         let id = match s.hand {
             Some((entity, slot)) => create_on_slot(manager, s.template, entity, slot, s.at, s.life_ms.unwrap_or(HAND_LIFE_MS)),
             None => create_effect_for(manager, s.template, s.at, s.scale, s.life_ms),
@@ -1069,8 +1078,9 @@ fn run_loop(dir: std::path::PathBuf) {
     let mut key_was_down = false;
     let mut reported_players = usize::MAX;
     let mut waiting_logged = false;
+    let mut pause = 60u64;
     loop {
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(pause));
         if checked.elapsed() >= Duration::from_secs(2) {
             checked = Instant::now();
             let stamp = config_path(&dir).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
@@ -1092,6 +1102,9 @@ fn run_loop(dir: std::path::PathBuf) {
         if !cfg.enabled {
             continue;
         }
+        let light = cfg.server_light && dedicated();
+        LIGHT.store(light, Ordering::Relaxed);
+        pause = if light && !states.values().any(|x| x.since.is_some()) { LIGHT_IDLE_PAUSE_MS } else { 60 };
         let manager = spawner::server_manager();
         if manager == 0 {
             if !waiting_logged {
@@ -1144,6 +1157,7 @@ fn run_loop(dir: std::path::PathBuf) {
             } else {
                 cfg.charge_every_ms
             };
+            let every = if light { every.max(LIGHT_MIN_EVERY_MS) } else { every };
             match step(st, flags, now, every, cfg.min_charge_ms) {
                 Event::Charge { melee: false } => {
                     let items = ranged_items(manager, id);
@@ -1167,9 +1181,12 @@ fn run_loop(dir: std::path::PathBuf) {
                             if cfg.auto {
                                 burst.effects = staff_effects(element).iter().map(|s| s.to_string()).collect();
                                 burst.scale *= staff_scale(element);
-                                if matches!(element, Element::Arcane | Element::Fire | Element::Healing) {
+                                if matches!(element, Element::Arcane | Element::Fire | Element::Healing) && !light {
                                     burst.life_ms = Some(LINGER_MS);
                                 }
+                            }
+                            if light {
+                                burst.effects.truncate(1);
                             }
                             queue_burst(at, facing, &burst);
                         }
@@ -1230,5 +1247,16 @@ fn run_loop(dir: std::path::PathBuf) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+
+    #[test]
+    fn server_light_is_on_unless_switched_off() {
+        assert!(parse_config("{}").unwrap().server_light);
+        assert!(!parse_config(r#"{"server_light": false}"#).unwrap().server_light);
     }
 }

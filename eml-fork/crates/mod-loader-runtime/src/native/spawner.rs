@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::config::{SpawnSettings, LIVE, SPAWN};
 use super::groups;
+use super::market;
 use super::roster;
 use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
 
@@ -2539,6 +2540,12 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         log(&format!("teams: {} defined {:?}", st.groups.teams.len(), st.groups.teams));
     }
     publish_live_teams(dir, &st.groups.teams);
+    if let Ok(mut d) = MARKET_DIR.lock() {
+        if d.is_none() {
+            *d = Some(dir.to_path_buf());
+        }
+    }
+    super::market::tick(dir);
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
     if manager == 0 {
@@ -2710,6 +2717,13 @@ fn publish_live_teams(dir: &std::path::Path, teams: &[groups::TeamDef]) {
     if let Ok(mut shared) = LIVE_TEAMS.lock() {
         *shared = live;
     }
+}
+
+static MARKET_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+pub fn wallets_line(seq: u32) -> String {
+    let dir = MARKET_DIR.lock().ok().and_then(|d| d.clone()).unwrap_or_default();
+    super::market::live_line(seq, &dir)
 }
 
 pub fn teams_line(seq: u32) -> String {
@@ -3450,6 +3464,35 @@ fn find_teams(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<groups::LiveT
     find_reply(regions, &groups::live_tag(seq), |text| groups::parse_live_line(text, seq))
 }
 
+fn find_market(regions: &[(usize, usize)], seq: u32) -> Option<String> {
+    find_reply(regions, &market::live_tag(seq), |text| market::parse_live_line(text, seq))
+}
+
+fn scan_market(seq: u32, dir: std::path::PathBuf) {
+    let started = Instant::now();
+    let found = loop {
+        let regions = data_regions();
+        if let Some(found) = find_market(&regions, seq) {
+            break Some(found);
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    };
+    match found {
+        Some(text) => {
+            let tmp = dir.join("m182_market_live.json.tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, dir.join(market::LIVE_FILE));
+            }
+            log(&format!("market {seq}: balances read from the chat, {} ms", started.elapsed().as_millis()));
+        }
+        None => log(&format!("market {seq}: the answer never appeared in memory")),
+    }
+    SCAN_BUSY.store(false, Ordering::SeqCst);
+}
+
 fn scan_teams(seq: u32, dir: std::path::PathBuf) {
     let started = Instant::now();
     let found = loop {
@@ -3481,13 +3524,13 @@ fn scan_request(_st: &mut PowerState, dir: &std::path::Path) {
     let _ = std::fs::remove_file(&path);
     let value = serde_json::from_str::<serde_json::Value>(&text).ok();
     let seq = value.as_ref().and_then(|v| v.get("seq").and_then(|s| s.as_u64())).unwrap_or(0) as u32;
-    let teams = value.as_ref().and_then(|v| v.get("kind").and_then(|k| k.as_str())) == Some("teams");
+    let kind = value.as_ref().and_then(|v| v.get("kind").and_then(|k| k.as_str())).unwrap_or("").to_string();
     if SCAN_BUSY.swap(true, Ordering::SeqCst) {
         log("roster: a search is already running");
         return;
     }
     let dir = dir.to_path_buf();
-    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || if teams { scan_teams(seq, dir) } else { scan_roster(seq, dir) }).is_err() {
+    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || match kind.as_str() { "teams" => scan_teams(seq, dir), "market" => scan_market(seq, dir), _ => scan_roster(seq, dir) }).is_err() {
         SCAN_BUSY.store(false, Ordering::SeqCst);
         log("roster: could not start the search");
     }

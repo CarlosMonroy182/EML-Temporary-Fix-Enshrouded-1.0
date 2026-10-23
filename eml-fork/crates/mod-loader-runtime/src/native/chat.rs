@@ -50,6 +50,8 @@ pub enum Verdict {
     Roster(u32),
     /// Ours: the message is replaced by the server's real teams (sequence number echoed).
     Teams(u32),
+    /// Ours: the message is replaced by balances and recent market events.
+    Wallets(u32),
 }
 
 #[derive(Default)]
@@ -169,6 +171,10 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     if command == "players" {
         let (seq, _) = next_token(rest);
         return Verdict::Roster(seq.parse().unwrap_or(0));
+    }
+    if command == "wallets" {
+        let (seq, _) = next_token(rest);
+        return Verdict::Wallets(seq.parse().unwrap_or(0));
     }
     if command == "teams" {
         let (seq, _) = next_token(rest);
