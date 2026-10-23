@@ -268,4 +268,5 @@ EN = {
 "Quitar": "Remove",
 "Aplicar": "Apply",
 "DAR O QUITAR MONEDAS": "GIVE OR TAKE COINS",
+"Reaplicar a todos": "Reapply to everyone",
 }
