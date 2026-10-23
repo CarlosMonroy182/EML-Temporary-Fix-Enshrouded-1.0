@@ -46,6 +46,11 @@ NOTAS
 - Botin: las criaturas invocadas sueltan su botin normal del juego.
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. No hay que subir nada por FTP.
 
+VFX (efectos)
+- El paquete incluye los efectos M182 VFX (carpeta mods\m182_vfx). Arrancan solos: brillos mientras cargas un hechizo de bastón o un ataque cuerpo a cuerpo pesado y una explosión al soltarlo. No hace falta el panel ni ajustes. Su registro es m182_vfx.log en la carpeta del juego.
+- Si alojas un mundo en local, tambien hay auras al caminar: el gesto de saludo enciende y apaga el aura y el gesto de victoria pasa a la siguiente. En un servidor dedicado solo funcionan los efectos de carga de bastón.
+- Para apagar los efectos, borra la carpeta mods\m182_vfx (o crea m182_vfx.json con {"enabled": false}).
+
 DESINSTALAR
 Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.
 
