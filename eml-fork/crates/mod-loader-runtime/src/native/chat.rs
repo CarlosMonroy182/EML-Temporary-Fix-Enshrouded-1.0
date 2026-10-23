@@ -48,6 +48,8 @@ pub enum Verdict {
     Swallowed(String),
     /// Ours: the message is replaced by the list of connected players (sequence number echoed).
     Roster(u32),
+    /// Ours: the message is replaced by the server's real teams (sequence number echoed).
+    Teams(u32),
 }
 
 #[derive(Default)]
@@ -87,10 +89,10 @@ static OTHER_SEEN: AtomicU32 = AtomicU32::new(0);
 
 /// Logs the first few ordinary messages (their first characters only) so a silent
 /// channel can be told apart from messages arriving in an unexpected shape.
-#[cfg(windows)]
 pub fn note_other(message: &str, client: u32) {
     if OTHER_SEEN.fetch_add(1, Ordering::Relaxed) < 6 {
         let head: String = message.chars().take(6).collect();
+        #[cfg(windows)]
         super::spawner::log(&format!("chat: client {client} sent an ordinary message ({} chars) starting \"{head}\"", message.chars().count()));
     }
 }
@@ -167,6 +169,10 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     if command == "players" {
         let (seq, _) = next_token(rest);
         return Verdict::Roster(seq.parse().unwrap_or(0));
+    }
+    if command == "teams" {
+        let (seq, _) = next_token(rest);
+        return Verdict::Teams(seq.parse().unwrap_or(0));
     }
     let outcome = match command.as_str() {
         "ping" => Ok("ping".to_string()),

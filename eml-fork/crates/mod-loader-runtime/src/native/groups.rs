@@ -94,6 +94,93 @@ impl TeamDef {
     }
 }
 
+pub const LIVE_FILE: &str = "m182_teams_live.json";
+
+/// A team as the server really has it right now (panel definition plus chat changes).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveTeam {
+    pub name: String,
+    pub members: Vec<String>,
+    pub leaders: Vec<String>,
+}
+
+fn live_clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() && !"#,;$|=^~".contains(*c)).collect::<String>().trim().to_string()
+}
+
+pub fn live_teams(teams: &[TeamDef]) -> Vec<LiveTeam> {
+    teams
+        .iter()
+        .map(|t| {
+            let mut members: Vec<String> = Vec::new();
+            for n in &t.names {
+                let n = live_clean(n);
+                if !n.is_empty() && !members.iter().any(|m| super::roster::same_name(m, &n)) {
+                    members.push(n);
+                }
+            }
+            LiveTeam { name: live_clean(&t.name), members, leaders: t.leaders.iter().map(|l| live_clean(l)).filter(|l| !l.is_empty()).collect() }
+        })
+        .collect()
+}
+
+/// `{"complete":true,"teams":[{"name":..,"members":[..],"leaders":[..]}]}`: what the panel reads.
+pub fn live_json(live: &[LiveTeam], complete: bool) -> String {
+    serde_json::json!({
+        "complete": complete,
+        "teams": live.iter().map(|t| serde_json::json!({"name": t.name, "members": t.members, "leaders": t.leaders})).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+pub fn live_tag(seq: u32) -> String {
+    format!("[M182T#{seq}]")
+}
+
+/// One chat line: `[M182T#7] Red#Ana,Luis#name:ana;Azul##$`. The final `$` tells that nothing was cut.
+pub fn live_line(seq: u32, live: &[LiveTeam]) -> String {
+    const LIMIT: usize = 780;
+    let mut out = format!("{} ", live_tag(seq));
+    let mut complete = true;
+    for (i, t) in live.iter().enumerate() {
+        let part = format!("{}{}#{}#{}", if i == 0 { "" } else { ";" }, t.name, t.members.join(","), t.leaders.join(","));
+        if out.len() + part.len() + 1 > LIMIT {
+            complete = false;
+            break;
+        }
+        out.push_str(&part);
+    }
+    if live.is_empty() {
+        out.push('-');
+    }
+    if complete {
+        out.push('$');
+    }
+    out
+}
+
+pub fn parse_live_line(text: &str, seq: u32) -> Option<(Vec<LiveTeam>, bool)> {
+    let marker = live_tag(seq);
+    let start = text.find(&marker)? + marker.len();
+    let line = text[start..].trim_start().lines().next().unwrap_or("").trim();
+    let (body, complete) = match line.strip_suffix('$') {
+        Some(b) => (b.trim(), true),
+        None => (line, false),
+    };
+    let mut out = Vec::new();
+    if body == "-" || body.is_empty() {
+        return Some((out, complete));
+    }
+    for part in body.split(';') {
+        let mut f = part.split('#');
+        let name = f.next()?.to_string();
+        let members = f.next()?.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect();
+        let leaders = f.next().unwrap_or("").split(',').filter(|x| !x.is_empty()).map(str::to_string).collect();
+        out.push(LiveTeam { name, members, leaders });
+    }
+    Some((out, complete))
+}
+
 pub fn parse_zones(text: &str) -> Vec<Zone> {
     let Ok(file) = serde_json::from_str::<ZonesFile>(text) else { return Vec::new() };
     file.zones
@@ -386,6 +473,32 @@ mod tests {
         assert_eq!(team_for_player(&teams, 99, Some("Luis"), 6, Some("steamid:2")), 0);
         assert_eq!(team_for_player(&teams, 99, Some("Ana"), 7, Some("steamid:1")), 1);
         apply_members(&mut teams, "not json");
+    }
+
+    #[test]
+    fn live_line_round_trips_and_marks_cuts() {
+        let live = vec![
+            LiveTeam { name: "Red".into(), members: vec!["Ana".into(), "Luis".into()], leaders: vec!["name:ana".into()] },
+            LiveTeam { name: "Azul".into(), members: vec![], leaders: vec![] },
+        ];
+        let line = live_line(7, &live);
+        assert!(line.ends_with('$'));
+        assert_eq!(parse_live_line(&line, 7), Some((live.clone(), true)));
+        assert_eq!(parse_live_line(&line, 8), None);
+        let big: Vec<LiveTeam> = (0..40).map(|i| LiveTeam { name: format!("T{i}"), members: (0..8).map(|m| format!("Player{i}x{m}")).collect(), leaders: vec![] }).collect();
+        let cut = live_line(1, &big);
+        assert!(cut.len() <= 800 && !cut.ends_with('$'));
+        assert!(!parse_live_line(&cut, 1).unwrap().1);
+    }
+
+    #[test]
+    fn live_teams_hold_panel_people_and_chat_changes() {
+        let mut teams = parse_team_defs(r#"{"teams":[{"name":"M182","leaders":["name:Carlos"],"people":[{"key":"name:Carlos","name":"Carlos"}]}]}"#);
+        apply_members(&mut teams, r#"{"joined":[{"team":"M182","id":"","name":"Ana"}],"left":[]}"#);
+        let live = live_teams(&teams);
+        assert_eq!(live[0].members, vec!["Carlos".to_string(), "Ana".to_string()]);
+        assert_eq!(live[0].leaders, vec!["name:carlos".to_string()]);
+        assert!(live_json(&live, true).contains("\"complete\":true"));
     }
 
     #[test]
