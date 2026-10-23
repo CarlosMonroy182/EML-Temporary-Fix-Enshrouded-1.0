@@ -46,6 +46,7 @@ struct Entry {
     kind: emblems::Kind,
     internal: bool,
     icon_keys: Vec<String>,
+    meta: String,
 }
 
 #[derive(Default)]
@@ -292,6 +293,7 @@ fn load_enemies(dir: &Path) -> Result<Vec<Entry>, String> {
             kind: emblems::kind_of(parts[0], &group),
             internal: is_internal(parts[0]),
             icon_keys: enemy_icon_keys(parts[0]),
+            meta: String::new(),
             alias: game_name,
             icon_file: None,
             label,
@@ -360,6 +362,7 @@ fn item_entries(rows: &[items::Item], titles: &HashMap<String, String>) -> Vec<E
             kind: item_kind(&it.group),
             internal: items::is_internal_item(&it.debug, &it.category),
             icon_keys: keys,
+            meta: items::item_meta(it),
         })
         .collect()
 }
@@ -998,7 +1001,7 @@ impl App {
         painter.text(
             egui::pos2(text_left, rect.bottom() - 8.0),
             Align2::LEFT_BOTTOM,
-            group_label(mode, &e.group),
+            if e.meta.is_empty() { group_label(mode, &e.group) } else { format!("{} · {}", group_label(mode, &e.group), e.meta) },
             title_font(12.5),
             group_color(&e.group),
         );
@@ -1326,6 +1329,7 @@ mod tests {
             kind: emblems::Kind::Fang,
             internal,
             icon_keys: Vec::new(),
+            meta: String::new(),
         }
     }
 

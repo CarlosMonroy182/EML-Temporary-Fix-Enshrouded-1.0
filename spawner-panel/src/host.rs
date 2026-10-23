@@ -8,6 +8,36 @@ use crate::remote::Typist;
 
 pub const VK_INSERT: i32 = 0x2D;
 
+/// Key that opens and closes the panel; Insert unless `panel_key` in the settings file says otherwise.
+pub static TOGGLE_VK: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(VK_INSERT);
+
+/// `F1`..`F12`, `Insert`, `Home`, `End`, `Delete`, `PageUp`, `PageDown` or `Pause` as a Windows key code.
+pub fn parse_panel_key(name: &str) -> Option<i32> {
+    let t = name.trim().to_ascii_lowercase();
+    if let Some(n) = t.strip_prefix('f').and_then(|n| n.parse::<i32>().ok()) {
+        return (1..=12).contains(&n).then_some(0x6F + n);
+    }
+    match t.as_str() {
+        "insert" | "ins" => Some(0x2D),
+        "home" => Some(0x24),
+        "end" => Some(0x23),
+        "delete" | "del" => Some(0x2E),
+        "pageup" | "pgup" => Some(0x21),
+        "pagedown" | "pgdn" => Some(0x22),
+        "pause" => Some(0x13),
+        _ => None,
+    }
+}
+
+/// Reads `panel_key` from the settings text and makes it the panel's key.
+pub fn apply_panel_key(settings: &str) {
+    let key = serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .and_then(|v| v.get("panel_key").and_then(|k| k.as_str()).and_then(parse_panel_key))
+        .unwrap_or(VK_INSERT);
+    TOGGLE_VK.store(key, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub trait Sys: Send + Sync + 'static {
     fn key_down(&self, vk: i32) -> bool;
     /// Window that has the keyboard focus (0 when none).
@@ -83,7 +113,7 @@ impl<S: Sys> Host<S> {
         let panel = self.sys.find_panel();
         let foreground = self.sys.foreground();
         let ours = foreground != 0 && self.sys.is_ours(foreground);
-        let down = self.sys.key_down(VK_INSERT);
+        let down = self.sys.key_down(TOGGLE_VK.load(std::sync::atomic::Ordering::SeqCst));
         let mut g = self.lock();
         if panel != 0 {
             g.panel = panel;
@@ -299,7 +329,7 @@ impl<S: Sys> Typist for ChatTypist<S> {
     fn begin(&mut self) -> Result<(), String> {
         let game = self.host.game_window();
         if game == 0 {
-            return Err("Abre el panel con Insert desde dentro del juego antes de enviar.".to_string());
+            return Err("Abre el panel desde dentro del juego antes de enviar.".to_string());
         }
         for attempt in 0..4 {
             self.host.sys.focus(game);
@@ -414,6 +444,16 @@ mod tests {
         host.poll(&mut || *created += 1);
         sys.insert.store(false, Ordering::SeqCst);
         host.poll(&mut || *created += 1);
+    }
+
+    #[test]
+    fn panel_key_names() {
+        assert_eq!(parse_panel_key("F1"), Some(0x70));
+        assert_eq!(parse_panel_key(" f12 "), Some(0x7B));
+        assert_eq!(parse_panel_key("Insert"), Some(VK_INSERT));
+        assert_eq!(parse_panel_key("PageDown"), Some(0x22));
+        assert_eq!(parse_panel_key("F13"), None);
+        assert_eq!(parse_panel_key("x"), None);
     }
 
     #[test]
@@ -559,7 +599,7 @@ mod tests {
         let sys = Arc::new(Mock::default());
         let host = Host::new(sys.clone());
         let mut typist = ChatTypist::new(host.clone(), "t");
-        assert!(typist.begin().unwrap_err().contains("Insert"));
+        assert!(typist.begin().unwrap_err().contains("panel"));
         sys.foreground.store(100, Ordering::SeqCst);
         host.poll(&mut || {});
         sys.insert.store(true, Ordering::SeqCst);

@@ -203,6 +203,24 @@ fn num_f(s: &str) -> f32 {
     s.trim().parse::<f32>().unwrap_or(0.0)
 }
 
+/// "Rara · T2 · nv.5-12" — rarity (as exported after mods) and tier shown beside the real name.
+pub fn item_meta(it: &Item) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if RARITY_NAMES.contains(&it.rarity.as_str()) {
+        parts.push(RARITIES[it.rarity_index() as usize].to_string());
+    }
+    if let Some(tier) = it.debug.split(|c: char| c == '_' || c == ' ').find(|t| {
+        let l = t.to_lowercase();
+        l.strip_prefix('t').map(|r| !r.is_empty() && (r.chars().all(|c| c.is_ascii_digit()) || r == "x")).unwrap_or(false)
+    }) {
+        parts.push(tier.to_uppercase());
+    }
+    if it.level_max > 0 {
+        parts.push(if it.level_min == it.level_max || it.level_min == 0 { format!("nv.{}", it.level_max) } else { format!("nv.{}-{}", it.level_min, it.level_max) });
+    }
+    parts.join(" · ")
+}
+
 pub fn friendly_name(debug: &str) -> String {
     const DROP: &[&str] = &["armor", "armour", "weapon", "craft", "material", "food", "prop", "decoration", "block", "ammo", "tool", "consumable", "collection", "vanity", "npc", "item"];
     let mut words: Vec<String> = Vec::new();
@@ -1566,5 +1584,19 @@ mod tests {
         if let Ok(text) = std::fs::read_to_string(shipped) {
             assert_eq!(text, lua_code());
         }
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+    #[test]
+    fn meta_shows_rarity_tier_level() {
+        let mut it = Item::default();
+        it.debug = "Armor_Warrior_Tank_Helmet_Loot_T2".into();
+        it.rarity = "Epic".into();
+        it.level_min = 5;
+        it.level_max = 12;
+        assert_eq!(item_meta(&it), "Épica · T2 · nv.5-12");
     }
 }
