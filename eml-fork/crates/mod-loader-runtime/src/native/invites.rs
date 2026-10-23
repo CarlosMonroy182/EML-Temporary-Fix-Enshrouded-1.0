@@ -113,7 +113,7 @@ fn read_members(dir: &Path) -> MembersFile {
 }
 
 fn write_members(dir: &Path, file: &MembersFile) -> Result<(), String> {
-    let row = |m: &Member| serde_json::json!({"team": m.team, "id": m.id, "name": m.name});
+    let row = |m: &Member| serde_json::json!({"team": m.team, "id": m.id, "name": m.name, "touch": m.touch});
     let body = serde_json::json!({
         "joined": file.joined.iter().map(row).collect::<Vec<_>>(),
         "left": file.left.iter().map(row).collect::<Vec<_>>(),
@@ -121,6 +121,11 @@ fn write_members(dir: &Path, file: &MembersFile) -> Result<(), String> {
     let tmp = dir.join("m182_members.json.tmp");
     std::fs::write(&tmp, body.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, dir.join(groups::MEMBERS_FILE)).map_err(|e| e.to_string())
+}
+
+/// The panel counter of a person right now, read from the teams file.
+fn current_touch(dir: &Path, id: &str, name: &str) -> u64 {
+    load_teams(dir).iter().map(|t| t.touch_of(id, name)).max().unwrap_or(0)
 }
 
 fn same_person(m: &Member, id: &str, name: &str) -> bool {
@@ -132,7 +137,8 @@ fn put_in(dir: &Path, team: &str, p: &Person) -> Result<(), String> {
     let id = p.id.clone().unwrap_or_default();
     file.joined.retain(|m| !same_person(m, &id, &p.name));
     file.left.retain(|m| !(same_name(&m.team, team) && same_person(m, &id, &p.name)));
-    file.joined.push(Member { team: team.to_string(), id, name: p.name.clone() });
+    let touch = current_touch(dir, &id, &p.name);
+    file.joined.push(Member { team: team.to_string(), id, name: p.name.clone(), touch });
     if file.joined.len() > MAX_ENTRIES {
         file.joined.remove(0);
     }
@@ -144,7 +150,8 @@ fn take_out(dir: &Path, team: &str, p: &Person) -> Result<(), String> {
     let id = p.id.clone().unwrap_or_default();
     file.joined.retain(|m| !same_person(m, &id, &p.name));
     file.left.retain(|m| !(same_name(&m.team, team) && same_person(m, &id, &p.name)));
-    file.left.push(Member { team: team.to_string(), id, name: p.name.clone() });
+    let touch = current_touch(dir, &id, &p.name);
+    file.left.push(Member { team: team.to_string(), id, name: p.name.clone(), touch });
     if file.left.len() > MAX_ENTRIES {
         file.left.remove(0);
     }
@@ -353,6 +360,60 @@ mod tests {
         assert!(handle_with(&mut p, t, "!equipo invitar Zoe", &ana, &online, &d).unwrap().contains("No encuentro"));
         assert!(handle_with(&mut p, t, "!equipo invitar Ana", &ana, &online, &d).unwrap().contains("ti mismo"));
         assert!(handle_with(&mut p, t, "!equipo", &ana, &online, &d).unwrap().contains("Equipos:"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn real_world_files_leader_reinvites_player_who_left() {
+        let d = std::env::temp_dir().join(format!("m182_invites_real_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(groups::TEAMS_FILE), r#"{"teams":[{"leaders":["name:moradoox"],"members":[2],"name":"M182","people":[{"key":"name:moradoox","name":"moradoox"}]},{"leaders":["name:Argonaut"],"members":[1,3],"name":"Eshcraft","people":[{"key":"name:Argonaut","name":"Argonaut"},{"key":"name:Zorhem","name":"Zorhem"},{"key":"name:Heindallr","name":"Heindallr"}]}]}"#).unwrap();
+        std::fs::write(d.join(groups::MEMBERS_FILE), r#"{"joined":[],"left":[{"id":"","name":"Heindallr","team":"Eshcraft"}]}"#).unwrap();
+        let (arg, mor, hei) = (person(1, "Argonaut", None), person(2, "moradoox", None), person(3, "Heindallr", None));
+        let online = vec![hei.clone(), arg.clone(), mor.clone()];
+        let mut p = Pending::default();
+        let t = Instant::now();
+        let line = handle_with(&mut p, t, "!team invite Heindallr", &arg, &online, &d).unwrap();
+        assert!(line.contains("Argonaut invited Heindallr"), "{line}");
+        let line = handle_with(&mut p, t, "!team accept", &hei, &online, &d).unwrap();
+        assert!(line.contains("Heindallr joined the team"), "{line}");
+        assert_eq!(groups::team_for_player(&load_teams(&d), 3, Some("Heindallr"), 3, None), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn panel_edits_after_a_chat_change_win_and_older_ones_do_not() {
+        let d = dir("touch");
+        let (ana, pedro) = (person(1, "Ana", Some("steamid:1")), person(3, "Pedro", None));
+        let online = vec![ana.clone(), pedro.clone()];
+        let mut p = Pending::default();
+        let t = Instant::now();
+        handle_with(&mut p, t, "!equipo invitar Pedro", &ana, &online, &d).unwrap();
+        handle_with(&mut p, t, "!equipo aceptar", &pedro, &online, &d).unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 1);
+        handle_with(&mut p, t, "!equipo salir", &pedro, &online, &d).unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 0);
+        // the admin puts him back in the panel: the counter is newer than the chat change
+        std::fs::write(
+            d.join(groups::TEAMS_FILE),
+            r#"{"teams":[{"name":"Rojo","leaders":["steamid:1"],"people":[{"key":"steamid:1","name":"Ana"},{"key":"name:Pedro","name":"Pedro"}]},{"name":"Azul","people":[]}],"touched":{"name:pedro":5}}"#,
+        )
+        .unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 1);
+        // a later chat change wins again over that panel edit
+        handle_with(&mut p, t, "!equipo salir", &pedro, &online, &d).unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 0);
+        // and the admin taking someone out of the panel beats an older chat join
+        handle_with(&mut p, t, "!equipo invitar Pedro", &ana, &online, &d).unwrap();
+        handle_with(&mut p, t, "!equipo aceptar", &pedro, &online, &d).unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 1);
+        std::fs::write(
+            d.join(groups::TEAMS_FILE),
+            r#"{"teams":[{"name":"Rojo","leaders":["steamid:1"],"people":[{"key":"steamid:1","name":"Ana"}]},{"name":"Azul","people":[]}],"touched":{"name:pedro":9}}"#,
+        )
+        .unwrap();
+        assert_eq!(groups::team_for_player(&load_teams(&d), 99, Some("Pedro"), 3, None), 0);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

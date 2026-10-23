@@ -219,6 +219,8 @@ pub fn manual_players() -> Vec<Seen> {
 }
 
 pub struct SocialState {
+    /// Counter per person of the panel's own membership edits (lowercase name and key).
+    pub touched: std::collections::BTreeMap<String, u64>,
     pub manual: bool,
     pub zones: Vec<Zone>,
     pub teams: Vec<Team>,
@@ -244,6 +246,7 @@ pub struct SocialState {
 impl Default for SocialState {
     fn default() -> Self {
         Self {
+            touched: Default::default(),
             manual: false,
             zones: Vec::new(),
             teams: Vec::new(),
@@ -318,8 +321,17 @@ pub fn parse_teams(text: &str) -> Vec<Team> {
         .collect()
 }
 
-pub fn teams_json(teams: &[Team], numbers: &[Vec<u32>]) -> Value {
+pub fn parse_touched(text: &str) -> std::collections::BTreeMap<String, u64> {
+    let Ok(Value::Object(root)) = serde_json::from_str::<Value>(text) else { return Default::default() };
+    root.get("touched")
+        .and_then(|t| t.as_object())
+        .map(|t| t.iter().filter_map(|(k, v)| Some((k.clone(), v.as_u64()?))).collect())
+        .unwrap_or_default()
+}
+
+pub fn teams_json(teams: &[Team], numbers: &[Vec<u32>], touched: &std::collections::BTreeMap<String, u64>) -> Value {
     json!({
+        "touched": touched,
         "teams": teams.iter().enumerate().map(|(i, t)| json!({
             "name": t.name,
             "members": numbers.get(i).cloned().unwrap_or_default(),
@@ -362,6 +374,20 @@ pub fn set_member(teams: &mut [Team], team: usize, person: &Person, member: bool
 }
 
 impl SocialState {
+    /// The admin edited this person in the panel: the server ignores older changes made by chat.
+    pub fn touch(&mut self, person: &Person) {
+        let next = self.touched.values().copied().max().unwrap_or(0) + 1;
+        self.touched.insert(person.name.trim().to_lowercase(), next);
+        self.touched.insert(person.key.trim().to_lowercase(), next);
+        if self.touched.len() > 400 {
+            let mut by_age: Vec<(String, u64)> = self.touched.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            by_age.sort_by_key(|(_, v)| *v);
+            for (k, _) in by_age.into_iter().take(self.touched.len() - 400) {
+                self.touched.remove(&k);
+            }
+        }
+    }
+
     pub fn load(dir: &Path) -> Self {
         let mut s = Self::default();
         if let Ok(text) = std::fs::read_to_string(dir.join(ZONES_FILE)) {
@@ -369,6 +395,7 @@ impl SocialState {
         }
         if let Ok(text) = std::fs::read_to_string(dir.join(TEAMS_FILE)) {
             s.teams = parse_teams(&text);
+            s.touched = parse_touched(&text);
         }
         s.me = crate::steam::local_account(dir);
         s.refresh(dir);
@@ -466,7 +493,7 @@ impl SocialState {
 
     pub fn save_teams(&mut self, dir: &Path) {
         let numbers = team_numbers(&self.teams, &self.seen);
-        let result = write_atomic(dir, TEAMS_FILE, "m182_teams.json.tmp", &teams_json(&self.teams, &numbers).to_string());
+        let result = write_atomic(dir, TEAMS_FILE, "m182_teams.json.tmp", &teams_json(&self.teams, &numbers, &self.touched).to_string());
         if result.is_ok() {
             self.written = numbers;
         }
@@ -741,6 +768,7 @@ impl App {
         }
         let mut changed = false;
         let mut remove = None;
+        let mut reapply: Option<usize> = None;
         let mut membership: Vec<(usize, Person, bool)> = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, team) in self.social.teams.iter_mut().enumerate() {
@@ -749,6 +777,9 @@ impl App {
                         changed |= ui.add(egui::TextEdit::singleline(&mut team.name).desired_width(200.0)).changed();
                         if button(ui, "Borrar equipo", Vec2::new(130.0, 26.0), true, false) {
                             remove = Some(i);
+                        }
+                        if button(ui, "Reaplicar a todos", Vec2::new(170.0, 26.0), !team.members.is_empty(), false) {
+                            reapply = Some(i);
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
@@ -780,7 +811,15 @@ impl App {
             }
         });
         for (team, person, on) in membership {
+            self.social.touch(&person);
             set_member(&mut self.social.teams, team, &person, on);
+            changed = true;
+        }
+        if let Some(i) = reapply {
+            let people: Vec<Person> = self.social.teams.get(i).map(|t| t.members.clone()).unwrap_or_default();
+            for person in &people {
+                self.social.touch(person);
+            }
             changed = true;
         }
         if let Some(i) = remove {
@@ -836,12 +875,12 @@ mod tests {
     fn leaders_are_saved_only_while_they_are_members() {
         let a = Person { key: "steamid:1".into(), name: "Ana".into() };
         let mut teams = vec![Team { name: "Rojo".into(), members: vec![a.clone()], leaders: vec!["steamid:1".into()] }];
-        let json = teams_json(&teams, &[vec![]]);
+        let json = teams_json(&teams, &[vec![]], &Default::default());
         assert_eq!(json["teams"][0]["leaders"][0], "steamid:1");
         assert_eq!(parse_teams(&json.to_string())[0].leaders, vec!["steamid:1".to_string()]);
         set_member(&mut teams, 0, &a, false);
         assert!(teams[0].leaders.is_empty());
-        assert_eq!(teams_json(&teams, &[vec![]])["teams"][0]["leaders"], json!([]));
+        assert_eq!(teams_json(&teams, &[vec![]], &Default::default())["teams"][0]["leaders"], json!([]));
     }
 
     #[test]
@@ -879,7 +918,7 @@ mod tests {
         assert_eq!(teams[1].members.len(), 3);
         set_member(&mut teams, 1, &b, false);
         assert_eq!(teams[1].members, vec![a, c]);
-        assert_eq!(parse_teams(&teams_json(&teams, &[vec![], vec![1, 2]]).to_string()), teams);
+        assert_eq!(parse_teams(&teams_json(&teams, &[vec![], vec![1, 2]], &Default::default()).to_string()), teams);
     }
 
     #[test]
@@ -945,7 +984,7 @@ mod tests {
         assert_eq!(state.seen[0].member.id_label(), "Steam 76561199474170255");
         let teams = vec![Team { name: "Casa".into(), members: vec![state.seen[0].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &state.seen), vec![Vec::<u32>::new()]);
-        let json = teams_json(&teams, &team_numbers(&teams, &state.seen));
+        let json = teams_json(&teams, &team_numbers(&teams, &state.seen), &Default::default());
         assert_eq!(json["teams"][0]["people"][0]["name"], "moradoox");
     }
 
@@ -968,7 +1007,7 @@ mod tests {
         assert!(!seen[0].online.as_ref().unwrap().located());
         let teams = vec![Team { name: "Casa".into(), members: vec![seen[1].person()], leaders: Vec::new() }];
         assert_eq!(team_numbers(&teams, &seen), vec![vec![2]]);
-        let json = teams_json(&teams, &team_numbers(&teams, &seen));
+        let json = teams_json(&teams, &team_numbers(&teams, &seen), &Default::default());
         assert_eq!(json["teams"][0]["people"][0]["name"], "Ana");
         assert!(parse_roster("[", 1).is_none());
     }
@@ -1032,5 +1071,17 @@ mod tests {
         assert_eq!(raw["teams"][0]["members"], json!([]));
         assert_eq!(raw["teams"][0]["people"][0]["name"], json!("Nacht"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn touching_a_person_is_saved_and_counts_up() {
+        let mut state = SocialState::default();
+        let pedro = Person { key: "name:Pedro".into(), name: "Pedro".into() };
+        state.touch(&pedro);
+        state.touch(&pedro);
+        assert_eq!(state.touched["pedro"], 2);
+        assert_eq!(state.touched["name:pedro"], 2);
+        let text = teams_json(&[], &[], &state.touched).to_string();
+        assert_eq!(parse_touched(&text), state.touched);
     }
 }

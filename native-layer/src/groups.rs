@@ -70,12 +70,28 @@ pub struct TeamDef {
     pub members: Vec<u32>,
     pub names: Vec<String>,
     pub ids: Vec<String>,
+    /// Panel edits per person (lowercase name or key -> counter): chat changes recorded before them lose.
+    pub touched: Vec<(String, u64)>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct TeamsFile {
     teams: Vec<Team>,
+    touched: std::collections::BTreeMap<String, u64>,
+}
+
+impl TeamDef {
+    /// The panel counter of a person (0 = the panel never edited them).
+    pub fn touch_of(&self, id: &str, name: &str) -> u64 {
+        let (id, name) = (id.trim().to_lowercase(), name.trim().to_lowercase());
+        self.touched
+            .iter()
+            .filter(|(k, _)| (!name.is_empty() && (*k == name || *k == format!("name:{name}"))) || (!id.is_empty() && (*k == id || k.ends_with(&format!(":{id}")))))
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 pub fn parse_zones(text: &str) -> Vec<Zone> {
@@ -96,6 +112,7 @@ pub fn inside(zones: &[Zone], x: f64, z: f64) -> bool {
 
 pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
     let Ok(file) = serde_json::from_str::<TeamsFile>(text) else { return Vec::new() };
+    let touched: Vec<(String, u64)> = file.touched.iter().map(|(k, v)| (k.trim().to_lowercase(), *v)).collect();
     file.teams
         .into_iter()
         .map(|t| {
@@ -109,7 +126,7 @@ pub fn parse_team_defs(text: &str) -> Vec<TeamDef> {
             names.extend(t.people.into_iter().map(|p| p.name));
             names.retain(|n| !n.trim().is_empty());
             let leaders = t.leaders.into_iter().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
-            TeamDef { name: t.name, leaders, members: t.members, names, ids }
+            TeamDef { name: t.name, leaders, members: t.members, names, ids, touched: touched.clone() }
         })
         .collect()
 }
@@ -121,6 +138,8 @@ pub struct Member {
     pub team: String,
     pub id: String,
     pub name: String,
+    /// The panel counter of this person when the change was made.
+    pub touch: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -140,6 +159,9 @@ pub fn apply_members(teams: &mut [TeamDef], text: &str) {
     for m in &file.left {
         if let Some(i) = find(teams, &m.team) {
             let t = &mut teams[i];
+            if t.touch_of(&m.id, &m.name) > m.touch {
+                continue;
+            }
             let id = m.id.trim().to_lowercase();
             if !id.is_empty() {
                 t.ids.retain(|x| *x != id);
@@ -152,6 +174,9 @@ pub fn apply_members(teams: &mut [TeamDef], text: &str) {
     for m in &file.joined {
         if let Some(i) = find(teams, &m.team) {
             let t = &mut teams[i];
+            if t.touch_of(&m.id, &m.name) > m.touch {
+                continue;
+            }
             let id = m.id.trim().to_lowercase();
             if !id.is_empty() && !t.ids.contains(&id) {
                 t.ids.push(id);

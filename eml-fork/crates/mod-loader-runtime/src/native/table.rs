@@ -53,7 +53,12 @@ fn identity(index: usize, client: u32, slot: &[u8], deref: &dyn Fn(usize) -> Opt
                 return found.clone();
             }
         }
-        let found = (roster::guess_name(slot, deref), roster::guess_id(slot, deref));
+        let fresh = (roster::guess_name(slot, deref), roster::guess_id(slot, deref));
+        let before = map.get(&(index, client)).map(|(_, f)| f.clone());
+        let found = match before {
+            Some(old) => (fresh.0.or(old.0), fresh.1.or(old.1)),
+            None => fresh,
+        };
         map.insert((index, client), (Instant::now(), found.clone()));
         return found;
     }

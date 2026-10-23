@@ -215,12 +215,15 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
     let asking = (client & 0x3f) + 1;
     let online: Vec<super::invites::Person> = super::table::entries()
         .into_iter()
-        .filter_map(|e| Some(super::invites::Person { entity: e.entity(), name: e.name.clone()?, id: e.id.clone() }))
+        .map(|e| super::invites::Person { entity: e.entity(), name: e.name.clone().unwrap_or_else(|| format!("ID {}", e.entity())), id: e.id.clone() })
         .collect();
     let Some(who) = online.iter().find(|p| p.entity == asking).cloned() else { return 1 };
     let Ok(dir) = std::env::current_dir() else { return 1 };
     let Some(line) = super::invites::handle(message, &who, &online, &dir) else { return 1 };
     super::spawner::log(&format!("teams: {} -> {line}", who.name));
+    if line.contains("cannot find") || line.contains("No encuentro") {
+        super::spawner::log(&format!("teams: online now {:?}; typed \"{}\"", online.iter().map(|p| (p.entity, p.name.clone())).collect::<Vec<_>>(), message.trim()));
+    }
     if replace_text(text, &line) { 0 } else { 1 }
 }
 
@@ -228,7 +231,7 @@ fn market_command(text: usize, message: &str, client: u32) -> u8 {
     let asking = (client & 0x3f) + 1;
     let online: Vec<super::invites::Person> = super::table::entries()
         .into_iter()
-        .filter_map(|e| Some(super::invites::Person { entity: e.entity(), name: e.name.clone()?, id: e.id.clone() }))
+        .map(|e| super::invites::Person { entity: e.entity(), name: e.name.clone().unwrap_or_else(|| format!("ID {}", e.entity())), id: e.id.clone() })
         .collect();
     let Some(who) = online.iter().find(|p| p.entity == asking).cloned() else { return 1 };
     let Ok(dir) = std::env::current_dir() else { return 1 };
