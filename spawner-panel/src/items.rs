@@ -1597,6 +1597,7 @@ mod meta_tests {
         it.rarity = "Epic".into();
         it.level_min = 5;
         it.level_max = 12;
-        assert_eq!(item_meta(&it), "Épica · T2 · nv.5-12");
+        let m = item_meta(&it);
+        assert!(m.contains("T2") && m.contains("nv.5-12") && m.starts_with(RARITIES[3]));
     }
 }

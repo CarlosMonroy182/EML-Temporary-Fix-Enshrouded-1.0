@@ -63,6 +63,7 @@ jobs:
         working-directory: eml-fork
         run: cargo build --release --locked -p dbghelp-proxy
       - name: Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 VFX
+        shell: bash
         run: |
           f=eml-fork/target/release/dbghelp.dll
           for marker in "KFCWriter is no longer available" "Failed to apply resource" "M182 VFX"; do
