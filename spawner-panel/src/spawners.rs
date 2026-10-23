@@ -27,7 +27,27 @@ pub struct Spawner {
     pub damage: f32,
     pub radius: f32,
     pub respawn: u32,
+    /// A raid or event: created once, gone when its creatures are dead.
+    pub once: bool,
+    /// Items that fall where each creature dies.
+    pub drops: Vec<Drop>,
+    /// Pickup template that carries the drops.
+    pub pickup: String,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drop {
+    pub item: u32,
+    pub guid: String,
+    pub name: String,
+    pub amount: u32,
+    pub rarity: u32,
+    pub level: u32,
+    /// 1-100
+    pub chance: u32,
+}
+
+pub const MAX_DROPS: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Live {
@@ -59,6 +79,9 @@ pub fn to_json(list: &[Spawner]) -> Value {
                 "damage": s.damage,
                 "radius": s.radius,
                 "respawn": s.respawn,
+                "once": s.once,
+                "pickup": s.pickup,
+                "drops": s.drops.iter().map(|d| json!({"item": d.item, "guid": d.guid, "name": d.name, "amount": d.amount, "rarity": d.rarity, "level": d.level, "chance": d.chance})).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -71,6 +94,20 @@ fn round(x: f64) -> f64 {
 
 /// What the server needs of one spawner, as short as it can be (it goes through the game chat).
 fn wire_row(s: &Spawner) -> Value {
+    let mut row = wire_base(s);
+    if s.once {
+        row["o"] = json!(1);
+    }
+    if !s.drops.is_empty() {
+        row["k"] = json!(s.drops.iter().take(MAX_DROPS).map(|d| json!([d.item, d.guid.replace('-', ""), d.amount, d.rarity, d.level, d.chance])).collect::<Vec<_>>());
+        if !s.pickup.is_empty() {
+            row["q"] = json!(s.pickup.replace('-', ""));
+        }
+    }
+    row
+}
+
+fn wire_base(s: &Spawner) -> Value {
     json!({
         "i": s.id,
         "t": s.template.replace('-', ""),
@@ -87,6 +124,11 @@ fn wire_row(s: &Spawner) -> Value {
 /// The server learns about one new spawner without being sent the whole list again.
 pub fn op_add(s: &Spawner) -> String {
     json!({ "add": wire_row(s) }).to_string()
+}
+
+/// Several spawners at once (a raid on many places) in one message.
+pub fn op_add_many(list: &[Spawner]) -> String {
+    json!({ "add": list.iter().map(wire_row).collect::<Vec<_>>() }).to_string()
 }
 
 pub fn op_delete(id: &str) -> String {
@@ -134,6 +176,28 @@ pub fn parse(text: &str) -> Vec<Spawner> {
                 damage: r.get("damage").and_then(|x| x.as_f64()).unwrap_or(1.0).clamp(0.0, 1000.0) as f32,
                 radius: r.get("radius").and_then(|x| x.as_f64()).unwrap_or(3.0).clamp(0.5, 60.0) as f32,
                 respawn: r.get("respawn").and_then(|x| x.as_u64()).unwrap_or(300).clamp(10, 86_400) as u32,
+                once: r.get("once").and_then(|x| x.as_bool()).unwrap_or(false),
+                pickup: r.get("pickup").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                drops: r
+                    .get("drops")
+                    .and_then(|d| d.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|d| {
+                                Some(Drop {
+                                    item: d.get("item")?.as_u64()? as u32,
+                                    guid: d.get("guid")?.as_str()?.to_string(),
+                                    name: d.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                    amount: d.get("amount").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 65535) as u32,
+                                    rarity: d.get("rarity").and_then(|x| x.as_u64()).unwrap_or(0).min(4) as u32,
+                                    level: d.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 255) as u32,
+                                    chance: d.get("chance").and_then(|x| x.as_u64()).unwrap_or(100).clamp(1, 100) as u32,
+                                })
+                            })
+                            .take(MAX_DROPS)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -166,6 +230,27 @@ pub fn parse_status(text: &str) -> HashMap<String, Live> {
         );
     }
     out
+}
+
+/// Raids the server finished (all their creatures died).
+pub fn parse_done(text: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return Vec::new() };
+    v.get("done").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+/// A raid older than this is dropped from the list even if the panel never heard it finished.
+pub const RAID_LIFETIME_MS: u128 = 3 * 3600 * 1000;
+
+pub fn created_ms(id: &str) -> Option<u128> {
+    id.strip_prefix('s').and_then(|n| n.parse().ok())
+}
+
+pub fn expired(s: &Spawner, now_ms: u128) -> bool {
+    s.once && created_ms(&s.id).map(|c| now_ms.saturating_sub(c) > RAID_LIFETIME_MS).unwrap_or(false)
+}
+
+pub fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
 pub fn load_status(dir: &Path) -> HashMap<String, Live> {
@@ -219,6 +304,9 @@ mod tests {
             damage: 1.5,
             radius: 4.0,
             respawn: 300,
+            once: false,
+            drops: Vec::new(),
+            pickup: String::new(),
         }
     }
 
@@ -284,4 +372,29 @@ mod tests {
     fn ids_are_unique_enough() {
         assert!(new_id().starts_with('s'));
     }
+    #[test]
+    fn a_raid_with_loot_goes_to_the_server_and_back() {
+        let mut s = sample();
+        s.id = "s1".into();
+        s.once = true;
+        s.pickup = "c15a5c9d-4956-49ff-9d72-9f522229cf1c".into();
+        s.drops = vec![Drop { item: 77, guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(), name: "Espada".into(), amount: 2, rarity: 3, level: 40, chance: 25 }];
+        let wire = wire_row(&s);
+        assert_eq!(wire["o"], 1);
+        assert_eq!(wire["k"][0], json!([77, "aaaaaaaabbbbccccddddeeeeeeeeeeee", 2, 3, 40, 25]));
+        assert_eq!(wire["q"], "c15a5c9d495649ff9d729f522229cf1c");
+        let dir = std::env::temp_dir().join(format!("m182_raid_panel_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        save(&dir, &[s.clone()]).unwrap();
+        assert_eq!(load(&dir), vec![s.clone()]);
+        let many = op_add_many(&[s.clone(), Spawner { id: "s2".into(), ..s.clone() }]);
+        assert!(many.starts_with(r#"{"add":["#));
+        assert_eq!(parse_done(r#"{"spawners":[],"done":["a","b"]}"#), vec!["a".to_string(), "b".to_string()]);
+        assert!(parse_done("junk").is_empty());
+        let old = Spawner { id: "s1000".into(), ..s };
+        assert!(expired(&old, 1000 + RAID_LIFETIME_MS + 1));
+        assert!(!expired(&old, 1000 + 60_000));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
 }
