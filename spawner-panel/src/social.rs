@@ -700,6 +700,7 @@ impl App {
             let queued = crate::remote::status().queued;
             self.social.live_tick(&dir, crate::remote::active(), crate::remote::connected(), queued);
             self.social.resync_teams(&dir);
+            self.market_live_tick();
             self.finish_here();
         }
     }

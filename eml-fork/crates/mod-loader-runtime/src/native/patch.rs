@@ -272,6 +272,12 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
             super::spawner::log(&line);
             1
         }
+        super::chat::Verdict::Wallets(seq) => {
+            let line = super::spawner::wallets_line(seq);
+            let sent = replace_text(text, &line);
+            super::spawner::log(&format!("chat: client {} asked for the market balances ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
+            if sent { 0 } else { 1 }
+        }
         super::chat::Verdict::Teams(seq) => {
             let line = super::spawner::teams_line(seq);
             let sent = replace_text(text, &line);

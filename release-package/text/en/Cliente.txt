@@ -48,6 +48,7 @@ MARKET
 - "Market" tab: pick the currency name, the starting money, the zone where buying works (or anywhere), add items with the search box, set price, amount per purchase, level and rarity, then press "Save and send to the server". Give or take coins under "Give or take coins" (Steam ID or name).
 - Players use the game chat, no key needed: "!market balance", "!market list [page]", "!market buy <number or name> [amount]", "!market pay <player> <amount>". In Spanish: !mercado saldo / lista / comprar / pagar. What they buy drops next to them.
 - Balances are saved on the server (m182_wallets.json); the catalog and grants in m182_market.json.
+- The tab shows the whole item catalog (filter by name, category and rarity), the player balances, every purchase, payment and coin grant as it happens, and applies grants right away. Against a server it refreshes while the tab is open.
 
 NOTES
 - Loot: summoned creatures drop the game's normal loot.

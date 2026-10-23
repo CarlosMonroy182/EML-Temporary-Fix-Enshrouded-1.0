@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, RichText, Vec2};
 use serde_json::{json, Value};
@@ -9,6 +9,7 @@ use crate::theme::*;
 use crate::{write_atomic, App};
 
 pub const MARKET_FILE: &str = "m182_market.json";
+pub const LIVE_FILE: &str = "m182_market_live.json";
 const MAX_GRANTS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,8 +30,76 @@ pub struct Grant {
     pub amount: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveEvent {
+    pub t: u64,
+    pub kind: String,
+    pub who: String,
+    pub to: String,
+    pub item: String,
+    pub qty: u32,
+    pub amount: i64,
+}
+
+/// What the server reports: balances and the latest operations.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Live {
+    pub currency: String,
+    pub wallets: Vec<(String, u64)>,
+    pub log: Vec<LiveEvent>,
+    pub seen: String,
+}
+
+pub fn parse_live(text: &str) -> Option<Live> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let wallets = v.get("wallets")?.as_array()?.iter().filter_map(|w| Some((text_of(w, "name"), w.get("coins")?.as_u64()?))).filter(|(n, _)| !n.is_empty()).collect();
+    let log = v
+        .get("log")
+        .and_then(|l| l.as_array())
+        .map(|l| {
+            l.iter()
+                .map(|e| LiveEvent {
+                    t: number(e, "t"),
+                    kind: text_of(e, "kind"),
+                    who: text_of(e, "who"),
+                    to: text_of(e, "to"),
+                    item: text_of(e, "item"),
+                    qty: number(e, "qty") as u32,
+                    amount: e.get("amount").and_then(|a| a.as_i64()).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Live { currency: text_of(&v, "currency"), wallets, log, seen: String::new() })
+}
+
+fn text_of(v: &Value, key: &str) -> String {
+    text(v, key)
+}
+
+fn ago(t: u64) -> String {
+    if t == 0 {
+        return String::new();
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(t);
+    let secs = now.saturating_sub(t);
+    if secs < 90 {
+        "ahora".to_string()
+    } else if secs < 5400 {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{} h", secs / 3600)
+    }
+}
+
 #[derive(Default)]
 pub struct MarketState {
+    pub live: Live,
+    pub asked: Option<Instant>,
+    pub last_asked: Option<Instant>,
+    pub filter: String,
+    pub group: String,
+    pub rarity: usize,
     pub currency: String,
     pub zone: String,
     pub start: u64,
@@ -121,9 +190,59 @@ impl App {
     fn save_market(&mut self) {
         let json = self.market.to_json(&self.items.generic_pickup).to_string();
         self.market.notice = match write_atomic(&self.dir, MARKET_FILE, "m182_market.json.tmp", &json) {
-            Ok(()) => "Guardado y enviado al servidor.".to_string(),
+            Ok(()) => {
+                let now = Instant::now();
+                self.market.last_asked = Some(now.checked_sub(Duration::from_secs(45)).unwrap_or(now));
+                "Guardado y enviado al servidor.".to_string()
+            }
             Err(e) => format!("Error: {e}"),
         };
+    }
+
+    /// Keeps balances and recent operations current: in a local game the server's file is read,
+    /// against a server the answer to a chat question is asked while this tab is open.
+    pub fn market_live_tick(&mut self) {
+        let remote = crate::remote::active();
+        let path = self.dir.join(LIVE_FILE);
+        if remote && self.market.asked.is_some_and(|at| at.elapsed() > Duration::from_secs(75)) {
+            self.market.asked = None;
+        }
+        if !remote || self.market.asked.is_some() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if text != self.market.live.seen {
+                    if let Some(mut live) = parse_live(&text) {
+                        live.seen = text;
+                        self.market.live = live;
+                        self.market.asked = None;
+                    }
+                } else if remote {
+                    self.market.asked = None;
+                }
+            }
+        }
+        let idle = self.social.roster_asked.is_none() && self.social.teams_asked.is_none() && self.market.asked.is_none();
+        let due = self.market.last_asked.map_or(true, |t| t.elapsed() >= Duration::from_secs(60));
+        if remote && idle && due && self.tab == crate::Tab::Market && crate::remote::connected() && crate::remote::status().queued == 0 {
+            let seq = (SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1) % 1_000_000) as u32 + 1;
+            let _ = std::fs::remove_file(&path);
+            let scan = json!({"seq": seq, "kind": "market"}).to_string();
+            if write_atomic(&self.dir, crate::remote::SCAN_FILE, "m182_scan.request.tmp", &scan).is_ok() {
+                crate::remote::submit_wallets(seq);
+                self.market.asked = Some(Instant::now());
+            }
+            self.market.last_asked = Some(Instant::now());
+        }
+    }
+
+    fn event_text(&self, e: &LiveEvent) -> String {
+        let coin = if self.market.live.currency.is_empty() { "Gold".to_string() } else { self.market.live.currency.clone() };
+        let when = ago(e.t);
+        let what = match e.kind.as_str() {
+            "buy" => format!("{} {} {}x {} ({} {})", e.who, "compró", e.qty, e.item, e.amount, coin),
+            "pay" => format!("{} {} {} {} → {}", e.who, "pagó", e.amount, coin, e.to),
+            _ => format!("{} {} {} {} {}", "Administrador:", if e.amount >= 0 { "+" } else { "" }, e.amount, coin, format!("→ {}", e.to)),
+        };
+        if when.is_empty() { what } else { format!("{when} · {what}") }
     }
 
     pub fn market_tab(&mut self, ui: &mut egui::Ui) {
@@ -131,7 +250,8 @@ impl App {
         divider(ui);
         ui.label(RichText::new("Los jugadores usan el chat: !mercado saldo, lista, comprar, pagar. Lo que compran cae junto a ellos.").color(MUTED));
         let mut save = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        let mut pick_player: Option<String> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             label_title(ui, "MONEDA Y LUGAR");
             ui.horizontal_wrapped(|ui| {
                 ui.label("Nombre de la moneda");
@@ -154,38 +274,88 @@ impl App {
                 });
             });
             divider(ui);
-            label_title(ui, "LO QUE SE VENDE");
-            ui.add(egui::TextEdit::singleline(&mut self.market.search).hint_text("Buscar un ítem para añadir…").desired_width(320.0));
-            let query = self.market.search.trim().to_lowercase();
-            if query.len() >= 2 {
-                let mut picked: Option<(usize, String)> = None;
-                for (i, e) in self.item_cat.entries.iter().enumerate().filter(|(_, e)| e.search.contains(&query)).take(8) {
+
+            label_title(ui, "CATÁLOGO DE ÍTEMS");
+            let mut groups: Vec<String> = self.item_cat.entries.iter().filter(|e| !e.internal).map(|e| e.group.clone()).collect();
+            groups.sort();
+            groups.dedup();
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.market.filter).hint_text("Buscar por nombre…").desired_width(260.0));
+                let shown = if self.market.group.is_empty() { "Todas las categorías".to_string() } else { self.market.group.clone() };
+                egui::ComboBox::from_id_salt("market_group").selected_text(shown).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.market.group.is_empty(), "Todas las categorías").clicked() {
+                        self.market.group.clear();
+                    }
+                    for g in &groups {
+                        if ui.selectable_label(self.market.group == *g, g).clicked() {
+                            self.market.group = g.clone();
+                        }
+                    }
+                });
+                let shown = if self.market.rarity == 0 { "Cualquier rareza" } else { RARITIES[(self.market.rarity - 1).min(4)] };
+                egui::ComboBox::from_id_salt("market_rarity_filter").selected_text(shown).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.market.rarity == 0, "Cualquier rareza").clicked() {
+                        self.market.rarity = 0;
+                    }
+                    for (i, name) in RARITIES.iter().enumerate() {
+                        if ui.selectable_label(self.market.rarity == i + 1, *name).clicked() {
+                            self.market.rarity = i + 1;
+                        }
+                    }
+                });
+            });
+            let query = self.market.filter.trim().to_lowercase();
+            let matches: Vec<usize> = self
+                .item_cat
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(i, e)| {
+                    !e.internal
+                        && (query.is_empty() || e.search.contains(&query))
+                        && (self.market.group.is_empty() || e.group == self.market.group)
+                        && (self.market.rarity == 0 || self.items.rows.get(*i).is_some_and(|r| r.guid == e.guid && r.rarity_index() as usize + 1 == self.market.rarity))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            ui.label(RichText::new(format!("{} {}", matches.len(), "resultados")).color(MUTED));
+            let mut picked: Option<(usize, String)> = None;
+            egui::ScrollArea::vertical().id_salt("market_catalog").max_height(300.0).auto_shrink([false, false]).show_rows(ui, 30.0, matches.len(), |ui, range| {
+                for row in range {
+                    let i = matches[row];
+                    let e = &self.item_cat.entries[i];
+                    let name = e.alias.clone().unwrap_or_else(|| e.label.clone());
+                    let on_sale = self.market.offers.iter().any(|o| self.items.rows.get(i).is_some_and(|r| r.id == o.item));
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(e.alias.clone().unwrap_or_else(|| e.label.clone())).color(PARCHMENT));
-                        if !e.meta.is_empty() {
-                            ui.label(RichText::new(&e.meta).color(MUTED));
-                        }
-                        if button(ui, "Añadir", Vec2::new(80.0, 24.0), true, false) {
-                            picked = Some((i, e.alias.clone().unwrap_or_else(|| e.label.clone())));
-                        }
+                        ui.add_sized([300.0, 24.0], egui::Label::new(RichText::new(&name).size(16.0).color(PARCHMENT)).truncate());
+                        ui.label(RichText::new(&e.meta).size(14.0).color(MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if on_sale {
+                                ui.label(RichText::new("✓ En venta").color(GOOD));
+                            } else if button(ui, "Añadir", Vec2::new(90.0, 24.0), true, false) {
+                                picked = Some((i, name.clone()));
+                            }
+                        });
                     });
                 }
-                if let Some((i, name)) = picked {
-                    let guid = self.item_cat.entries[i].guid.clone();
-                    if let Some(row) = self.items.rows.iter().find(|r| r.guid == guid).cloned() {
-                        self.market.add_offer(&row, &name);
-                        self.market.search.clear();
-                    }
+            });
+            if let Some((i, name)) = picked {
+                if let Some(row) = self.items.rows.get(i).cloned() {
+                    self.market.add_offer(&row, &name);
+                    self.market.notice = format!("{} {}", name, "añadido a la venta. Ajusta el precio abajo y guarda.");
                 }
             }
+            divider(ui);
+
+            label_title(ui, "A LA VENTA");
             if self.market.offers.is_empty() {
-                ui.label(RichText::new("Todavía no vendes nada.").color(MUTED));
+                ui.label(RichText::new("Todavía no vendes nada. Añade ítems desde el catálogo de arriba.").color(MUTED));
             }
             let mut remove = None;
             for (i, o) in self.market.offers.iter_mut().enumerate() {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(220.0));
+                        ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(240.0));
                         ui.label("Precio");
                         ui.add(egui::DragValue::new(&mut o.price).speed(1.0).range(1..=1_000_000_000));
                         ui.label("Cantidad");
@@ -211,6 +381,21 @@ impl App {
                 save = true;
             }
             divider(ui);
+
+            label_title(ui, "SALDOS DE LOS JUGADORES");
+            if self.market.live.wallets.is_empty() {
+                ui.label(RichText::new("Todavía no hay saldos. Aparecen cuando alguien usa el mercado o recibe monedas.").color(MUTED));
+            }
+            for (name, coins) in &self.market.live.wallets {
+                ui.horizontal(|ui| {
+                    ui.add_sized([240.0, 22.0], egui::Label::new(RichText::new(name).size(16.0).color(PARCHMENT)).truncate());
+                    ui.label(RichText::new(coins.to_string()).size(16.0).color(GOLD));
+                    if ui.small_button("Elegir").clicked() {
+                        pick_player = Some(name.clone());
+                    }
+                });
+            }
+            ui.add_space(6.0);
             label_title(ui, "DAR O QUITAR MONEDAS");
             ui.horizontal_wrapped(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.market.grant_to).hint_text("ID de Steam o nombre").desired_width(220.0));
@@ -228,16 +413,30 @@ impl App {
                 if button(ui, "Aplicar", Vec2::new(100.0, 28.0), true, true) {
                     let (to, amount) = (self.market.grant_to.clone(), self.market.grant_amount);
                     if self.market.add_grant(&to, amount) {
+                        self.market.notice = format!("{} {} → {}", "Enviado al servidor:", amount, to.trim());
                         save = true;
                     } else {
                         self.market.notice = "Escribe a quién y una cantidad distinta de cero.".to_string();
                     }
                 }
             });
+            divider(ui);
+
+            label_title(ui, "ACTIVIDAD RECIENTE");
+            if self.market.live.log.is_empty() {
+                ui.label(RichText::new("Sin movimientos todavía.").color(MUTED));
+            }
+            for e in self.market.live.log.iter().take(20) {
+                ui.label(RichText::new(self.event_text(e)).size(15.0).color(PARCHMENT));
+            }
             if !self.market.notice.is_empty() {
+                ui.add_space(6.0);
                 ui.label(RichText::new(self.market.notice.clone()).color(GOOD));
             }
         });
+        if let Some(name) = pick_player {
+            self.market.grant_to = name;
+        }
         if save {
             self.save_market();
         }
@@ -287,5 +486,17 @@ mod tests {
     fn missing_file_gives_defaults() {
         let m = MarketState::load(&dir("none"));
         assert!(m.offers.is_empty() && m.grant_amount == 100);
+    }
+
+    #[test]
+    fn live_reply_from_the_server_is_read() {
+        let text = r#"{"currency":"Gold","wallets":[{"key":"name:ana","name":"Ana","coins":60},{"key":"","name":"Luis","coins":5}],"log":[{"t":0,"kind":"buy","who":"Ana","to":"","item":"Sword","qty":1,"amount":50},{"t":0,"kind":"grant","who":"","to":"Ana","item":"","qty":0,"amount":100}]}"#;
+        let live = parse_live(text).unwrap();
+        assert_eq!(live.currency, "Gold");
+        assert_eq!(live.wallets, vec![("Ana".to_string(), 60), ("Luis".to_string(), 5)]);
+        assert_eq!(live.log.len(), 2);
+        assert_eq!(live.log[0].kind, "buy");
+        assert_eq!(live.log[1].amount, 100);
+        assert!(parse_live("basura").is_none());
     }
 }

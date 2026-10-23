@@ -46,6 +46,7 @@ MERCADO
 - Pestaña "Mercado": elige el nombre de la moneda, el dinero inicial, la zona donde se puede comprar (o en cualquier lugar), añade ítems con el buscador, pon precio, cantidad por compra, nivel y rareza y pulsa "Guardar y enviar al servidor". Da o quita monedas en "Dar o quitar monedas" (ID de Steam o nombre).
 - Los jugadores usan el chat del juego, sin clave: "!mercado saldo", "!mercado lista [página]", "!mercado comprar <número o nombre> [cantidad]", "!mercado pagar <jugador> <monto>". En inglés: !market balance / list / buy / pay. Lo que compran cae junto a ellos.
 - Los saldos se guardan en el servidor (m182_wallets.json); el catálogo y los regalos de monedas en m182_market.json.
+- La pestana muestra todo el catalogo de items (filtra por nombre, categoria y rareza), los saldos de los jugadores y cada compra, pago y regalo de monedas, y aplica los regalos al instante. Contra un servidor se actualiza mientras la pestana esta abierta.
 
 NOTAS
 - Botin: las criaturas invocadas sueltan su botin normal del juego.

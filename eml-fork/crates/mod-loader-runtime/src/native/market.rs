@@ -71,11 +71,42 @@ pub struct Wallet {
     pub coins: u64,
 }
 
+/// Something that happened in the market, kept for the panel (`kind`: buy, pay or grant).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Event {
+    pub t: u64,
+    pub kind: String,
+    pub who: String,
+    pub to: String,
+    pub item: String,
+    pub qty: u32,
+    pub amount: i64,
+}
+
+const MAX_EVENTS: usize = 40;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct WalletsFile {
     wallets: std::collections::BTreeMap<String, Wallet>,
     applied: Vec<String>,
+    log: Vec<Event>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn event_json(e: &Event) -> serde_json::Value {
+    serde_json::json!({"t": e.t, "kind": e.kind, "who": e.who, "to": e.to, "item": e.item, "qty": e.qty, "amount": e.amount})
+}
+
+fn record(file: &mut WalletsFile, kind: &str, who: &str, to: &str, item: &str, qty: u32, amount: i64) {
+    file.log.push(Event { t: now_secs(), kind: kind.to_string(), who: who.to_string(), to: to.to_string(), item: item.to_string(), qty, amount });
+    if file.log.len() > MAX_EVENTS {
+        file.log.remove(0);
+    }
 }
 
 /// What the game has to do after a purchase.
@@ -138,7 +169,7 @@ fn read_wallets(dir: &Path) -> WalletsFile {
 }
 
 fn write_wallets(dir: &Path, file: &WalletsFile) -> Result<(), String> {
-    let body = serde_json::json!({ "wallets": file.wallets.iter().map(|(k, w)| (k.clone(), serde_json::json!({"name": w.name, "coins": w.coins}))).collect::<serde_json::Map<_, _>>(), "applied": file.applied });
+    let body = serde_json::json!({ "wallets": file.wallets.iter().map(|(k, w)| (k.clone(), serde_json::json!({"name": w.name, "coins": w.coins}))).collect::<serde_json::Map<_, _>>(), "applied": file.applied, "log": file.log.iter().map(event_json).collect::<Vec<_>>() });
     let tmp = dir.join("m182_wallets.json.tmp");
     std::fs::write(&tmp, body.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, dir.join(WALLETS_FILE)).map_err(|e| e.to_string())
@@ -164,6 +195,8 @@ fn apply_grants(cfg: &Config, file: &mut WalletsFile) -> bool {
         let key = if to.chars().all(|c| c.is_ascii_digit()) && to.len() >= 8 { to.to_lowercase() } else { format!("name:{}", to.to_lowercase()) };
         let wallet = file.wallets.entry(key).or_insert_with(|| Wallet { name: to.to_string(), coins: cfg.start });
         wallet.coins = if g.amount >= 0 { wallet.coins.saturating_add(g.amount as u64).min(MAX_COINS) } else { wallet.coins.saturating_sub(g.amount.unsigned_abs()) };
+        let who_name = wallet.name.clone();
+        record(file, "grant", "", &who_name, "", 0, g.amount);
         file.applied.push(g.id.clone());
         if file.applied.len() > MAX_APPLIED {
             file.applied.remove(0);
@@ -231,7 +264,9 @@ pub fn handle(text: &str, who: &Person, online: &[Person], dir: &Path) -> Option
 }
 
 pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> Option<Reply> {
-    let (head, rest) = next_token(text.trim_start());
+    // people type the usage hints literally: `!market buy <1> [2]`
+    let cleaned: String = text.chars().map(|c| if "<>[]".contains(c) { ' ' } else { c }).collect();
+    let (head, rest) = next_token(cleaned.trim_start());
     let w = Words { spanish: head.to_ascii_lowercase().ends_with("mercado") };
     let (sub, rest) = next_token(rest);
     let sub = sub.to_ascii_lowercase();
@@ -302,6 +337,7 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
                 return say(format!("{} {} {}, {} {}.", w.pick("[Mercado] Necesitas", "[Market] You need"), total, coin, w.pick("tienes", "you have"), have));
             }
             file.wallets.insert(key, Wallet { name: who.name.clone(), coins: have - total });
+            record(&mut file, "buy", &who.name, "", &offer.name, qty, total as i64);
             if let Err(e) = write_wallets(dir, &file) {
                 return say(format!("[M182] {}: {e}", w.pick("no se pudo guardar", "could not save")));
             }
@@ -316,7 +352,7 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
                 coin,
                 w.pick("Saldo", "Balance"),
                 have - total
-            );
+            ) + w.pick(". Recógelo a tu lado.", ". Pick it up next to you.");
             Some(Reply { line, deliveries: vec![Delivery { entity: who.entity, offer, copies: qty, template: cfg.pickup_template().to_string() }] })
         }
         "pay" | "pagar" | "dar" => {
@@ -350,12 +386,136 @@ pub fn handle_with(text: &str, who: &Person, online: &[Person], dir: &Path) -> O
             let to_key = existing_key(&file, target).unwrap_or_else(|| primary_key(target));
             let to_have = file.wallets.get(&to_key).map(|w| w.coins).unwrap_or(cfg.start);
             file.wallets.insert(to_key, Wallet { name: target.name.clone(), coins: to_have.saturating_add(amount_text).min(MAX_COINS) });
+            record(&mut file, "pay", &who.name, &target.name, "", 0, amount_text as i64);
             if let Err(e) = write_wallets(dir, &file) {
                 return say(format!("[M182] {}: {e}", w.pick("no se pudo guardar", "could not save")));
             }
             say(format!("{} {} {} {} {} {}.", w.pick("[Mercado]", tag), who.name, w.pick("pagó", "paid"), amount_text, coin, format_args!("{} {}", w.pick("a", "to"), target.name)))
         }
-        _ => say(w.pick("[Mercado] No entiendo. Escribe !mercado ayuda", "[Market] I do not understand. Type !market help").to_string()),
+        _ => say(
+            w.pick(
+                "[Mercado] No entendí. Comandos: !mercado saldo | lista | comprar número o nombre [cantidad] | pagar jugador monto",
+                "[Market] I did not get that. Commands: !market balance | list | buy number or name [quantity] | pay player amount",
+            )
+            .to_string(),
+        ),
+    }
+}
+
+pub const LIVE_FILE: &str = "m182_market_live.json";
+
+fn clean_field(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() && !"|;~$".contains(*c)).collect::<String>().trim().to_string()
+}
+
+/// What the panel shows: balances and recent events, with the currency name.
+pub fn live_json(dir: &Path) -> String {
+    let cfg = read_config(dir);
+    let file = read_wallets(dir);
+    let mut wallets: Vec<(&String, &Wallet)> = file.wallets.iter().collect();
+    wallets.sort_by(|a, b| b.1.coins.cmp(&a.1.coins).then(a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())));
+    serde_json::json!({
+        "currency": cfg.coin(),
+        "wallets": wallets.iter().map(|(k, w)| serde_json::json!({"key": k, "name": w.name, "coins": w.coins})).collect::<Vec<_>>(),
+        "log": file.log.iter().rev().map(event_json).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+pub fn live_tag(seq: u32) -> String {
+    format!("[M182M#{seq}]")
+}
+
+/// One chat line: `[M182M#7] Gold|Ana~120;Luis~30|buy~Ana~~Sword~1~50;grant~~Ana~~0~100$`.
+pub fn live_line(seq: u32, dir: &Path) -> String {
+    const LIMIT: usize = 780;
+    let cfg = read_config(dir);
+    let file = read_wallets(dir);
+    let mut out = format!("{} {}|", live_tag(seq), clean_field(cfg.coin()));
+    let mut wallets: Vec<&Wallet> = file.wallets.values().collect();
+    wallets.sort_by(|a, b| b.coins.cmp(&a.coins));
+    let mut first = true;
+    for w in wallets.iter().take(60) {
+        let part = format!("{}{}~{}", if first { "" } else { ";" }, clean_field(&w.name), w.coins);
+        if out.len() + part.len() > LIMIT - 300 {
+            break;
+        }
+        out.push_str(&part);
+        first = false;
+    }
+    out.push('|');
+    let mut first = true;
+    for e in file.log.iter().rev() {
+        let part = format!(
+            "{}{}~{}~{}~{}~{}~{}",
+            if first { "" } else { ";" },
+            clean_field(&e.kind),
+            clean_field(&e.who),
+            clean_field(&e.to),
+            clean_field(&e.item),
+            e.qty,
+            e.amount
+        );
+        if out.len() + part.len() + 1 > LIMIT {
+            break;
+        }
+        out.push_str(&part);
+        first = false;
+    }
+    out.push('$');
+    out
+}
+
+/// The answer to `live_line` as the panel's JSON (`log` has no times: the chat line is short).
+pub fn parse_live_line(text: &str, seq: u32) -> Option<String> {
+    let marker = live_tag(seq);
+    let start = text.find(&marker)? + marker.len();
+    let line = text[start..].trim_start().lines().next().unwrap_or("").trim();
+    let body = line.strip_suffix('$')?;
+    let mut parts = body.split('|');
+    let currency = parts.next()?;
+    let wallets: Vec<serde_json::Value> = parts
+        .next()?
+        .split(';')
+        .filter_map(|w| {
+            let (name, coins) = w.rsplit_once('~')?;
+            Some(serde_json::json!({"key": "", "name": name, "coins": coins.parse::<u64>().ok()?}))
+        })
+        .collect();
+    let log: Vec<serde_json::Value> = parts
+        .next()
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|e| {
+            let f: Vec<&str> = e.split('~').collect();
+            if f.len() != 6 {
+                return None;
+            }
+            Some(serde_json::json!({"t": 0, "kind": f[0], "who": f[1], "to": f[2], "item": f[3], "qty": f[4].parse::<u32>().ok()?, "amount": f[5].parse::<i64>().ok()?}))
+        })
+        .collect();
+    Some(serde_json::json!({"currency": currency, "wallets": wallets, "log": log}).to_string())
+}
+
+/// Called every few ticks on the server: applies the admin's grants as soon as they arrive and
+/// keeps `m182_market_live.json` current for the panel.
+pub fn tick(dir: &Path) {
+    static LAST: Mutex<Option<(Option<std::time::SystemTime>, Option<std::time::SystemTime>)>> = Mutex::new(None);
+    let stamp = |name: &str| std::fs::metadata(dir.join(name)).and_then(|m| m.modified()).ok();
+    let now = (stamp(CONFIG_FILE), stamp(WALLETS_FILE));
+    let Ok(mut last) = LAST.lock() else { return };
+    if *last == Some(now) {
+        return;
+    }
+    let cfg = read_config(dir);
+    let mut file = read_wallets(dir);
+    if apply_grants(&cfg, &mut file) {
+        let _ = write_wallets(dir, &file);
+    }
+    let text = live_json(dir);
+    let tmp = dir.join("m182_market_live.json.tmp");
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, dir.join(LIVE_FILE)).is_ok() {
+        *last = Some((stamp(CONFIG_FILE), stamp(WALLETS_FILE)));
     }
 }
 
@@ -469,5 +629,27 @@ mod tests {
     #[test]
     fn command_detection() {
         assert!(is_command("!market list") && is_command("/MERCADO") && !is_command("!marketing") && !is_command("hello !market"));
+    }
+
+    #[test]
+    fn live_line_round_trips_balances_and_events() {
+        let d = dir("live");
+        std::fs::write(d.join(CONFIG_FILE), r#"{"currency":"Gold","start":10,"buy":[{"item":11,"name":"Iron Sword","price":50,"amount":1}],"grants":[{"id":"g1","to":"Ana","amount":100}]}"#).unwrap();
+        tick(&d);
+        let who = Person { name: "Ana".into(), id: None, entity: 3 };
+        let r = handle_with("!market buy <1>", &who, &[], &d).unwrap();
+        assert!(r.line.contains("bought"), "{}", r.line);
+        let line = live_line(9, &d);
+        assert!(line.ends_with('$') && line.len() <= 800);
+        let json: serde_json::Value = serde_json::from_str(&parse_live_line(&line, 9).unwrap()).unwrap();
+        assert_eq!(json["currency"], "Gold");
+        assert_eq!(json["wallets"][0]["name"], "Ana");
+        assert_eq!(json["wallets"][0]["coins"], 60);
+        assert_eq!(json["log"][0]["kind"], "buy");
+        assert_eq!(json["log"][1]["kind"], "grant");
+        assert!(parse_live_line(&line, 10).is_none());
+        assert!(d.join(LIVE_FILE).exists());
+        let help = handle_with("!market xyz", &who, &[], &d).unwrap();
+        assert!(help.line.contains("Commands"), "{}", help.line);
     }
 }
