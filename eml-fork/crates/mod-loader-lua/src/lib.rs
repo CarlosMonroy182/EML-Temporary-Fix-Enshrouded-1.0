@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use kfc::reflection::LookupKey;
 use mod_loader::ModEnvironment;
 
-use crate::{alias::Path, cache::{CacheDiff, FileStateCache}, env::{AppFeatures, AppState}, log::info, runner::LuaModRunner};
+use crate::{alias::Path, cache::{CacheDiff, FileStateCache}, env::{AppFeatures, AppState}, log::{error, info}, runner::LuaModRunner};
 
 mod runner;
 mod definition;
@@ -14,6 +14,7 @@ mod cache;
 mod alias;
 mod load;
 mod lua;
+mod guard;
 
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
@@ -44,6 +45,39 @@ pub struct RunResult {
 }
 
 pub fn run(
+    env: &ModEnvironment,
+    args: RunArgs,
+) -> anyhow::Result<RunResult> {
+    // M182: a patch that dies half way (crash, antivirus, power cut) must never leave
+    // the game with a broken core resource package.
+    let patching = args.options.patch;
+    let file_name = args.file_name.clone();
+
+    if patching {
+        guard::recover(env.game_dir().as_std_path(), &file_name);
+        guard::begin(env.cache_dir().as_std_path());
+    }
+
+    let result = run_inner(env, args);
+
+    if patching {
+        match &result {
+            Ok(_) => match guard::verify(env.game_dir().as_std_path(), &file_name) {
+                Ok(()) => guard::end(env.cache_dir().as_std_path()),
+                Err(why) => {
+                    error!(why = %why, "Patched game files failed the check, restoring the original ones");
+                    guard::rollback(env.game_dir().as_std_path(), env.cache_dir().as_std_path(), &file_name);
+                    return Err(anyhow::anyhow!("Patched game files failed the check: {why}"));
+                }
+            },
+            Err(_) => guard::rollback(env.game_dir().as_std_path(), env.cache_dir().as_std_path(), &file_name),
+        }
+    }
+
+    result
+}
+
+fn run_inner(
     env: &ModEnvironment,
     mut args: RunArgs,
 ) -> anyhow::Result<RunResult> {

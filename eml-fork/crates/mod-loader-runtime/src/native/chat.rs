@@ -87,6 +87,7 @@ static OTHER_SEEN: AtomicU32 = AtomicU32::new(0);
 
 /// Logs the first few ordinary messages (their first characters only) so a silent
 /// channel can be told apart from messages arriving in an unexpected shape.
+#[cfg(windows)]
 pub fn note_other(message: &str, client: u32) {
     if OTHER_SEEN.fetch_add(1, Ordering::Relaxed) < 6 {
         let head: String = message.chars().take(6).collect();
