@@ -279,6 +279,11 @@ pub fn submit_players(seq: u32) {
     push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0 }, true);
 }
 
+pub fn submit_teams(seq: u32) {
+    let key = state().settings.key.clone();
+    push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0 }, true);
+}
+
 pub fn submit_ping() {
     let key = state().settings.key.clone();
     push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0 }, true);

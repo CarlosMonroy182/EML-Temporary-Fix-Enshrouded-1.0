@@ -10,6 +10,7 @@ use crate::{write_atomic, App};
 
 pub const ZONES_FILE: &str = "m182_zones.json";
 pub const TEAMS_FILE: &str = "m182_teams.json";
+pub const LIVE_FILE: &str = "m182_teams_live.json";
 pub const PLAYERS_FILE: &str = "m182_players.json";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -241,6 +242,14 @@ pub struct SocialState {
     pub extra: Vec<String>,
     pub extra_input: String,
     pub me: Option<crate::steam::Account>,
+    /// Last text of the server's real teams that was applied here.
+    pub live_seen: String,
+    pub live_note: String,
+    /// When the panel last sent its teams: the server's answer is not trusted right after.
+    pub last_push: Option<Instant>,
+    pub teams_seq: u32,
+    pub teams_asked: Option<Instant>,
+    pub teams_last: Option<Instant>,
 }
 
 impl Default for SocialState {
@@ -266,8 +275,64 @@ impl Default for SocialState {
             extra: Vec::new(),
             extra_input: String::new(),
             me: None,
+            live_seen: String::new(),
+            live_note: String::new(),
+            last_push: None,
+            teams_seq: 0,
+            teams_asked: None,
+            teams_last: None,
         }
     }
+}
+
+/// The server's real teams (`m182_teams_live.json`) put over the panel's list: for every team of
+/// the same name the people and leaders become the server's. Returns whether anything changed;
+/// `None` when the answer was cut short and must not be used.
+pub fn adopt_live(teams: &mut [Team], seen: &[Seen], text: &str) -> Option<bool> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if !v.get("complete").and_then(|c| c.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let list = v.get("teams")?.as_array()?;
+    let mut known: Vec<Person> = seen.iter().map(|s| s.person()).collect();
+    for t in teams.iter() {
+        known.extend(t.members.iter().cloned());
+    }
+    let strings = |v: &Value, key: &str| -> Vec<String> {
+        v.get(key).and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    };
+    let mut changed = false;
+    for live in list {
+        let name = live.get("name").and_then(|n| n.as_str()).unwrap_or("").trim().to_lowercase();
+        let Some(team) = teams.iter_mut().find(|t| !name.is_empty() && t.name.trim().to_lowercase() == name) else { continue };
+        let mut members: Vec<Person> = Vec::new();
+        for n in strings(live, "members") {
+            let person = known.iter().find(|p| p.name.trim().eq_ignore_ascii_case(n.trim())).cloned().unwrap_or(Person { key: format!("name:{n}"), name: n.clone() });
+            if !members.iter().any(|m| m.key == person.key) {
+                members.push(person);
+            }
+        }
+        let wanted = strings(live, "leaders");
+        let leaders: Vec<String> = members
+            .iter()
+            .filter(|m| wanted.iter().any(|l| l.eq_ignore_ascii_case(&m.key) || l.eq_ignore_ascii_case(&format!("name:{}", m.name))))
+            .map(|m| m.key.clone())
+            .collect();
+        let keys = |l: &[Person]| -> Vec<String> {
+            let mut k: Vec<String> = l.iter().map(|p| p.key.clone()).collect();
+            k.sort();
+            k
+        };
+        let (mut old_l, mut new_l) = (team.leaders.clone(), leaders.clone());
+        old_l.sort();
+        new_l.sort();
+        if keys(&team.members) != keys(&members) || old_l != new_l {
+            changed = true;
+        }
+        team.members = members;
+        team.leaders = leaders;
+    }
+    Some(changed)
 }
 
 pub fn parse_zones(text: &str) -> Vec<Zone> {
@@ -496,11 +561,70 @@ impl SocialState {
         let result = write_atomic(dir, TEAMS_FILE, "m182_teams.json.tmp", &teams_json(&self.teams, &numbers, &self.touched).to_string());
         if result.is_ok() {
             self.written = numbers;
+            self.last_push = Some(Instant::now());
+            self.teams_asked = None;
+            self.teams_last = None;
+            let _ = std::fs::remove_file(dir.join(crate::social::LIVE_FILE));
         }
         self.notice = match result {
             Ok(()) => "Guardado. El juego lo aplica en un par de segundos.".to_string(),
             Err(e) => format!("Error: {e}"),
         };
+    }
+
+    /// Keeps the panel's teams equal to the server's: reads what the server published (in a local
+    /// game its own file, against a server the answer to a chat question asked every few minutes).
+    pub fn live_tick(&mut self, dir: &Path, remote: bool, connected: bool, queued: usize) {
+        if queued > 0 || self.last_push.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        let path = dir.join(LIVE_FILE);
+        let fresh = |dir: &Path| {
+            let live = std::fs::metadata(dir.join(LIVE_FILE)).and_then(|m| m.modified()).ok();
+            let mine = std::fs::metadata(dir.join(TEAMS_FILE)).and_then(|m| m.modified()).ok();
+            match (live, mine) {
+                (Some(l), Some(m)) => l >= m,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        };
+        if remote {
+            if self.teams_asked.is_some_and(|at| at.elapsed() > Duration::from_secs(75)) {
+                self.teams_asked = None;
+            }
+        }
+        let usable = if remote { self.teams_asked.is_some() } else { true };
+        if usable && fresh(dir) {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if text != self.live_seen {
+                    match adopt_live(&mut self.teams, &self.seen, &text) {
+                        Some(changed) => {
+                            self.live_seen = text;
+                            self.teams_asked = None;
+                            self.written = team_numbers(&self.teams, &self.seen);
+                            self.live_note = "Equipos sincronizados con el servidor.".to_string();
+                            if changed {
+                                self.notice = "Los equipos cambiaron en el servidor y ya se muestran aquí.".to_string();
+                            }
+                        }
+                        None => self.live_note = "La lista de equipos del servidor llegó incompleta; se ignora.".to_string(),
+                    }
+                } else if remote {
+                    self.teams_asked = None;
+                }
+            }
+        }
+        if remote && connected && self.roster_asked.is_none() && self.teams_asked.is_none() && self.teams_last.map_or(true, |t| t.elapsed() >= Duration::from_secs(180)) {
+            let seq = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1) % 1_000_000) as u32 + 1;
+            self.teams_seq = seq;
+            let _ = std::fs::remove_file(&path);
+            let scan = json!({"seq": seq, "kind": "teams"}).to_string();
+            if write_atomic(dir, crate::remote::SCAN_FILE, "m182_scan.request.tmp", &scan).is_ok() {
+                crate::remote::submit_teams(seq);
+                self.teams_asked = Some(Instant::now());
+            }
+            self.teams_last = Some(Instant::now());
+        }
     }
 
     pub fn resync_teams(&mut self, dir: &Path) {
@@ -573,6 +697,8 @@ impl App {
         if self.social.checked.elapsed() >= Duration::from_millis(1000) {
             let dir = self.dir.clone();
             self.social.refresh(&dir);
+            let queued = crate::remote::status().queued;
+            self.social.live_tick(&dir, crate::remote::active(), crate::remote::connected(), queued);
             self.social.resync_teams(&dir);
             self.finish_here();
         }
@@ -770,79 +896,75 @@ impl App {
         let mut remove = None;
         let mut reapply: Option<usize> = None;
         let mut membership: Vec<(usize, Person, bool)> = Vec::new();
-        let columns = ((ui.available_width() / 340.0).floor() as usize).clamp(1, 4);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let width = ((ui.available_width() - 12.0 * (columns as f32 - 1.0)) / columns as f32).max(240.0);
+        let columns = ((ui.available_width() / 430.0).floor() as usize).clamp(1, 3);
+        let live_note = self.social.live_note.clone();
+        egui::ScrollArea::vertical().auto_shrink([false, true]).max_height((ui.available_height() - 120.0).max(240.0)).show(ui, |ui| {
             let count = self.social.teams.len();
-            let mut first = 0;
-            while first < count {
-                ui.horizontal_top(|ui| {
-                    for i in first..(first + columns).min(count) {
-                        ui.allocate_ui(Vec2::new(width, 0.0), |ui| {
-                            ui.set_width(width);
-                            let team = &mut self.social.teams[i];
-                            ui.group(|ui| {
-                                ui.set_width(width - 16.0);
-                                changed |= ui.add(egui::TextEdit::singleline(&mut team.name).desired_width(width - 40.0)).changed();
-                                ui.horizontal(|ui| {
-                                    if button(ui, "Reaplicar a todos", Vec2::new(150.0, 24.0), !team.members.is_empty(), false) {
-                                        reapply = Some(i);
-                                    }
-                                    if button(ui, "Borrar equipo", Vec2::new(120.0, 24.0), true, false) {
-                                        remove = Some(i);
-                                    }
-                                });
-                                ui.separator();
-                                if team.members.is_empty() {
-                                    ui.label(RichText::new("Sin miembros.").color(MUTED));
+            ui.columns(columns, |cols| {
+                for (c, col) in cols.iter_mut().enumerate() {
+                    for i in (c..count).step_by(columns) {
+                        let width = col.available_width();
+                        let team = &mut self.social.teams[i];
+                        egui::Frame::group(col.style()).inner_margin(egui::Margin::same(10.0)).show(col, |ui| {
+                            ui.set_width(width - 24.0);
+                            changed |= ui.add(egui::TextEdit::singleline(&mut team.name).font(egui::TextStyle::Heading).desired_width(f32::INFINITY)).changed();
+                            ui.horizontal_wrapped(|ui| {
+                                if button(ui, "Reaplicar a todos", Vec2::new(170.0, 28.0), !team.members.is_empty(), false) {
+                                    reapply = Some(i);
                                 }
-                                for person in team.members.clone() {
-                                    ui.horizontal(|ui| {
-                                        let online = seen.iter().find(|s| s.member.key() == person.key);
-                                        let color = if online.is_some() { PARCHMENT } else { MUTED };
-                                        ui.label(RichText::new(&person.name).color(color));
-                                        if online.is_none() {
-                                            ui.label(RichText::new("(desconectado)").color(MUTED).size(13.0));
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.small_button("✕").on_hover_text("Sacar del equipo").clicked() {
-                                                membership.push((i, person.clone(), false));
-                                            }
-                                            let lead = team.leaders.contains(&person.key);
-                                            if ui
-                                                .selectable_label(lead, "★ líder")
-                                                .on_hover_text("Los líderes pueden invitar y expulsar desde el chat del juego: !equipo invitar <nombre>. Puede haber varios.")
-                                                .clicked()
-                                            {
-                                                team.leaders.retain(|k| *k != person.key);
-                                                if !lead {
-                                                    team.leaders.push(person.key.clone());
-                                                }
-                                                changed = true;
-                                            }
-                                        });
-                                    });
-                                }
-                                let free: Vec<&Person> = candidates.iter().filter(|c| !team.members.iter().any(|m| m.key == c.key)).collect();
-                                if !free.is_empty() {
-                                    egui::ComboBox::from_id_salt(("team_add", i)).selected_text("Añadir jugador…").width(width - 40.0).show_ui(ui, |ui| {
-                                        for person in free {
-                                            let online = seen.iter().any(|s| s.member.key() == person.key);
-                                            let label = if online { person.name.clone() } else { format!("{} (desconectado)", person.name) };
-                                            if ui.selectable_label(false, label).clicked() {
-                                                membership.push((i, person.clone(), true));
-                                            }
-                                        }
-                                    });
+                                if button(ui, "Borrar equipo", Vec2::new(140.0, 28.0), true, false) {
+                                    remove = Some(i);
                                 }
                             });
+                            ui.add_space(4.0);
+                            if team.members.is_empty() {
+                                ui.label(RichText::new("Sin miembros.").color(MUTED).size(16.0));
+                            }
+                            for person in team.members.clone() {
+                                let online = seen.iter().any(|s| s.member.key() == person.key);
+                                let lead = team.leaders.contains(&person.key);
+                                ui.horizontal(|ui| {
+                                    let star = RichText::new("★").size(20.0).color(if lead { GOLD } else { MUTED });
+                                    if ui
+                                        .add(egui::SelectableLabel::new(lead, star))
+                                        .on_hover_text("Líder: puede invitar y expulsar desde el chat del juego (!team invite nombre). Puede haber varios.")
+                                        .clicked()
+                                    {
+                                        team.leaders.retain(|k| *k != person.key);
+                                        if !lead {
+                                            team.leaders.push(person.key.clone());
+                                        }
+                                        changed = true;
+                                    }
+                                    let label = if online { person.name.clone() } else { format!("{} (desconectado)", person.name) };
+                                    ui.add(egui::Label::new(RichText::new(label).size(17.0).color(if online { PARCHMENT } else { MUTED })).truncate());
+                                    if ui.add(egui::Button::new(RichText::new("✕").size(16.0))).on_hover_text("Sacar del equipo").clicked() {
+                                        membership.push((i, person.clone(), false));
+                                    }
+                                });
+                            }
+                            let free: Vec<&Person> = candidates.iter().filter(|c| !team.members.iter().any(|m| m.key == c.key)).collect();
+                            if !free.is_empty() {
+                                ui.add_space(4.0);
+                                egui::ComboBox::from_id_salt(("team_add", i)).selected_text(RichText::new("Añadir jugador…").size(16.0)).width(width - 40.0).show_ui(ui, |ui| {
+                                    for person in free {
+                                        let online = seen.iter().any(|s| s.member.key() == person.key);
+                                        let label = if online { person.name.clone() } else { format!("{} (desconectado)", person.name) };
+                                        if ui.selectable_label(false, RichText::new(label).size(16.0)).clicked() {
+                                            membership.push((i, person.clone(), true));
+                                        }
+                                    }
+                                });
+                            }
                         });
+                        col.add_space(10.0);
                     }
-                });
-                ui.add_space(8.0);
-                first += columns;
-            }
+                }
+            });
         });
+        if !live_note.is_empty() {
+            ui.label(RichText::new(live_note).color(MUTED).size(14.0));
+        }
         for (team, person, on) in membership {
             self.social.touch(&person);
             set_member(&mut self.social.teams, team, &person, on);
@@ -952,6 +1074,24 @@ mod tests {
         set_member(&mut teams, 1, &b, false);
         assert_eq!(teams[1].members, vec![a, c]);
         assert_eq!(parse_teams(&teams_json(&teams, &[vec![], vec![1, 2]], &Default::default()).to_string()), teams);
+    }
+
+    #[test]
+    fn server_teams_replace_panel_membership_and_leaders() {
+        let ana = person("steamid:1", "Ana");
+        let mut teams = vec![
+            Team { name: "Red".into(), members: vec![ana.clone(), person("name:Luis", "Luis")], leaders: vec!["steamid:1".into()] },
+            Team { name: "Blue".into(), members: vec![], leaders: vec![] },
+        ];
+        let live = r#"{"complete":true,"teams":[{"name":"red","members":["Luis"],"leaders":["name:luis"]},{"name":"Blue","members":["Ana","Zed"],"leaders":["steamid:1"]}]}"#;
+        assert_eq!(adopt_live(&mut teams, &[], live), Some(true));
+        assert_eq!(teams[0].members, vec![person("name:Luis", "Luis")]);
+        assert_eq!(teams[0].leaders, vec!["name:Luis".to_string()]);
+        assert_eq!(teams[1].members, vec![ana, person("name:Zed", "Zed")]);
+        assert_eq!(teams[1].leaders, vec!["steamid:1".to_string()]);
+        assert_eq!(adopt_live(&mut teams, &[], live), Some(false));
+        assert_eq!(adopt_live(&mut teams, &[], r#"{"complete":false,"teams":[]}"#), None);
+        assert_eq!(teams[1].members.len(), 2);
     }
 
     #[test]

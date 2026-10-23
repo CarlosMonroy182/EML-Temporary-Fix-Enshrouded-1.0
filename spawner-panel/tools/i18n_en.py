@@ -268,8 +268,9 @@ EN = {
 "Reaplicar a todos": "Reapply to everyone",
 "Sin miembros.": "No members.",
 "Añadir jugador…": "Add player…",
-"(desconectado)": "(offline)",
+"Líder: puede invitar y expulsar desde el chat del juego (!team invite nombre). Puede haber varios.": "Leader: can invite and remove from the game chat (!team invite name). There can be several.",
+"Equipos sincronizados con el servidor.": "Teams synced with the server.",
+"Los equipos cambiaron en el servidor y ya se muestran aquí.": "The teams changed on the server and are now shown here.",
+"La lista de equipos del servidor llegó incompleta; se ignora.": "The server's team list arrived incomplete; it is ignored.",
 "Sacar del equipo": "Remove from team",
-"★ líder": "★ leader",
-"Los líderes pueden invitar y expulsar desde el chat del juego: !equipo invitar <nombre>. Puede haber varios.": "Leaders can invite and remove from the game chat: !team invite <name>. There can be several.",
 }

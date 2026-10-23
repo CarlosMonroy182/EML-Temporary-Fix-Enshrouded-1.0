@@ -2538,6 +2538,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         }
         log(&format!("teams: {} defined {:?}", st.groups.teams.len(), st.groups.teams));
     }
+    publish_live_teams(dir, &st.groups.teams);
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
     if manager == 0 {
@@ -2689,6 +2690,31 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         }
         list.retain(|p| p.misses < 5);
     }
+}
+
+static LIVE_TEAMS: Mutex<Vec<groups::LiveTeam>> = Mutex::new(Vec::new());
+static LIVE_TEXT: Mutex<String> = Mutex::new(String::new());
+
+/// Keeps the server's real teams ready for the chat answer and in a file the panel can read here.
+fn publish_live_teams(dir: &std::path::Path, teams: &[groups::TeamDef]) {
+    let live = groups::live_teams(teams);
+    let text = groups::live_json(&live, true);
+    if let Ok(mut last) = LIVE_TEXT.lock() {
+        if *last != text {
+            let tmp = dir.join("m182_teams_live.json.tmp");
+            if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, dir.join(groups::LIVE_FILE)).is_ok() {
+                *last = text;
+            }
+        }
+    }
+    if let Ok(mut shared) = LIVE_TEAMS.lock() {
+        *shared = live;
+    }
+}
+
+pub fn teams_line(seq: u32) -> String {
+    let live = LIVE_TEAMS.lock().map(|l| l.clone()).unwrap_or_default();
+    groups::live_line(seq, &live)
 }
 
 pub fn roster_line(seq: u32, client: u32) -> String {
@@ -3350,8 +3376,7 @@ fn decode_after(bytes: &[u8], wide: bool) -> String {
     }
 }
 
-fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String)>, Option<(u32, [f64; 3])>)> {
-    let marker = roster::tag(seq);
+fn find_reply<T>(regions: &[(usize, usize)], marker: &str, parse: impl Fn(&str) -> Option<T>) -> Option<T> {
     let narrow = marker.as_bytes().to_vec();
     let wide = utf16le(&marker);
     const CHUNK: usize = 4 << 20;
@@ -3370,8 +3395,8 @@ fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String
                 for hit in roster::find_all(&b, needle) {
                     let tail = &b[hit..b.len().min(hit + 2200)];
                     let text = decode_after(tail, is_wide);
-                    if let Some(list) = roster::parse_reply(&text, seq) {
-                        return Some((list, roster::parse_own(&text, seq)));
+                    if let Some(found) = parse(&text) {
+                        return Some(found);
                     }
                 }
             }
@@ -3379,6 +3404,10 @@ fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String
         }
     }
     None
+}
+
+fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String)>, Option<(u32, [f64; 3])>)> {
+    find_reply(regions, &roster::tag(seq), |text| roster::parse_reply(text, seq).map(|list| (list, roster::parse_own(text, seq))))
 }
 
 fn scan_roster(seq: u32, dir: std::path::PathBuf) {
@@ -3417,17 +3446,48 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
     SCAN_BUSY.store(false, Ordering::SeqCst);
 }
 
+fn find_teams(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<groups::LiveTeam>, bool)> {
+    find_reply(regions, &groups::live_tag(seq), |text| groups::parse_live_line(text, seq))
+}
+
+fn scan_teams(seq: u32, dir: std::path::PathBuf) {
+    let started = Instant::now();
+    let found = loop {
+        let regions = data_regions();
+        if let Some(found) = find_teams(&regions, seq) {
+            break Some(found);
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    };
+    match found {
+        Some((live, complete)) => {
+            let tmp = dir.join("m182_teams_live.json.tmp");
+            if std::fs::write(&tmp, groups::live_json(&live, complete)).is_ok() {
+                let _ = std::fs::rename(&tmp, dir.join(groups::LIVE_FILE));
+            }
+            log(&format!("teams {seq}: {} team(s) read from the chat ({}), {} ms", live.len(), if complete { "complete" } else { "cut" }, started.elapsed().as_millis()));
+        }
+        None => log(&format!("teams {seq}: the answer never appeared in memory")),
+    }
+    SCAN_BUSY.store(false, Ordering::SeqCst);
+}
+
 fn scan_request(_st: &mut PowerState, dir: &std::path::Path) {
     let path = dir.join(SCAN_FILE);
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let _ = std::fs::remove_file(&path);
-    let seq = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("seq").and_then(|s| s.as_u64())).unwrap_or(0) as u32;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+    let seq = value.as_ref().and_then(|v| v.get("seq").and_then(|s| s.as_u64())).unwrap_or(0) as u32;
+    let teams = value.as_ref().and_then(|v| v.get("kind").and_then(|k| k.as_str())) == Some("teams");
     if SCAN_BUSY.swap(true, Ordering::SeqCst) {
         log("roster: a search is already running");
         return;
     }
     let dir = dir.to_path_buf();
-    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || scan_roster(seq, dir)).is_err() {
+    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || if teams { scan_teams(seq, dir) } else { scan_roster(seq, dir) }).is_err() {
         SCAN_BUSY.store(false, Ordering::SeqCst);
         log("roster: could not start the search");
     }
