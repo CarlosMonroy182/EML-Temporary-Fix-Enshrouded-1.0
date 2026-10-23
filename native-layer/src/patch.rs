@@ -258,7 +258,7 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     if super::invites::is_command(&message) {
         return team_command(text, &message, client as u32);
     }
-    if super::market::is_command(&message) {
+    if super::market::is_command(&message) && super::market::configured() {
         return market_command(text, &message, client as u32);
     }
     if !super::chat::has_prefix(&message) {

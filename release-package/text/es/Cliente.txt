@@ -42,12 +42,6 @@ EQUIPOS
 - Lideres de equipo: junto a cada persona de un equipo hay una casilla "lider". Los lideres pueden manejar su equipo desde el chat del juego, sin panel ni administrador: "!equipo invitar <nombre>" (el jugador debe estar conectado), el invitado escribe "!equipo aceptar" (o "!equipo rechazar") antes de 2 minutos, "!equipo salir" para salir, "!equipo expulsar <nombre>" (lider). Todos en el chat ven la respuesta. En ingles: !team invite / accept / decline / leave / kick. Un jugador solo puede estar en un equipo; para cambiar primero sale. Quienes entran o salen asi se guardan en el servidor (m182_members.json) y aplican al instante; el panel no los lista y volver a enviar los equipos desde el panel no los quita. Quita a un lider desde el panel desmarcando la casilla.
 - Velocidad de escritura del chat: si el servidor pierde letras, en m182_panel.json añade "typing_burst": 1 y "typing_gap_ms": 4.
 
-MERCADO
-- Pestaña "Mercado": elige el nombre de la moneda, el dinero inicial, la zona donde se puede comprar (o en cualquier lugar), añade ítems con el buscador, pon precio, cantidad por compra, nivel y rareza y pulsa "Guardar y enviar al servidor". Da o quita monedas en "Dar o quitar monedas" (ID de Steam o nombre).
-- Los jugadores usan el chat del juego, sin clave: "!mercado saldo", "!mercado lista [página]", "!mercado comprar <número o nombre> [cantidad]", "!mercado pagar <jugador> <monto>". En inglés: !market balance / list / buy / pay. Lo que compran cae junto a ellos.
-- Los saldos se guardan en el servidor (m182_wallets.json); el catálogo y los regalos de monedas en m182_market.json.
-- La pestana muestra todo el catalogo de items (filtra por nombre, categoria y rareza), los saldos de los jugadores y cada compra, pago y regalo de monedas, y aplica los regalos al instante. Contra un servidor se actualiza mientras la pestana esta abierta.
-
 NOTAS
 - Botin: las criaturas invocadas sueltan su botin normal del juego.
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. No hay que subir nada por FTP.
@@ -58,6 +52,7 @@ VFX (efectos)
 - Para apagar los efectos, borra la carpeta mods\m182_vfx (o crea m182_vfx.json con {"enabled": false}).
 
 SI EL JUEGO NO ABRE
+- Este paquete carga mediante dbghelp.dll. Otro cargador de mods que tambien use dbghelp.dll (por ejemplo el EML original) no puede funcionar a la vez: deja un solo dbghelp.dll en la carpeta del juego.
 - El cargador ahora comprueba los archivos del juego tras cada parcheo y, si algo falla, vuelve a poner los originales solo (mira eml.log / m182_panel.log). Basta con abrir el juego otra vez.
 - Si aun dice "Could not find core resource package": cierra el juego, borra dbghelp.dll y en Steam: clic derecho en Enshrouded > Propiedades > Archivos instalados > Verificar integridad de los archivos del juego. Despues vuelve a copiar los archivos del mod.
 

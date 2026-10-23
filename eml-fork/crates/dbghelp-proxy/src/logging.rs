@@ -23,19 +23,24 @@ pub fn setup() {
         let path = env_string(ENV_LOG_FILE_PATH, DEFAULT_LOG_PATH);
         let max_log_files = env_usize(ENV_LOG_FILE_MAX, DEFAULT_MAX_LOG_FILES);
 
-        let appender = RollingFileAppender::builder()
+        let built = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .filename_suffix("eml.log")
             .max_log_files(max_log_files)
-            .build(path)
-            .expect("failed to create log appender");
+            .build(path);
 
-        let file_layer = fmt::layer()
-            .json()
-            .with_writer(appender)
-            .with_filter(env_filter(ENV_LOG_FILE_FILTER));
+        match built {
+            Ok(appender) => {
+                let file_layer = fmt::layer()
+                    .json()
+                    .with_writer(appender)
+                    .with_filter(env_filter(ENV_LOG_FILE_FILTER));
 
-        Some(file_layer)
+                Some(file_layer)
+            }
+            // a read-only game folder must never stop the game: go on without a log file
+            Err(_) => None,
+        }
     } else {
         None
     };

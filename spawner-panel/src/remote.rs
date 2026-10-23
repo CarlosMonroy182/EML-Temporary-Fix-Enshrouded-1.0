@@ -20,7 +20,7 @@ pub const ONLINE_FILE: &str = "m182_online.json";
 pub const CONFIG_KEY: &str = "remote_key";
 
 /// Files the server accepts through chat.
-pub const FORWARDED: [&str; 8] = [
+pub const FORWARDED: [&str; 7] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -28,7 +28,6 @@ pub const FORWARDED: [&str; 8] = [
     "m182_teams.json",
     "m182_spawners.json",
     "m182_spawner_op.json",
-    "m182_market.json",
 ];
 
 /// Requests that only make sense on the server: they are not written next to the game.
@@ -282,11 +281,6 @@ pub fn submit_players(seq: u32) {
 pub fn submit_teams(seq: u32) {
     let key = state().settings.key.clone();
     push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0 }, true);
-}
-
-pub fn submit_wallets(seq: u32) {
-    let key = state().settings.key.clone();
-    push(Job { file: "wallets".to_string(), lines: vec![proto::wallets(&key, seq)], tries: 0 }, true);
 }
 
 pub fn submit_ping() {
