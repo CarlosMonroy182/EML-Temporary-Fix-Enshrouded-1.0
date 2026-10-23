@@ -224,6 +224,22 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
     if replace_text(text, &line) { 0 } else { 1 }
 }
 
+fn market_command(text: usize, message: &str, client: u32) -> u8 {
+    let asking = (client & 0x3f) + 1;
+    let online: Vec<super::invites::Person> = super::table::entries()
+        .into_iter()
+        .filter_map(|e| Some(super::invites::Person { entity: e.entity(), name: e.name.clone()?, id: e.id.clone() }))
+        .collect();
+    let Some(who) = online.iter().find(|p| p.entity == asking).cloned() else { return 1 };
+    let Ok(dir) = std::env::current_dir() else { return 1 };
+    let Some(reply) = super::market::handle(message, &who, &online, &dir) else { return 1 };
+    super::spawner::log(&format!("market: {} -> {}", who.name, reply.line));
+    for delivery in &reply.deliveries {
+        super::spawner::queue_delivery(delivery);
+    }
+    if replace_text(text, &reply.line) { 0 } else { 1 }
+}
+
 extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
     if key.is_empty() {
@@ -238,6 +254,9 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     let message = String::from_utf8_lossy(&bytes);
     if super::invites::is_command(&message) {
         return team_command(text, &message, client as u32);
+    }
+    if super::market::is_command(&message) {
+        return market_command(text, &message, client as u32);
     }
     if !super::chat::has_prefix(&message) {
         super::chat::note_other(&message, client as u32);

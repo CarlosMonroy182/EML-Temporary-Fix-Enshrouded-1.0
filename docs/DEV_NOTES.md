@@ -57,3 +57,8 @@ The server's player-list answer now ends with ` ^<entity>@x,y,z`: the entity of 
 - the EML 0.2.0 loader fixes (commit e36ae2f: no crash/errors on close; markers "KFCWriter is no longer available", "Failed to apply resource")
 - the M182 VFX module.
 The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 VFX" fails the build if a marker is missing.
+
+## Market (native `market.rs` + panel `market.rs`)
+- Balances (`m182_wallets.json`, server-written) and catalog/grants (`m182_market.json`, panel-written, forwarded to the server like teams). Grants have unique ids; the server applies each once.
+- Chat: `!market|!mercado balance|list|buy|pay`. A purchase deducts coins first, then queues pickups through `spawner::queue_delivery` (same path as the panel's item delivery, one pickup per copy, next to the buyer). Optional `zone` restricts buying to a named zone (positions come from `groups_tick` via `market::note_position`).
+- Not done yet: kill rewards, selling items back, player stalls (needs reading/removing chest and inventory contents).

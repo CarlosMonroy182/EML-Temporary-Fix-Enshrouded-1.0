@@ -24,6 +24,9 @@ Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servi
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
 
+MERCADO
+- La carpeta incluye el mercado: los saldos se guardan en m182_wallets.json y el catálogo y los regalos de monedas en m182_market.json (los envía el panel). Los jugadores compran con "!mercado lista" y "!mercado comprar <número o nombre>", ven su saldo con "!mercado saldo" y dan monedas con "!mercado pagar <jugador> <monto>". Inglés: !market list / buy / balance / pay.
+
 VFX
 - La carpeta mods\m182_vfx forma parte de este paquete. En un servidor dedicado hace que los efectos de carga de bastón los vea todo el mundo; no hace falta nada mas. Sube la carpeta junto con el resto. Para apagarlo, borra mods\m182_vfx. Su registro es m182_vfx.log.
 
