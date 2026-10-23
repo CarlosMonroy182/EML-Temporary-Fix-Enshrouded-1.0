@@ -563,7 +563,10 @@ fn deliveries_tick() {
     if PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true) {
         return;
     }
-    let Some((spec, template, entity)) = DELIVERIES.lock().ok().and_then(|mut q| q.pop_front()) else { return };
+    let Some((spec, template, entity)) = DELIVERIES.lock().ok().and_then(|mut q| q.pop_front()) else {
+        drops_tick();
+        return;
+    };
     let settings = SpawnSettings {
         template,
         level: 1,
@@ -3904,7 +3907,28 @@ struct SpawnerDef {
     radius: f32,
     respawn: u32,
     enabled: Option<bool>,
+    /// A raid: the wave is created once and the spawner is gone when it has been killed.
+    once: bool,
+    /// What falls where each creature of this spawner dies.
+    drops: Vec<DropDef>,
+    /// Template of the pickup that carries a drop (the generic one when empty).
+    pickup: String,
 }
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+struct DropDef {
+    item: u32,
+    guid: String,
+    level: u32,
+    rarity: u32,
+    amount: u32,
+    /// 0-100, empty means always.
+    chance: f32,
+}
+
+const GENERIC_PICKUP: &str = "c15a5c9d-4956-49ff-9d72-9f522229cf1c";
+const MAX_DROPS: usize = 8;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -3922,6 +3946,8 @@ struct SpawnerRt {
     state: &'static str,
     was_active: bool,
     check_at: Option<Instant>,
+    last: HashMap<u32, [f64; 3]>,
+    done: bool,
 }
 
 const SPAWNER_RANGE_METERS: f64 = 150.0;
@@ -3947,6 +3973,8 @@ pub struct SpawnerSet {
     pending: Option<(String, Instant)>,
     status: String,
     status_at: Option<Instant>,
+    finished: Vec<String>,
+    done_ids: Vec<String>,
 }
 
 fn health_now(manager: usize, id: u32) -> Option<u32> {
@@ -4002,11 +4030,97 @@ fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
                 rt.def = def;
                 next.push(rt);
             }
-            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None }),
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false }),
         }
     }
     set.list = next;
     log(&format!("spawners: {} active", set.list.len()));
+}
+
+/// Takes finished raids out of the spawner file so they do not come back after a restart.
+fn remove_spawner_rows(dir: &std::path::Path, ids: &[String]) {
+    let path = dir.join(SPAWNERS_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(rows) = value.get_mut("spawners").and_then(|r| r.as_array_mut()) else { return };
+    let before = rows.len();
+    rows.retain(|r| !r.get("id").and_then(|i| i.as_str()).map(|i| ids.iter().any(|d| d == i)).unwrap_or(false));
+    if rows.len() == before {
+        return;
+    }
+    let temp = dir.join(format!("{SPAWNERS_FILE}.tmp"));
+    if std::fs::write(&temp, value.to_string()).is_ok() && std::fs::rename(&temp, &path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+static DROPS: Mutex<std::collections::VecDeque<(GiveSpec, String, [f64; 3])>> = Mutex::new(std::collections::VecDeque::new());
+
+fn roll_percent() -> f32 {
+    use std::sync::atomic::AtomicU64;
+    static SEED: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(1);
+    let mut x = SEED.load(Ordering::Relaxed) ^ nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234_5678_9ABC_DEF1;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    SEED.store(x, Ordering::Relaxed);
+    (x % 10_000) as f32 / 100.0
+}
+
+/// The drops of a spawner fall where its creature died (each one rolls its own chance).
+fn queue_drops(d: &SpawnerDef, spot: [f64; 3]) {
+    let pickup = if d.pickup.trim().is_empty() { GENERIC_PICKUP.to_string() } else { d.pickup.trim().to_string() };
+    for drop in d.drops.iter().take(MAX_DROPS) {
+        let Some(guid) = super::config::parse_guid(&drop.guid) else { continue };
+        if drop.item == 0 {
+            continue;
+        }
+        let chance = if drop.chance <= 0.0 { 100.0 } else { drop.chance.min(100.0) };
+        if chance < 100.0 && roll_percent() >= chance {
+            continue;
+        }
+        let spec = GiveSpec { item: drop.item, level: drop.level.clamp(1, 255), rarity: drop.rarity.min(4), amount: drop.amount.clamp(1, 65535), guid };
+        if let Ok(mut q) = DROPS.lock() {
+            if q.len() < 200 {
+                q.push_back((spec, pickup.clone(), spot));
+            }
+        }
+    }
+}
+
+fn drops_tick() -> bool {
+    let Some((spec, template, spot)) = DROPS.lock().ok().and_then(|mut q| q.pop_front()) else { return false };
+    let settings = SpawnSettings {
+        template,
+        level: 1,
+        count: 1,
+        distance: 2.0,
+        health: 0,
+        damage: 1.0,
+        key: 0,
+        dump_player_key: 0,
+        dump_spawned_key: 0,
+        watch_key: 0,
+    };
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(settings);
+    }
+    if let Ok(mut g) = REQUEST_GIVE.lock() {
+        *g = Some(spec);
+    }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = Some(spot);
+    }
+    REQUEST_SENDER.store(0, Ordering::SeqCst);
+    REQUEST_OBJECT.store(true, Ordering::SeqCst);
+    REQUEST_FORWARD.store(false, Ordering::SeqCst);
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = None;
+    }
+    PENDING.store(1, Ordering::SeqCst);
+    log(&format!("drop: item {} falls at x={:.1} z={:.1}", spec.item, spot[0], spot[2]));
+    true
 }
 
 fn issue_spawn(rt: &SpawnerRt, need: u32) {
@@ -4094,6 +4208,11 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.manager = manager;
             rt.ids.clear();
             rt.missing.clear();
+            rt.last.clear();
+        }
+        if rt.done {
+            rt.state = "completado";
+            continue;
         }
         let active = match rt.def.at {
             Some(p) if !positions.is_empty() => positions.iter().any(|(x, z)| ((x - p[0]).powi(2) + (z - p[2]).powi(2)).sqrt() <= SPAWNER_RANGE_METERS),
@@ -4107,9 +4226,24 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         let woke = !rt.was_active;
         rt.was_active = true;
         let before = rt.ids.len();
+        let ids_before = rt.ids.clone();
         let mut missing = std::mem::take(&mut rt.missing);
         rt.ids.retain(|id| creature_alive(manager, *id, &mut missing));
         rt.missing = missing;
+        for dead in ids_before.iter().filter(|id| !rt.ids.contains(id)) {
+            if let Some(spot) = rt.last.remove(dead) {
+                if !woke {
+                    queue_drops(&rt.def, spot);
+                }
+            }
+        }
+        if !rt.def.drops.is_empty() {
+            for id in rt.ids.iter() {
+                if let Some(tr) = transform_of(manager, *id) {
+                    rt.last.insert(*id, [le_i64(&tr, 0) as f64 / METERS, le_i64(&tr, 8) as f64 / METERS, le_i64(&tr, 16) as f64 / METERS]);
+                }
+            }
+        }
         let respawn = Duration::from_secs(rt.def.respawn.clamp(1, 86_400) as u64);
         if rt.ids.len() < before && rt.respawn_at.is_none() {
             if woke {
@@ -4136,6 +4270,17 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             }
         }
         let want = rt.def.count.clamp(1, 20) as usize;
+        if rt.def.once && rt.spawned as usize >= want {
+            if rt.ids.is_empty() && rt.check_at.is_none() && set.pending.is_none() {
+                rt.done = true;
+                rt.state = "completado";
+                set.finished.push(rt.def.id.clone());
+                log(&format!("spawners: raid {} was wiped out, it is removed", rt.def.id));
+            } else {
+                rt.state = "vivo";
+            }
+            continue;
+        }
         if rt.ids.len() >= want {
             rt.respawn_at = None;
             rt.state = "vivo";
@@ -4150,10 +4295,23 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         if busy || issued.is_some() || !ready_world {
             continue;
         }
-        let need = (want - rt.ids.len()) as u32;
+        let need = if rt.def.once { want.saturating_sub(rt.spawned as usize) as u32 } else { (want - rt.ids.len()) as u32 };
+        if need == 0 {
+            continue;
+        }
         issue_spawn(rt, need);
         rt.respawn_at = Some(now + Duration::from_secs(30));
         issued = Some((rt.def.id.clone(), need));
+    }
+    if !set.finished.is_empty() {
+        let gone: Vec<String> = set.finished.clone();
+        remove_spawner_rows(dir, &gone);
+        set.mtime = std::fs::metadata(dir.join(SPAWNERS_FILE)).and_then(|m| m.modified()).ok();
+        set.list.retain(|r| !gone.contains(&r.def.id));
+        set.done_ids.extend(gone);
+        let extra = set.done_ids.len().saturating_sub(50);
+        set.done_ids.drain(..extra);
+        set.finished.clear();
     }
     if let Some((tag, need)) = issued {
         set.pending = Some((tag.clone(), now));
@@ -4177,7 +4335,8 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             )
         })
         .collect();
-    let text = format!("{{\"spawners\":[{}]}}", rows.join(","));
+    let done: Vec<String> = set.done_ids.iter().map(|d| serde_json::to_string(d).unwrap_or_else(|_| "\"\"".into())).collect();
+    let text = format!("{{\"spawners\":[{}],\"done\":[{}]}}", rows.join(","), done.join(","));
     if text != set.status && set.status_at.map(|t| now.duration_since(t) >= Duration::from_secs(2)).unwrap_or(true) {
         set.status = text.clone();
         set.status_at = Some(now);
@@ -4206,5 +4365,58 @@ fn powers_loop() {
         std::thread::sleep(Duration::from_millis(if busy { 1 } else { 25 }));
         tick = tick.wrapping_add(1);
         power_tick(&mut st, &dir, tick);
+    }
+}
+
+#[cfg(test)]
+mod raid_tests {
+    use super::*;
+
+    fn def(chance: f32) -> SpawnerDef {
+        serde_json::from_str(&format!(
+            r#"{{"id":"r1","template":"333ea93f-04f6-4bd2-b003-1582429dfb66","once":true,
+               "drops":[{{"item":77,"guid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","amount":3,"rarity":2,"level":10,"chance":{chance}}},
+                        {{"item":0,"guid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}},{{"item":5,"guid":"bad"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_dead_creature_drops_only_valid_items_where_it_fell() {
+        DROPS.lock().unwrap().clear();
+        let d = def(100.0);
+        assert!(d.once && d.drops.len() == 3);
+        queue_drops(&d, [10.0, 5.0, -3.0]);
+        let q = DROPS.lock().unwrap().clone();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].0.item, q[0].0.amount, q[0].0.rarity, q[0].0.level), (77, 3, 2, 10));
+        assert_eq!(q[0].1, GENERIC_PICKUP);
+        assert_eq!(q[0].2, [10.0, 5.0, -3.0]);
+        DROPS.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn chance_decides_how_often_it_drops() {
+        DROPS.lock().unwrap().clear();
+        let d = def(30.0);
+        for _ in 0..400 {
+            queue_drops(&d, [0.0; 3]);
+            std::thread::sleep(Duration::from_micros(150));
+        }
+        let n = DROPS.lock().unwrap().len();
+        DROPS.lock().unwrap().clear();
+        assert!(n > 40 && n < 200, "{n} of 400 at 30%");
+    }
+
+    #[test]
+    fn finished_raids_leave_the_file() {
+        let dir = std::env::temp_dir().join(format!("m182_raid_native_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SPAWNERS_FILE), r#"{"spawners":[{"id":"a"},{"id":"b"},{"id":"c"}]}"#).unwrap();
+        remove_spawner_rows(&dir, &["a".to_string(), "c".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(SPAWNERS_FILE)).unwrap()).unwrap();
+        assert_eq!(v["spawners"].as_array().unwrap().len(), 1);
+        assert_eq!(v["spawners"][0]["id"], "b");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

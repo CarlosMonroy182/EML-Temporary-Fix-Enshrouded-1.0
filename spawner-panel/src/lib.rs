@@ -3,6 +3,7 @@ pub mod host;
 pub mod input;
 pub mod rawguard;
 mod emblems;
+mod events;
 mod icons;
 mod items;
 mod powers;
@@ -93,6 +94,7 @@ pub enum Tab {
     Pvp,
     SafeZones,
     Teams,
+    Events,
     Places,
     Settings,
 }
@@ -126,6 +128,7 @@ pub struct App {
     downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
     social: social::SocialState,
+    ev: events::EventState,
     level: u32,
     count: u32,
     distance: f32,
@@ -517,6 +520,7 @@ impl App {
             Ok("pvp") => Tab::Pvp,
             Ok("teams") => Tab::Teams,
             Ok("zones") => Tab::SafeZones,
+            Ok("events") => Tab::Events,
             Ok("items") => Tab::Items,
             Ok("powers") => Tab::Powers,
             Ok("settings") => Tab::Settings,
@@ -533,6 +537,7 @@ impl App {
             downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
             social: social::SocialState::load(&dir),
+            ev: events::EventState::default(),
             level: get_u("spawn_level", 20).clamp(1, 100),
             count: get_u("spawn_count", 1).clamp(1, 20),
             distance: get_f("spawn_distance", 5.0).clamp(1.0, 60.0),
@@ -639,6 +644,9 @@ impl App {
             damage: self.damage,
             radius: if self.count > 1 { self.distance } else { 3.0 },
             respawn: self.respawn_minutes.clamp(1, 1440) * 60,
+            once: false,
+            drops: Vec::new(),
+            pickup: String::new(),
         };
         let op = spawners::op_add(&spawner);
         self.spawners.push(spawner);
@@ -757,6 +765,7 @@ impl App {
         if self.spawner_checked.elapsed() >= Duration::from_secs(2) {
             self.spawner_checked = Instant::now();
             self.spawner_status = spawners::load_status(&self.dir);
+            self.clean_raids();
         }
         if self.player_checked.elapsed() >= Duration::from_millis(700) {
             self.player_checked = Instant::now();
@@ -827,6 +836,7 @@ impl App {
             (Tab::Pvp, "PvP", false),
             (Tab::SafeZones, "Zonas y bases", false),
             (Tab::Teams, "Equipos", false),
+            (Tab::Events, "Eventos", false),
             (Tab::Settings, "Ajustes", false),
         ] {
             let selected = self.tab == tab;
@@ -1064,7 +1074,9 @@ impl App {
                 ui.vertical(|ui| {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
-                    ui.label(RichText::new(format!("{} · nv.{} · cada {} min", s.place, s.level, s.respawn / 60)).color(MUTED).size(14.0));
+                    let rhythm = if s.once { "raid, una sola vez".to_string() } else { format!("cada {} min", s.respawn / 60) };
+                    let loot = if s.drops.is_empty() { String::new() } else { format!(" · botín: {}", s.drops.len()) };
+                    ui.label(RichText::new(format!("{} · nv.{} · {}{}", s.place, s.level, rhythm, loot)).color(MUTED).size(14.0));
                     if let Some(note) = spawners::distance_note(self.player, s.at) {
                         ui.label(RichText::new(note).color(MUTED).size(13.5));
                     }
@@ -1288,6 +1300,7 @@ impl eframe::App for App {
                     Tab::Powers => self.powers_tab(ui),
                     Tab::Pvp => self.pvp_tab(ui),
                     Tab::SafeZones => self.zones_tab(ui),
+                    Tab::Events => self.events_tab(ui),
                     Tab::Settings => self.settings_tab(ui),
                     _ => self.teams_tab(ui),
                 });
@@ -1343,6 +1356,7 @@ mod tests {
             downloader: None,
             powers: Default::default(),
             social: Default::default(),
+            ev: Default::default(),
             level: 30,
             count: 2,
             distance: 7.0,

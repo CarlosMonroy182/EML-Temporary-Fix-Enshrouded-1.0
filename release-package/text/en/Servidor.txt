@@ -21,6 +21,7 @@ WHAT LIVES ON THE SERVER
 Zones, bases, teams, spawns, PvP and item/level/skill settings are saved in this folder (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json and mods\zz_m182_item_stats\src\m182_data.lua). The server reads them by itself and keeps them even when the administrator is not connected. The panel only sends the changes.
 Spawns only create creatures with a player within 150 m. If one does not show up, m182_spawner.log has "spawners: ... creature ... is at ..." lines with each creature's real position.
 Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
+Events and raids (panel tab "Events"): pick players, zones or places, a creature (Creatures tab) and optionally a loot list (Items tab). The wave is created once, only when a player is within 150 m, and disappears when all its creatures die. The loot falls where each enemy dies. Without a loot list they drop the normal game loot.
 Personal powers (god mode, energy) only last while that player is connected.
 
 

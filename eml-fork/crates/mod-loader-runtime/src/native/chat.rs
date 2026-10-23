@@ -313,6 +313,52 @@ fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> 
             out.insert(long.into(), v.clone());
         }
     }
+    if let Some(v) = spawner_field(row, "o", "once") {
+        if v.as_bool().unwrap_or_else(|| v.as_u64().unwrap_or(0) != 0) {
+            out.insert("once".into(), json!(true));
+        }
+    }
+    if let Some(raw) = spawner_field(row, "q", "pickup").and_then(Value::as_str) {
+        let hex: String = raw.chars().filter(|c| *c != '-').collect();
+        if hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.insert("pickup".into(), json!(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase()));
+        }
+    }
+    if let Some(list) = spawner_field(row, "k", "drops").and_then(Value::as_array) {
+        let mut drops = Vec::new();
+        for d in list.iter().take(8) {
+            // wire: [item, guid, amount, rarity, level, chance]; long: an object
+            let (item, guid, amount, rarity, level, chance) = match d {
+                Value::Array(a) if a.len() >= 2 => (
+                    a[0].as_u64(),
+                    a[1].as_str().map(str::to_string),
+                    a.get(2).and_then(Value::as_u64).unwrap_or(1),
+                    a.get(3).and_then(Value::as_u64).unwrap_or(0),
+                    a.get(4).and_then(Value::as_u64).unwrap_or(1),
+                    a.get(5).and_then(Value::as_f64).unwrap_or(100.0),
+                ),
+                Value::Object(o) => (
+                    o.get("item").and_then(Value::as_u64),
+                    o.get("guid").and_then(Value::as_str).map(str::to_string),
+                    o.get("amount").and_then(Value::as_u64).unwrap_or(1),
+                    o.get("rarity").and_then(Value::as_u64).unwrap_or(0),
+                    o.get("level").and_then(Value::as_u64).unwrap_or(1),
+                    o.get("chance").and_then(Value::as_f64).unwrap_or(100.0),
+                ),
+                _ => continue,
+            };
+            let (Some(item), Some(guid)) = (item, guid) else { continue };
+            let hex: String = guid.chars().filter(|c| *c != '-').collect();
+            if item == 0 || item > u32::MAX as u64 || hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let guid = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
+            drops.push(json!({ "item": item, "guid": guid, "amount": amount.clamp(1, 65535), "rarity": rarity.min(4), "level": level.clamp(1, 255), "chance": chance.clamp(0.0, 100.0) }));
+        }
+        if !drops.is_empty() {
+            out.insert("drops".into(), Value::Array(drops));
+        }
+    }
     Ok(Value::Object(out))
 }
 
@@ -591,4 +637,22 @@ mod tests {
         let Verdict::Swallowed(line) = run(&mut s, &dir, "/m182 secret-key") else { panic!() };
         assert!(line.contains("missing command"));
     }
+    #[test]
+    fn raids_and_drops_survive_the_wire() {
+        let row = serde_json::json!({"i":"r1","t":"333ea93f04f64bd2b0031582429dfb66","p":[1,2,3],"o":1,"c":4,
+            "k":[[77,"aaaaaaaabbbbccccddddeeeeeeeeeeee",3,2,10,25.0],[0,"aaaaaaaabbbbccccddddeeeeeeeeeeee"],[5,"bad"]],
+            "q":"c15a5c9d495649ff9d729f522229cf1c"});
+        let out = expand_spawner(&row).unwrap();
+        assert_eq!(out["once"], true);
+        assert_eq!(out["pickup"], "c15a5c9d-4956-49ff-9d72-9f522229cf1c");
+        let drops = out["drops"].as_array().unwrap();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0]["item"], 77);
+        assert_eq!(drops[0]["guid"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        assert_eq!(drops[0]["amount"], 3);
+        assert_eq!(drops[0]["chance"], 25.0);
+        let plain = expand_spawner(&serde_json::json!({"i":"a","t":"333ea93f04f64bd2b0031582429dfb66","p":[0,0,0]})).unwrap();
+        assert!(plain.get("once").is_none() && plain.get("drops").is_none());
+    }
+
 }
