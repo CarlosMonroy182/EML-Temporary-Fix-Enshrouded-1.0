@@ -57,6 +57,10 @@ VFX (effects)
 - When you host a world locally, the walking auras are also available: the greet emote turns the aura on and off, and the victory emote switches to the next one. On a dedicated server only the staff charge effects run.
 - To turn the effects off, delete the folder mods\m182_vfx (or create m182_vfx.json with {"enabled": false}).
 
+IF THE GAME WILL NOT START
+- The loader now checks the game files after every patch and puts the original ones back by itself if anything looks wrong (see eml.log / m182_panel.log). Just start the game again.
+- If it still says "Could not find core resource package": close the game, delete dbghelp.dll, then in Steam: right click Enshrouded > Properties > Installed Files > Verify integrity of game files. Put the mod files back afterwards.
+
 UNINSTALL
 Delete dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json and the folders mods\m182_spawn_variants and mods\zz_m182_item_stats.
 

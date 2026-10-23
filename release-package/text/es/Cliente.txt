@@ -56,6 +56,10 @@ VFX (efectos)
 - Si alojas un mundo en local, tambien hay auras al caminar: el gesto de saludo enciende y apaga el aura y el gesto de victoria pasa a la siguiente. En un servidor dedicado solo funcionan los efectos de carga de bastón.
 - Para apagar los efectos, borra la carpeta mods\m182_vfx (o crea m182_vfx.json con {"enabled": false}).
 
+SI EL JUEGO NO ABRE
+- El cargador ahora comprueba los archivos del juego tras cada parcheo y, si algo falla, vuelve a poner los originales solo (mira eml.log / m182_panel.log). Basta con abrir el juego otra vez.
+- Si aun dice "Could not find core resource package": cierra el juego, borra dbghelp.dll y en Steam: clic derecho en Enshrouded > Propiedades > Archivos instalados > Verificar integridad de los archivos del juego. Despues vuelve a copiar los archivos del mod.
+
 DESINSTALAR
 Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.
 
