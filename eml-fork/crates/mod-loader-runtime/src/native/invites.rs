@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::groups::{self, Member, MembersFile, TeamDef};
-use super::roster::same_name;
+use super::roster::{clean_typed_name, same_name};
 
 pub const PREFIXES: [&str; 4] = ["!equipo", "/equipo", "!team", "/team"];
 const INVITE_LIFE: Duration = Duration::from_secs(120);
@@ -92,7 +92,8 @@ fn is_leader(team: &TeamDef, p: &Person) -> bool {
 
 /// A player by exact name, or by the only name that starts with what was typed.
 fn find_online<'a>(online: &'a [Person], typed: &str) -> Result<&'a Person, bool> {
-    let typed = typed.trim();
+    let typed = clean_typed_name(typed);
+    let typed = typed.as_str();
     if typed.is_empty() {
         return Err(false);
     }
@@ -100,12 +101,17 @@ fn find_online<'a>(online: &'a [Person], typed: &str) -> Result<&'a Person, bool
         return Ok(p);
     }
     let lower = typed.to_lowercase();
-    let starts: Vec<&Person> = online.iter().filter(|p| p.name.to_lowercase().starts_with(&lower)).collect();
-    match starts.as_slice() {
-        [one] => Ok(one),
-        [] => Err(false),
-        _ => Err(true),
+    for hits in [
+        online.iter().filter(|p| p.name.to_lowercase().starts_with(&lower)).collect::<Vec<&Person>>(),
+        online.iter().filter(|p| p.name.to_lowercase().contains(&lower)).collect::<Vec<&Person>>(),
+    ] {
+        match hits.as_slice() {
+            [one] => return Ok(one),
+            [] => {}
+            _ => return Err(true),
+        }
     }
+    Err(false)
 }
 
 fn read_members(dir: &Path) -> MembersFile {
@@ -178,7 +184,7 @@ pub fn handle_with(pending: &mut Pending, now: Instant, text: &str, who: &Person
             let target = match find_online(online, rest) {
                 Ok(t) => t,
                 Err(true) => return Some(w.pick("[M182] Hay varios jugadores con ese nombre; escríbelo completo.", "[M182] Several players match; type the full name.").to_string()),
-                Err(false) => return Some(w.pick("[M182] No encuentro a ese jugador conectado. Uso: !equipo invitar <nombre>", "[M182] I cannot find that player online. Use: !team invite <name>").to_string()),
+                Err(false) => return Some(w.pick("[M182] No encuentro a ese jugador conectado. Uso: !equipo invitar nombre", "[M182] I cannot find that player online. Use: !team invite name").to_string()),
             };
             if target.entity == who.entity {
                 return Some(w.pick("[M182] No puedes invitarte a ti mismo.", "[M182] You cannot invite yourself.").to_string());
@@ -244,7 +250,7 @@ pub fn handle_with(pending: &mut Pending, now: Instant, text: &str, who: &Person
             let target = match find_online(online, rest) {
                 Ok(t) => t,
                 Err(true) => return Some(w.pick("[M182] Hay varios jugadores con ese nombre; escríbelo completo.", "[M182] Several players match; type the full name.").to_string()),
-                Err(false) => return Some(w.pick("[M182] No encuentro a ese jugador conectado. Uso: !equipo expulsar <nombre>", "[M182] I cannot find that player online. Use: !team kick <name>").to_string()),
+                Err(false) => return Some(w.pick("[M182] No encuentro a ese jugador conectado. Uso: !equipo expulsar nombre", "[M182] I cannot find that player online. Use: !team kick name").to_string()),
             };
             if target.entity == who.entity {
                 return Some(w.pick("[M182] Para salir tú, usa !equipo salir.", "[M182] To leave yourself, use !team leave.").to_string());
@@ -262,8 +268,8 @@ pub fn handle_with(pending: &mut Pending, now: Instant, text: &str, who: &Person
         }
         _ => Some(
             w.pick(
-                "[M182] Equipos: !equipo invitar <nombre> (líder) · aceptar · rechazar · salir · expulsar <nombre> (líder)",
-                "[M182] Teams: !team invite <name> (leader) · accept · decline · leave · kick <name> (leader)",
+                "[M182] Equipos: !equipo invitar nombre (líder) · aceptar · rechazar · salir · expulsar nombre (líder)",
+                "[M182] Teams: !team invite name (leader) · accept · decline · leave · kick name (leader)",
             )
             .to_string(),
         ),
@@ -374,8 +380,10 @@ mod tests {
         let online = vec![hei.clone(), arg.clone(), mor.clone()];
         let mut p = Pending::default();
         let t = Instant::now();
-        let line = handle_with(&mut p, t, "!team invite Heindallr", &arg, &online, &d).unwrap();
+        let line = handle_with(&mut p, t, "!team invite <Heindallr>", &arg, &online, &d).unwrap();
         assert!(line.contains("Argonaut invited Heindallr"), "{line}");
+        assert!(handle_with(&mut p, t, "!team invite @heind", &arg, &online, &d).unwrap().contains("invited Heindallr"));
+        assert!(handle_with(&mut p, t, "!team invite \"indall\"", &arg, &online, &d).unwrap().contains("invited Heindallr"));
         let line = handle_with(&mut p, t, "!team accept", &hei, &online, &d).unwrap();
         assert!(line.contains("Heindallr joined the team"), "{line}");
         assert_eq!(groups::team_for_player(&load_teams(&d), 3, Some("Heindallr"), 3, None), 2);
