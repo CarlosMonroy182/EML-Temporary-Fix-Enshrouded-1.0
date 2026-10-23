@@ -82,7 +82,7 @@ jobs:
           pack() {
             side=$1; folder=$2; panel=$3; readme=$4; text=$5
             out=dist/$folder
-            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src
+            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src $out/mods/m182_vfx/src
             cp release-package/$side/* $out/
             cp release-package/text/$text $out/$readme
             cp artifacts/native/dbghelp.dll $out/
@@ -90,6 +90,8 @@ jobs:
             cp spawner-mods/m182_spawn_variants/src/mod.lua $out/mods/m182_spawn_variants/src/
             cp spawner-mods/zz_m182_item_stats/mod.json $out/mods/zz_m182_item_stats/
             cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
+            cp spawner-mods/m182_vfx/mod.json $out/mods/m182_vfx/
+            cp spawner-mods/m182_vfx/src/mod.lua $out/mods/m182_vfx/src/
             if [ "$side" = Cliente ]; then
               cp artifacts/$panel/m182_spawner_panel.dll $out/M182_Panel.dll
               cp eml-fork/LICENSE $out/ || true

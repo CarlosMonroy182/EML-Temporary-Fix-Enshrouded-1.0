@@ -23,4 +23,8 @@ Las apariciones solo crean criaturas con un jugador a menos de 150 m. Si una no 
 Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor.
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
+
+VFX
+- La carpeta mods\m182_vfx forma parte de este paquete. En un servidor dedicado hace que los efectos de carga de bastón los vea todo el mundo; no hace falta nada mas. Sube la carpeta junto con el resto. Para apagarlo, borra mods\m182_vfx. Su registro es m182_vfx.log.
+
 Hecho por M182.
