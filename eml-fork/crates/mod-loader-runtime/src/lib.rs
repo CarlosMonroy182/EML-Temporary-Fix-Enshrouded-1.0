@@ -21,11 +21,25 @@ fn load_registered(path: &std::path::Path) {
         unsafe extern "system" {
             fn LoadLibraryW(name: *const u16) -> *mut core::ffi::c_void;
             fn GetLastError() -> u32;
+            fn GetProcAddress(module: *mut core::ffi::c_void, name: *const u8) -> *mut core::ffi::c_void;
         }
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
         let handle = std::panic::catch_unwind(|| unsafe { LoadLibraryW(wide.as_ptr()) });
         match handle {
-            Ok(h) if !h.is_null() => log::info!("Loaded native library {}", path.display()),
+            Ok(h) if !h.is_null() => {
+                log::info!("Loaded native library {}", path.display());
+                // Libraries that export SSC_Init expect it to be called with their config file.
+                let init = unsafe { GetProcAddress(h, b"SSC_Init\0".as_ptr()) };
+                if !init.is_null() {
+                    let cfg = path.with_file_name("config.txt");
+                    let text = cfg.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                    let arg = if cfg.exists() { std::ffi::CString::new(text).ok() } else { None };
+                    let ptr = arg.as_ref().map_or(core::ptr::null(), |c| c.as_ptr());
+                    let f: extern "C" fn(*const core::ffi::c_char) -> bool = unsafe { core::mem::transmute(init) };
+                    let ok = std::panic::catch_unwind(|| f(ptr));
+                    log::info!("SSC_Init called for {} (config {}): {:?}", path.display(), arg.is_some(), ok);
+                }
+            }
             Ok(_) => log::error!("Could not load native library {} (error {})", path.display(), unsafe { GetLastError() }),
             Err(_) => log::error!("Loading native library {} failed", path.display()),
         }
