@@ -647,6 +647,9 @@ impl App {
             once: false,
             drops: Vec::new(),
             pickup: String::new(),
+            pool: Vec::new(),
+            every: 0,
+            area: 0.0,
         };
         let op = spawners::op_add(&spawner);
         self.spawners.push(spawner);
@@ -1074,7 +1077,7 @@ impl App {
                 ui.vertical(|ui| {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
-                    let rhythm = if s.once { "raid, una sola vez".to_string() } else { format!("cada {} min", s.respawn / 60) };
+                    let rhythm = if !s.pool.is_empty() { format!("{} plantillas, cada {} min, radio {:.0} m", s.pool.len(), s.every / 60, s.area) } else if s.once { "raid, una sola vez".to_string() } else { format!("cada {} min", s.respawn / 60) };
                     let loot = if s.drops.is_empty() { String::new() } else { format!(" · botín: {}", s.drops.len()) };
                     ui.label(RichText::new(format!("{} · nv.{} · {}{}", s.place, s.level, rhythm, loot)).color(MUTED).size(14.0));
                     if let Some(note) = spawners::distance_note(self.player, s.at) {
