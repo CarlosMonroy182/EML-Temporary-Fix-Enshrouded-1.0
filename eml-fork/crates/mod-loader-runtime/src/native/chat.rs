@@ -327,6 +327,31 @@ fn expand_drops(list: &[serde_json::Value]) -> Vec<serde_json::Value> {
     drops
 }
 
+/// One enemy of a raid template: template id, level, amount, health, damage and loot.
+fn expand_member(e: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    let raw = spawner_field(e, "t", "template").and_then(Value::as_str)?;
+    let hex: String = raw.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let template = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
+    let mut entry = serde_json::Map::new();
+    entry.insert("template".into(), json!(template));
+    for (short, long) in [("l", "level"), ("c", "count"), ("h", "health"), ("d", "damage")] {
+        if let Some(v) = spawner_field(e, short, long).filter(|v| v.is_number()) {
+            entry.insert(long.into(), v.clone());
+        }
+    }
+    if let Some(l) = spawner_field(e, "k", "drops").and_then(Value::as_array) {
+        let d = expand_drops(l);
+        if !d.is_empty() {
+            entry.insert("drops".into(), Value::Array(d));
+        }
+    }
+    Some(Value::Object(entry))
+}
+
 /// One spawner as the panel sends it (short keys, template without dashes) turned into the row
 /// the spawner file holds.
 fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -374,25 +399,22 @@ fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> 
     if let Some(list) = spawner_field(row, "m", "pool").and_then(Value::as_array) {
         let mut pool = Vec::new();
         for e in list.iter().take(10) {
-            let raw = spawner_field(e, "t", "template").and_then(Value::as_str).unwrap_or("");
-            let hex: String = raw.chars().filter(|c| *c != '-').collect();
-            if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            let template = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
             let mut entry = serde_json::Map::new();
-            entry.insert("template".into(), json!(template));
-            for (short, long) in [("l", "level"), ("c", "count"), ("h", "health"), ("d", "damage")] {
-                if let Some(v) = spawner_field(e, short, long).filter(|v| v.is_number()) {
-                    entry.insert(long.into(), v.clone());
+            let mut members = Vec::new();
+            if let Some(group) = spawner_field(e, "u", "members").and_then(Value::as_array) {
+                for m in group.iter().take(10) {
+                    if let Some(member) = expand_member(m) {
+                        members.push(member);
+                    }
                 }
             }
-            if let Some(l) = spawner_field(e, "k", "drops").and_then(Value::as_array) {
-                let d = expand_drops(l);
-                if !d.is_empty() {
-                    entry.insert("drops".into(), Value::Array(d));
+            if members.is_empty() {
+                match expand_member(e) {
+                    Some(member) => members.push(member),
+                    None => continue,
                 }
             }
+            entry.insert("members".into(), Value::Array(members));
             pool.push(Value::Object(entry));
         }
         if !pool.is_empty() {
@@ -704,9 +726,23 @@ mod tests {
         assert_eq!(out["area"], 40);
         let pool = out["pool"].as_array().unwrap();
         assert_eq!(pool.len(), 1);
-        assert_eq!(pool[0]["template"], "333ea93f-04f6-4bd2-b003-1582429dfb66");
-        assert_eq!(pool[0]["count"], 2);
-        assert_eq!(pool[0]["drops"][0]["item"], 7);
+        assert_eq!(pool[0]["members"][0]["template"], "333ea93f-04f6-4bd2-b003-1582429dfb66");
+        assert_eq!(pool[0]["members"][0]["count"], 2);
+        assert_eq!(pool[0]["members"][0]["drops"][0]["item"], 7);
+    }
+
+    #[test]
+    fn a_template_can_mix_several_enemies() {
+        let row = serde_json::json!({"i":"z","t":"333ea93f04f64bd2b0031582429dfb66","p":[1,2,3],"e":60,"a":40,
+            "m":[{"u":[{"t":"333ea93f04f64bd2b0031582429dfb66","l":40,"c":5},
+                       {"t":"642098d4fc0948e2811e782d438bf551","l":45,"c":3,"k":[[9,"aaaaaaaabbbbccccddddeeeeeeeeeeee",1,0,1,30]]},
+                       {"t":"nope","c":9}]}]});
+        let out = expand_spawner(&row).unwrap();
+        let members = out["pool"][0]["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0]["level"], 40);
+        assert_eq!(members[1]["count"], 3);
+        assert_eq!(members[1]["drops"][0]["chance"], 30.0);
     }
 
 }

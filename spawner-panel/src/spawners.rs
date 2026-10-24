@@ -43,15 +43,38 @@ pub struct Spawner {
 pub const MAX_TEMPLATES: usize = 10;
 pub const TEMPLATES_FILE: &str = "m182_raid_templates.json";
 
+/// One kind of enemy inside a raid template, with its own amount, level and loot.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RaidTemplate {
-    pub name: String,
+pub struct Member {
+    pub creature: String,
     pub template: String,
     pub level: u32,
     pub count: u32,
     pub health: u32,
     pub damage: f32,
     pub drops: Vec<Drop>,
+}
+
+/// A raid template: a group of enemies that appear together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RaidTemplate {
+    pub name: String,
+    pub members: Vec<Member>,
+    /// Used by the automatic raids.
+    pub active: bool,
+}
+
+pub const MAX_MEMBERS: usize = 10;
+
+impl RaidTemplate {
+    pub fn total(&self) -> u32 {
+        self.members.iter().map(|m| m.count).sum()
+    }
+
+    /// "5 × Renegado nv.40 + 3 × Lobo nv.45"
+    pub fn summary(&self) -> String {
+        self.members.iter().map(|m| format!("{} × {} nv.{}", m.count, m.creature, m.level)).collect::<Vec<_>>().join(" + ")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,10 +158,24 @@ fn parse_drops(v: Option<&Value>) -> Vec<Drop> {
         .unwrap_or_default()
 }
 
+fn member_json(m: &Member) -> Value {
+    json!({"creature": m.creature, "template": m.template, "level": m.level, "count": m.count, "health": m.health, "damage": m.damage, "drops": drops_json(&m.drops)})
+}
+
 fn templates_json(list: &[RaidTemplate]) -> Vec<Value> {
-    list.iter()
-        .map(|t| json!({"name": t.name, "template": t.template, "level": t.level, "count": t.count, "health": t.health, "damage": t.damage, "drops": drops_json(&t.drops)}))
-        .collect()
+    list.iter().map(|t| json!({"name": t.name, "active": t.active, "members": t.members.iter().map(member_json).collect::<Vec<_>>()})).collect()
+}
+
+fn parse_member(t: &Value) -> Option<Member> {
+    Some(Member {
+        creature: t.get("creature").or_else(|| t.get("name")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        template: t.get("template")?.as_str()?.to_string(),
+        level: t.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 1000) as u32,
+        count: t.get("count").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 20) as u32,
+        health: t.get("health").and_then(|x| x.as_u64()).unwrap_or(0).min(2_000_000_000) as u32,
+        damage: t.get("damage").and_then(|x| x.as_f64()).unwrap_or(1.0).clamp(0.0, 1000.0) as f32,
+        drops: parse_drops(t.get("drops")),
+    })
 }
 
 fn parse_templates(v: Option<&Value>) -> Vec<RaidTemplate> {
@@ -146,15 +183,16 @@ fn parse_templates(v: Option<&Value>) -> Vec<RaidTemplate> {
         .map(|list| {
             list.iter()
                 .filter_map(|t| {
-                    Some(RaidTemplate {
-                        name: t.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        template: t.get("template")?.as_str()?.to_string(),
-                        level: t.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 1000) as u32,
-                        count: t.get("count").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 20) as u32,
-                        health: t.get("health").and_then(|x| x.as_u64()).unwrap_or(0).min(2_000_000_000) as u32,
-                        damage: t.get("damage").and_then(|x| x.as_f64()).unwrap_or(1.0).clamp(0.0, 1000.0) as f32,
-                        drops: parse_drops(t.get("drops")),
-                    })
+                    let mut members: Vec<Member> = t.get("members").and_then(|m| m.as_array()).map(|m| m.iter().filter_map(parse_member).take(MAX_MEMBERS).collect()).unwrap_or_default();
+                    if members.is_empty() {
+                        // older files: one enemy per template
+                        members.extend(parse_member(t));
+                    }
+                    if members.is_empty() {
+                        return None;
+                    }
+                    let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    Some(RaidTemplate { name, members, active: t.get("active").and_then(|x| x.as_bool()).unwrap_or(true) })
                 })
                 .take(MAX_TEMPLATES)
                 .collect()
@@ -185,7 +223,7 @@ fn wire_row(s: &Spawner) -> Value {
     if !s.drops.is_empty() {
         row["k"] = wire_drops(&s.drops);
     }
-    if (!s.drops.is_empty() || s.pool.iter().any(|t| !t.drops.is_empty())) && !s.pickup.is_empty() {
+    if (!s.drops.is_empty() || s.pool.iter().any(|t| t.members.iter().any(|m| !m.drops.is_empty()))) && !s.pickup.is_empty() {
         row["q"] = json!(s.pickup.replace('-', ""));
     }
     if !s.pool.is_empty() {
@@ -194,13 +232,16 @@ fn wire_row(s: &Spawner) -> Value {
         row["m"] = json!(s
             .pool
             .iter()
+            .filter(|t| t.active || s.once)
             .take(MAX_TEMPLATES)
             .map(|t| {
-                let mut e = json!({"t": t.template.replace('-', ""), "l": t.level, "c": t.count, "h": t.health, "d": (f64::from(t.damage) * 100.0).round() / 100.0});
-                if !t.drops.is_empty() {
-                    e["k"] = wire_drops(&t.drops);
-                }
-                e
+                json!({"u": t.members.iter().take(MAX_MEMBERS).map(|m| {
+                    let mut e = json!({"t": m.template.replace('-', ""), "l": m.level, "c": m.count, "h": m.health, "d": (f64::from(m.damage) * 100.0).round() / 100.0});
+                    if !m.drops.is_empty() {
+                        e["k"] = wire_drops(&m.drops);
+                    }
+                    e
+                }).collect::<Vec<_>>()})
             })
             .collect::<Vec<_>>());
     }
@@ -490,8 +531,8 @@ mod tests {
 
     #[test]
     fn automatic_raids_roundtrip_and_fit_the_wire() {
-        let tpl = |n: &str, c: u32| RaidTemplate {
-            name: n.into(),
+        let member = |c: u32| Member {
+            creature: "Troll".into(),
             template: "642098d4-fc09-48e2-811e-782d438bf551".into(),
             level: 60,
             count: c,
@@ -499,6 +540,7 @@ mod tests {
             damage: 1.5,
             drops: vec![Drop { item: 77, guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(), name: "Espada".into(), amount: 1, rarity: 3, level: 40, chance: 50 }],
         };
+        let tpl = |n: &str, c: u32| RaidTemplate { name: n.into(), members: vec![member(c), member(c + 1)], active: true };
         let mut s = sample();
         s.pool = (0..10).map(|i| tpl(&format!("T{i}"), i + 1)).collect();
         s.every = 3600;
@@ -507,7 +549,10 @@ mod tests {
         let wire = wire_row(&s);
         assert_eq!(wire["e"], 3600);
         assert_eq!(wire["m"].as_array().unwrap().len(), 10);
-        assert_eq!(wire["m"][1]["c"], 2);
+        assert_eq!(wire["m"][1]["u"][0]["c"], 2);
+        assert_eq!(wire["m"][1]["u"][1]["c"], 3);
+        assert_eq!(s.pool[0].summary(), "1 × Troll nv.60 + 2 × Troll nv.60");
+        assert_eq!(s.pool[0].total(), 3);
         let dir = std::env::temp_dir().join(format!("m182_pool_panel_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         save(&dir, &[s.clone()]).unwrap();
@@ -515,7 +560,7 @@ mod tests {
         save_templates(&dir, &s.pool).unwrap();
         assert_eq!(load_templates(&dir), s.pool);
         let lines = crate::remote_proto::compose("secret-key", OP_FILE, &op_add(&s), crate::remote_proto::DEFAULT_LIMIT);
-        assert!(lines.len() <= 30, "{} lines", lines.len());
+        assert!(lines.len() <= 80, "{} lines", lines.len());
         let _ = std::fs::remove_dir_all(dir);
     }
 

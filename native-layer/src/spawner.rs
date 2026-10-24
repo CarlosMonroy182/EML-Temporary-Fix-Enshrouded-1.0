@@ -3918,11 +3918,13 @@ struct SpawnerDef {
     pool: Vec<PoolEntry>,
     every: u32,
     area: f32,
+    /// Enemies of the wave being played, in the order they are created (filled by the spawner).
+    parts: Vec<Member>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
-struct PoolEntry {
+struct Member {
     template: String,
     level: u32,
     count: u32,
@@ -3930,6 +3932,38 @@ struct PoolEntry {
     damage: f32,
     drops: Vec<DropDef>,
 }
+
+/// One raid template: a group of enemies (each with its own amount, level and loot). The single
+/// enemy fields are the older format and still work.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+struct PoolEntry {
+    name: String,
+    members: Vec<Member>,
+    template: String,
+    level: u32,
+    count: u32,
+    health: u32,
+    damage: f32,
+    drops: Vec<DropDef>,
+}
+
+impl PoolEntry {
+    fn group(&self) -> Vec<Member> {
+        let mut out: Vec<Member> = self.members.iter().filter(|m| !m.template.trim().is_empty()).take(MAX_MEMBERS).cloned().collect();
+        if out.is_empty() && !self.template.trim().is_empty() {
+            out.push(Member { template: self.template.clone(), level: self.level, count: self.count, health: self.health, damage: self.damage, drops: self.drops.clone() });
+        }
+        for m in out.iter_mut() {
+            m.count = m.count.clamp(1, 20);
+            m.level = m.level.max(1);
+        }
+        out
+    }
+}
+
+const MAX_MEMBERS: usize = 10;
+const MAX_WAVE: u32 = 60;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
@@ -3967,11 +4001,39 @@ struct SpawnerRt {
     wave: Option<SpawnerDef>,
     next_wave: Option<Instant>,
     wave_started: Option<Instant>,
+    part: usize,
+    part_spawned: u32,
+    owner: HashMap<u32, usize>,
 }
 
 impl SpawnerRt {
     fn cur(&self) -> &SpawnerDef {
         self.wave.as_ref().unwrap_or(&self.def)
+    }
+
+    /// Creatures the current wave is made of.
+    fn total(&self) -> usize {
+        let w = self.cur();
+        if w.parts.is_empty() {
+            w.count.clamp(1, 20) as usize
+        } else {
+            w.parts.iter().map(|m| m.count.clamp(1, 20) as usize).sum::<usize>().min(MAX_WAVE as usize)
+        }
+    }
+
+    /// Loot of the creature `id`.
+    fn drops_of(&self, id: u32) -> &[DropDef] {
+        let w = self.cur();
+        if w.parts.is_empty() {
+            &w.drops
+        } else {
+            self.owner.get(&id).and_then(|i| w.parts.get(*i)).map(|m| m.drops.as_slice()).unwrap_or(&[])
+        }
+    }
+
+    fn has_loot(&self) -> bool {
+        let w = self.cur();
+        !w.drops.is_empty() || w.parts.iter().any(|m| !m.drops.is_empty())
     }
 }
 
@@ -4055,7 +4117,7 @@ fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
                 rt.def = def;
                 next.push(rt);
             }
-            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: None, next_wave: None, wave_started: None }),
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: None, next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new() }),
         }
     }
     set.list = next;
@@ -4095,8 +4157,12 @@ fn roll_percent() -> f32 {
 
 /// The drops of a spawner fall where its creature died (each one rolls its own chance).
 fn queue_drops(d: &SpawnerDef, spot: [f64; 3]) {
-    let pickup = if d.pickup.trim().is_empty() { GENERIC_PICKUP.to_string() } else { d.pickup.trim().to_string() };
-    for drop in d.drops.iter().take(MAX_DROPS) {
+    queue_drop_list(&d.drops, &d.pickup, spot);
+}
+
+fn queue_drop_list(list: &[DropDef], pickup: &str, spot: [f64; 3]) {
+    let pickup = if pickup.trim().is_empty() { GENERIC_PICKUP.to_string() } else { pickup.trim().to_string() };
+    for drop in list.iter().take(MAX_DROPS) {
         let Some(guid) = super::config::parse_guid(&drop.guid) else { continue };
         if drop.item == 0 {
             continue;
@@ -4152,49 +4218,56 @@ fn roll_unit() -> f64 {
     roll_percent() as f64 / 100.0
 }
 
-/// One automatic raid: a random template of the pool at a random point inside the area.
+/// One automatic raid: a random template (a group of enemies) of the pool at a random point inside the area.
 fn pick_wave(def: &SpawnerDef) -> Option<SpawnerDef> {
     let center = def.at?;
-    let usable: Vec<&PoolEntry> = def.pool.iter().filter(|e| !e.template.trim().is_empty()).collect();
+    let usable: Vec<(&PoolEntry, Vec<Member>)> = def.pool.iter().map(|e| (e, e.group())).filter(|(_, g)| !g.is_empty()).collect();
     if usable.is_empty() {
         return None;
     }
-    let entry = usable[((roll_unit() * usable.len() as f64) as usize).min(usable.len() - 1)];
+    let (_, group) = &usable[((roll_unit() * usable.len() as f64) as usize).min(usable.len() - 1)];
     let reach = def.area.clamp(0.0, 600.0) as f64;
     let angle = roll_unit() * std::f64::consts::TAU;
     let dist = roll_unit().sqrt() * reach;
     let at = [center[0] + dist * angle.cos(), center[1] + 3.0, center[2] + dist * angle.sin()];
-    let count = entry.count.clamp(1, 20);
+    let total: u32 = group.iter().map(|m| m.count).sum();
+    let first = group[0].clone();
     Some(SpawnerDef {
         id: def.id.clone(),
         name: def.name.clone(),
-        template: entry.template.clone(),
-        level: entry.level.max(1),
-        count,
-        health: entry.health,
-        damage: entry.damage,
+        template: first.template.clone(),
+        level: first.level,
+        count: total.clamp(1, MAX_WAVE),
+        health: first.health,
+        damage: first.damage,
         at: Some(at),
-        radius: if count > 1 { 4.0 } else { 3.0 },
+        radius: if total > 1 { 6.0 } else { 3.0 },
         respawn: 0,
         enabled: None,
         once: true,
-        drops: entry.drops.clone(),
+        drops: Vec::new(),
         pickup: def.pickup.clone(),
         pool: Vec::new(),
         every: 0,
         area: 0.0,
+        parts: group.clone(),
     })
 }
 
 fn issue_spawn(rt: &SpawnerRt, need: u32) {
     let d = rt.cur();
+    let m = d.parts.get(rt.part);
+    let (template, level, health, damage) = match m {
+        Some(m) => (m.template.as_str(), m.level, m.health, m.damage),
+        None => (d.template.as_str(), d.level, d.health, d.damage),
+    };
     let settings = SpawnSettings {
-        template: d.template.trim().to_string(),
-        level: d.level.clamp(1, 1000),
+        template: template.trim().to_string(),
+        level: level.clamp(1, 1000),
         count: need.clamp(1, 20),
         distance: if d.radius > 0.0 { d.radius.clamp(0.5, 60.0) } else { 3.0 },
-        health: d.health.min(2_000_000_000),
-        damage: d.damage.clamp(0.0, 1000.0).max(if d.damage == 0.0 { 1.0 } else { 0.0 }),
+        health: health.min(2_000_000_000),
+        damage: damage.clamp(0.0, 1000.0).max(if damage == 0.0 { 1.0 } else { 0.0 }),
         key: 0,
         dump_player_key: 0,
         dump_spawned_key: 0,
@@ -4231,6 +4304,16 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.ids.push(id);
             rt.spawned += 1;
             rt.check_at = Some(now + Duration::from_secs(3));
+            let part = rt.part;
+            rt.owner.insert(id, part);
+            rt.part_spawned += 1;
+        }
+    }
+    for rt in set.list.iter_mut() {
+        let more = rt.cur().parts.get(rt.part).map(|m| m.count.clamp(1, 20)).map(|c| rt.part_spawned >= c && rt.part + 1 < rt.cur().parts.len()).unwrap_or(false);
+        if more {
+            rt.part += 1;
+            rt.part_spawned = 0;
         }
     }
     if let Some((tag, since)) = set.pending.clone() {
@@ -4274,6 +4357,9 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.last.clear();
             rt.wave = None;
             rt.spawned = 0;
+            rt.part = 0;
+            rt.part_spawned = 0;
+            rt.owner.clear();
         }
         if rt.done {
             rt.state = "completado";
@@ -4298,11 +4384,12 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         for dead in ids_before.iter().filter(|id| !rt.ids.contains(id)) {
             if let Some(spot) = rt.last.remove(dead) {
                 if !woke {
-                    queue_drops(rt.cur(), spot);
+                    queue_drop_list(rt.drops_of(*dead), &rt.cur().pickup, spot);
                 }
             }
+            rt.owner.remove(dead);
         }
-        if !rt.cur().drops.is_empty() {
+        if rt.has_loot() {
             for id in rt.ids.iter() {
                 if let Some(tr) = transform_of(manager, *id) {
                     rt.last.insert(*id, [le_i64(&tr, 0) as f64 / METERS, le_i64(&tr, 8) as f64 / METERS, le_i64(&tr, 16) as f64 / METERS]);
@@ -4337,7 +4424,8 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         let pooled = !rt.def.pool.is_empty();
         if pooled && rt.wave.is_none() {
             let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
-            let due = *rt.next_wave.get_or_insert(now + every);
+            let first = if rt.def.once { now } else { now + every };
+            let due = *rt.next_wave.get_or_insert(first);
             if now < due {
                 rt.state = "wave_wait";
                 continue;
@@ -4347,9 +4435,12 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             }
             match pick_wave(&rt.def) {
                 Some(w) => {
-                    log(&format!("spawners: {} starts a wave of {} at x={:.1} z={:.1}", rt.def.id, w.count, w.at.map(|a| a[0]).unwrap_or(0.0), w.at.map(|a| a[2]).unwrap_or(0.0)));
+                    log(&format!("spawners: {} starts a wave of {} at x={:.1} z={:.1}", rt.def.id, w.parts.iter().map(|m| m.count).sum::<u32>().max(w.count), w.at.map(|a| a[0]).unwrap_or(0.0), w.at.map(|a| a[2]).unwrap_or(0.0)));
                     rt.wave = Some(w);
                     rt.spawned = 0;
+                    rt.part = 0;
+                    rt.part_spawned = 0;
+                    rt.owner.clear();
                     rt.respawn_at = None;
                     rt.wave_started = Some(now);
                 }
@@ -4360,10 +4451,10 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             }
         }
         let once = rt.def.once || pooled;
-        let want = rt.cur().count.clamp(1, 20) as usize;
+        let want = rt.total();
         if once && rt.spawned as usize >= want {
             if rt.ids.is_empty() && rt.check_at.is_none() && set.pending.is_none() {
-                if pooled {
+                if pooled && !rt.def.once {
                     let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
                     let planned = rt.wave_started.map(|t| t + every).unwrap_or(now + every);
                     rt.next_wave = Some(planned.max(now + Duration::from_secs(30)));
@@ -4396,7 +4487,14 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         if busy || issued.is_some() || !ready_world {
             continue;
         }
-        let need = if once { want.saturating_sub(rt.spawned as usize) as u32 } else { (want - rt.ids.len()) as u32 };
+        let need = if once {
+            match rt.cur().parts.get(rt.part) {
+                Some(m) => m.count.clamp(1, 20).saturating_sub(rt.part_spawned),
+                None => want.saturating_sub(rt.spawned as usize) as u32,
+            }
+        } else {
+            (want - rt.ids.len()) as u32
+        };
         if need == 0 {
             continue;
         }
@@ -4430,9 +4528,9 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
                 "{{\"id\":{},\"alive\":{},\"want\":{},\"state\":\"{}\",\"next\":{},\"spawned\":{}}}",
                 serde_json::to_string(&rt.def.id).unwrap_or_else(|_| "\"\"".into()),
                 rt.ids.len(),
-                rt.cur().count.clamp(1, 20),
+                rt.total(),
                 rt.state,
-                if rt.ids.len() >= rt.cur().count.clamp(1, 20) as usize && rt.def.pool.is_empty() { "null".to_string() } else { next },
+                if rt.ids.len() >= rt.total() && rt.def.pool.is_empty() { "null".to_string() } else { next },
                 rt.spawned
             )
         })
@@ -4540,6 +4638,29 @@ mod raid_tests {
         assert_eq!(seen.len(), 2);
         assert!(pick_wave(&SpawnerDef { at: None, ..def.clone() }).is_none());
         assert!(pick_wave(&SpawnerDef { pool: Vec::new(), ..def }).is_none());
+    }
+
+    #[test]
+    fn a_wave_mixes_enemies_and_each_keeps_its_own_loot() {
+        let def: SpawnerDef = serde_json::from_str(r#"{"id":"z1","at":[0.0,0.0,0.0],"area":10.0,"every":60,
+            "pool":[{"name":"mix","members":[
+                {"template":"aaaaaaaa-0000-0000-0000-000000000001","level":40,"count":5},
+                {"template":"aaaaaaaa-0000-0000-0000-000000000002","level":45,"count":3,"drops":[{"item":7,"guid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]},
+                {"template":"aaaaaaaa-0000-0000-0000-000000000003","level":50,"count":1}]}]}"#).unwrap();
+        let w = pick_wave(&def).unwrap();
+        assert_eq!(w.parts.len(), 3);
+        assert_eq!(w.count, 9);
+        let mut rt = SpawnerRt { def: def.clone(), ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "x", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: Some(w), next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new() };
+        assert_eq!(rt.total(), 9);
+        rt.owner.insert(11, 0);
+        rt.owner.insert(12, 1);
+        assert!(rt.drops_of(11).is_empty());
+        assert_eq!(rt.drops_of(12).len(), 1);
+        assert!(rt.has_loot());
+        // the legacy single-enemy format still makes a one-enemy group
+        let old: PoolEntry = serde_json::from_str(r#"{"template":"aaaaaaaa-0000-0000-0000-000000000001","level":3,"count":50}"#).unwrap();
+        assert_eq!(old.group().len(), 1);
+        assert_eq!(old.group()[0].count, 20);
     }
 
 }
