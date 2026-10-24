@@ -292,6 +292,41 @@ fn spawner_field<'a>(row: &'a serde_json::Value, short: &str, long: &str) -> Opt
     row.get(short).or_else(|| row.get(long))
 }
 
+fn expand_drops(list: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use serde_json::{json, Value};
+    let mut drops = Vec::new();
+        for d in list.iter().take(8) {
+            // wire: [item, guid, amount, rarity, level, chance]; long: an object
+            let (item, guid, amount, rarity, level, chance) = match d {
+                Value::Array(a) if a.len() >= 2 => (
+                    a[0].as_u64(),
+                    a[1].as_str().map(str::to_string),
+                    a.get(2).and_then(Value::as_u64).unwrap_or(1),
+                    a.get(3).and_then(Value::as_u64).unwrap_or(0),
+                    a.get(4).and_then(Value::as_u64).unwrap_or(1),
+                    a.get(5).and_then(Value::as_f64).unwrap_or(100.0),
+                ),
+                Value::Object(o) => (
+                    o.get("item").and_then(Value::as_u64),
+                    o.get("guid").and_then(Value::as_str).map(str::to_string),
+                    o.get("amount").and_then(Value::as_u64).unwrap_or(1),
+                    o.get("rarity").and_then(Value::as_u64).unwrap_or(0),
+                    o.get("level").and_then(Value::as_u64).unwrap_or(1),
+                    o.get("chance").and_then(Value::as_f64).unwrap_or(100.0),
+                ),
+                _ => continue,
+            };
+            let (Some(item), Some(guid)) = (item, guid) else { continue };
+            let hex: String = guid.chars().filter(|c| *c != '-').collect();
+            if item == 0 || item > u32::MAX as u64 || hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let guid = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
+            drops.push(json!({ "item": item, "guid": guid, "amount": amount.clamp(1, 65535), "rarity": rarity.min(4), "level": level.clamp(1, 255), "chance": chance.clamp(0.0, 100.0) }));
+        }
+    drops
+}
+
 /// One spawner as the panel sends it (short keys, template without dashes) turned into the row
 /// the spawner file holds.
 fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -325,38 +360,43 @@ fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> 
         }
     }
     if let Some(list) = spawner_field(row, "k", "drops").and_then(Value::as_array) {
-        let mut drops = Vec::new();
-        for d in list.iter().take(8) {
-            // wire: [item, guid, amount, rarity, level, chance]; long: an object
-            let (item, guid, amount, rarity, level, chance) = match d {
-                Value::Array(a) if a.len() >= 2 => (
-                    a[0].as_u64(),
-                    a[1].as_str().map(str::to_string),
-                    a.get(2).and_then(Value::as_u64).unwrap_or(1),
-                    a.get(3).and_then(Value::as_u64).unwrap_or(0),
-                    a.get(4).and_then(Value::as_u64).unwrap_or(1),
-                    a.get(5).and_then(Value::as_f64).unwrap_or(100.0),
-                ),
-                Value::Object(o) => (
-                    o.get("item").and_then(Value::as_u64),
-                    o.get("guid").and_then(Value::as_str).map(str::to_string),
-                    o.get("amount").and_then(Value::as_u64).unwrap_or(1),
-                    o.get("rarity").and_then(Value::as_u64).unwrap_or(0),
-                    o.get("level").and_then(Value::as_u64).unwrap_or(1),
-                    o.get("chance").and_then(Value::as_f64).unwrap_or(100.0),
-                ),
-                _ => continue,
-            };
-            let (Some(item), Some(guid)) = (item, guid) else { continue };
-            let hex: String = guid.chars().filter(|c| *c != '-').collect();
-            if item == 0 || item > u32::MAX as u64 || hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            let guid = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
-            drops.push(json!({ "item": item, "guid": guid, "amount": amount.clamp(1, 65535), "rarity": rarity.min(4), "level": level.clamp(1, 255), "chance": chance.clamp(0.0, 100.0) }));
-        }
+        let drops = expand_drops(list);
         if !drops.is_empty() {
             out.insert("drops".into(), Value::Array(drops));
+        }
+    }
+    if let Some(v) = spawner_field(row, "e", "every").filter(|v| v.is_number()) {
+        out.insert("every".into(), v.clone());
+    }
+    if let Some(v) = spawner_field(row, "a", "area").filter(|v| v.is_number()) {
+        out.insert("area".into(), v.clone());
+    }
+    if let Some(list) = spawner_field(row, "m", "pool").and_then(Value::as_array) {
+        let mut pool = Vec::new();
+        for e in list.iter().take(10) {
+            let raw = spawner_field(e, "t", "template").and_then(Value::as_str).unwrap_or("");
+            let hex: String = raw.chars().filter(|c| *c != '-').collect();
+            if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let template = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]).to_ascii_lowercase();
+            let mut entry = serde_json::Map::new();
+            entry.insert("template".into(), json!(template));
+            for (short, long) in [("l", "level"), ("c", "count"), ("h", "health"), ("d", "damage")] {
+                if let Some(v) = spawner_field(e, short, long).filter(|v| v.is_number()) {
+                    entry.insert(long.into(), v.clone());
+                }
+            }
+            if let Some(l) = spawner_field(e, "k", "drops").and_then(Value::as_array) {
+                let d = expand_drops(l);
+                if !d.is_empty() {
+                    entry.insert("drops".into(), Value::Array(d));
+                }
+            }
+            pool.push(Value::Object(entry));
+        }
+        if !pool.is_empty() {
+            out.insert("pool".into(), Value::Array(pool));
         }
     }
     Ok(Value::Object(out))
@@ -653,6 +693,20 @@ mod tests {
         assert_eq!(drops[0]["chance"], 25.0);
         let plain = expand_spawner(&serde_json::json!({"i":"a","t":"333ea93f04f64bd2b0031582429dfb66","p":[0,0,0]})).unwrap();
         assert!(plain.get("once").is_none() && plain.get("drops").is_none());
+    }
+
+    #[test]
+    fn automatic_raid_pools_survive_the_wire() {
+        let row = serde_json::json!({"i":"z","t":"333ea93f04f64bd2b0031582429dfb66","p":[1,2,3],"e":3600,"a":40,
+            "m":[{"t":"333ea93f04f64bd2b0031582429dfb66","l":10,"c":2,"h":0,"d":1.5,"k":[[7,"aaaaaaaabbbbccccddddeeeeeeeeeeee",1,0,1,50]]},{"t":"bad"}]});
+        let out = expand_spawner(&row).unwrap();
+        assert_eq!(out["every"], 3600);
+        assert_eq!(out["area"], 40);
+        let pool = out["pool"].as_array().unwrap();
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0]["template"], "333ea93f-04f6-4bd2-b003-1582429dfb66");
+        assert_eq!(pool[0]["count"], 2);
+        assert_eq!(pool[0]["drops"][0]["item"], 7);
     }
 
 }

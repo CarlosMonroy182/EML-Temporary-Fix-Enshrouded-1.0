@@ -3913,6 +3913,22 @@ struct SpawnerDef {
     drops: Vec<DropDef>,
     /// Template of the pickup that carries a drop (the generic one when empty).
     pickup: String,
+    /// Automatic raids: every `every` seconds one of these is chosen at random and appears at a
+    /// random point within `area` meters of `at`.
+    pool: Vec<PoolEntry>,
+    every: u32,
+    area: f32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+struct PoolEntry {
+    template: String,
+    level: u32,
+    count: u32,
+    health: u32,
+    damage: f32,
+    drops: Vec<DropDef>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -3948,6 +3964,15 @@ struct SpawnerRt {
     check_at: Option<Instant>,
     last: HashMap<u32, [f64; 3]>,
     done: bool,
+    wave: Option<SpawnerDef>,
+    next_wave: Option<Instant>,
+    wave_started: Option<Instant>,
+}
+
+impl SpawnerRt {
+    fn cur(&self) -> &SpawnerDef {
+        self.wave.as_ref().unwrap_or(&self.def)
+    }
 }
 
 const SPAWNER_RANGE_METERS: f64 = 150.0;
@@ -4030,7 +4055,7 @@ fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
                 rt.def = def;
                 next.push(rt);
             }
-            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false }),
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: None, next_wave: None, wave_started: None }),
         }
     }
     set.list = next;
@@ -4123,8 +4148,46 @@ fn drops_tick() -> bool {
     true
 }
 
+fn roll_unit() -> f64 {
+    roll_percent() as f64 / 100.0
+}
+
+/// One automatic raid: a random template of the pool at a random point inside the area.
+fn pick_wave(def: &SpawnerDef) -> Option<SpawnerDef> {
+    let center = def.at?;
+    let usable: Vec<&PoolEntry> = def.pool.iter().filter(|e| !e.template.trim().is_empty()).collect();
+    if usable.is_empty() {
+        return None;
+    }
+    let entry = usable[((roll_unit() * usable.len() as f64) as usize).min(usable.len() - 1)];
+    let reach = def.area.clamp(0.0, 600.0) as f64;
+    let angle = roll_unit() * std::f64::consts::TAU;
+    let dist = roll_unit().sqrt() * reach;
+    let at = [center[0] + dist * angle.cos(), center[1] + 3.0, center[2] + dist * angle.sin()];
+    let count = entry.count.clamp(1, 20);
+    Some(SpawnerDef {
+        id: def.id.clone(),
+        name: def.name.clone(),
+        template: entry.template.clone(),
+        level: entry.level.max(1),
+        count,
+        health: entry.health,
+        damage: entry.damage,
+        at: Some(at),
+        radius: if count > 1 { 4.0 } else { 3.0 },
+        respawn: 0,
+        enabled: None,
+        once: true,
+        drops: entry.drops.clone(),
+        pickup: def.pickup.clone(),
+        pool: Vec::new(),
+        every: 0,
+        area: 0.0,
+    })
+}
+
 fn issue_spawn(rt: &SpawnerRt, need: u32) {
-    let d = &rt.def;
+    let d = rt.cur();
     let settings = SpawnSettings {
         template: d.template.trim().to_string(),
         level: d.level.clamp(1, 1000),
@@ -4209,6 +4272,8 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.ids.clear();
             rt.missing.clear();
             rt.last.clear();
+            rt.wave = None;
+            rt.spawned = 0;
         }
         if rt.done {
             rt.state = "completado";
@@ -4233,11 +4298,11 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         for dead in ids_before.iter().filter(|id| !rt.ids.contains(id)) {
             if let Some(spot) = rt.last.remove(dead) {
                 if !woke {
-                    queue_drops(&rt.def, spot);
+                    queue_drops(rt.cur(), spot);
                 }
             }
         }
-        if !rt.def.drops.is_empty() {
+        if !rt.cur().drops.is_empty() {
             for id in rt.ids.iter() {
                 if let Some(tr) = transform_of(manager, *id) {
                     rt.last.insert(*id, [le_i64(&tr, 0) as f64 / METERS, le_i64(&tr, 8) as f64 / METERS, le_i64(&tr, 16) as f64 / METERS]);
@@ -4269,13 +4334,49 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
                 }
             }
         }
-        let want = rt.def.count.clamp(1, 20) as usize;
-        if rt.def.once && rt.spawned as usize >= want {
+        let pooled = !rt.def.pool.is_empty();
+        if pooled && rt.wave.is_none() {
+            let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
+            let due = *rt.next_wave.get_or_insert(now + every);
+            if now < due {
+                rt.state = "wave_wait";
+                continue;
+            }
+            if busy || issued.is_some() || !ready_world {
+                continue;
+            }
+            match pick_wave(&rt.def) {
+                Some(w) => {
+                    log(&format!("spawners: {} starts a wave of {} at x={:.1} z={:.1}", rt.def.id, w.count, w.at.map(|a| a[0]).unwrap_or(0.0), w.at.map(|a| a[2]).unwrap_or(0.0)));
+                    rt.wave = Some(w);
+                    rt.spawned = 0;
+                    rt.respawn_at = None;
+                    rt.wave_started = Some(now);
+                }
+                None => {
+                    rt.next_wave = Some(now + every);
+                    continue;
+                }
+            }
+        }
+        let once = rt.def.once || pooled;
+        let want = rt.cur().count.clamp(1, 20) as usize;
+        if once && rt.spawned as usize >= want {
             if rt.ids.is_empty() && rt.check_at.is_none() && set.pending.is_none() {
-                rt.done = true;
-                rt.state = "completado";
-                set.finished.push(rt.def.id.clone());
-                log(&format!("spawners: raid {} was wiped out, it is removed", rt.def.id));
+                if pooled {
+                    let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
+                    let planned = rt.wave_started.map(|t| t + every).unwrap_or(now + every);
+                    rt.next_wave = Some(planned.max(now + Duration::from_secs(30)));
+                    rt.wave = None;
+                    rt.spawned = 0;
+                    rt.state = "wave_wait";
+                    log(&format!("spawners: wave of {} was wiped out, the next one comes later", rt.def.id));
+                } else {
+                    rt.done = true;
+                    rt.state = "completado";
+                    set.finished.push(rt.def.id.clone());
+                    log(&format!("spawners: raid {} was wiped out, it is removed", rt.def.id));
+                }
             } else {
                 rt.state = "vivo";
             }
@@ -4286,7 +4387,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.state = "vivo";
             continue;
         }
-        let due = *rt.respawn_at.get_or_insert(now);
+        let due = if once { now } else { *rt.respawn_at.get_or_insert(now) };
         if now < due {
             rt.state = "esperando para reaparecer";
             continue;
@@ -4295,7 +4396,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         if busy || issued.is_some() || !ready_world {
             continue;
         }
-        let need = if rt.def.once { want.saturating_sub(rt.spawned as usize) as u32 } else { (want - rt.ids.len()) as u32 };
+        let need = if once { want.saturating_sub(rt.spawned as usize) as u32 } else { (want - rt.ids.len()) as u32 };
         if need == 0 {
             continue;
         }
@@ -4323,14 +4424,15 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         .list
         .iter()
         .map(|rt| {
-            let next = rt.respawn_at.map(|t| t.saturating_duration_since(now).as_secs().to_string()).unwrap_or_else(|| "null".to_string());
+            let when = if rt.def.pool.is_empty() { rt.respawn_at } else { rt.next_wave.filter(|_| rt.wave.is_none()) };
+            let next = when.map(|t| t.saturating_duration_since(now).as_secs().to_string()).unwrap_or_else(|| "null".to_string());
             format!(
                 "{{\"id\":{},\"alive\":{},\"want\":{},\"state\":\"{}\",\"next\":{},\"spawned\":{}}}",
                 serde_json::to_string(&rt.def.id).unwrap_or_else(|_| "\"\"".into()),
                 rt.ids.len(),
-                rt.def.count.clamp(1, 20),
+                rt.cur().count.clamp(1, 20),
                 rt.state,
-                if rt.ids.len() >= rt.def.count.clamp(1, 20) as usize { "null".to_string() } else { next },
+                if rt.ids.len() >= rt.cur().count.clamp(1, 20) as usize && rt.def.pool.is_empty() { "null".to_string() } else { next },
                 rt.spawned
             )
         })
@@ -4419,4 +4521,25 @@ mod raid_tests {
         assert_eq!(v["spawners"][0]["id"], "b");
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[test]
+    fn automatic_raids_pick_a_template_and_a_point_inside_the_area() {
+        let def: SpawnerDef = serde_json::from_str(r#"{"id":"z1","at":[100.0,20.0,-50.0],"area":40.0,"every":3600,
+            "pickup":"c15a5c9d-4956-49ff-9d72-9f522229cf1c",
+            "pool":[{"template":"aaaaaaaa-0000-0000-0000-000000000001","level":10,"count":2},
+                    {"template":"aaaaaaaa-0000-0000-0000-000000000002","level":20,"count":1,"drops":[{"item":7,"guid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}]},
+                    {"template":""}]}"#).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let w = pick_wave(&def).unwrap();
+            let at = w.at.unwrap();
+            assert!(((at[0] - 100.0).powi(2) + (at[2] + 50.0).powi(2)).sqrt() <= 40.0001);
+            assert!(w.once && w.pool.is_empty() && !w.template.is_empty());
+            seen.insert(w.template.clone());
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        assert_eq!(seen.len(), 2);
+        assert!(pick_wave(&SpawnerDef { at: None, ..def.clone() }).is_none());
+        assert!(pick_wave(&SpawnerDef { pool: Vec::new(), ..def }).is_none());
+    }
+
 }

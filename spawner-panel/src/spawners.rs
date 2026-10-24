@@ -33,6 +33,25 @@ pub struct Spawner {
     pub drops: Vec<Drop>,
     /// Pickup template that carries the drops.
     pub pickup: String,
+    /// Automatic raids: every `every` seconds one of the templates appears at a random point
+    /// within `area` meters of `at`.
+    pub pool: Vec<RaidTemplate>,
+    pub every: u32,
+    pub area: f32,
+}
+
+pub const MAX_TEMPLATES: usize = 10;
+pub const TEMPLATES_FILE: &str = "m182_raid_templates.json";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RaidTemplate {
+    pub name: String,
+    pub template: String,
+    pub level: u32,
+    pub count: u32,
+    pub health: u32,
+    pub damage: f32,
+    pub drops: Vec<Drop>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,11 +100,75 @@ pub fn to_json(list: &[Spawner]) -> Value {
                 "respawn": s.respawn,
                 "once": s.once,
                 "pickup": s.pickup,
-                "drops": s.drops.iter().map(|d| json!({"item": d.item, "guid": d.guid, "name": d.name, "amount": d.amount, "rarity": d.rarity, "level": d.level, "chance": d.chance})).collect::<Vec<_>>(),
+                "drops": drops_json(&s.drops),
+                "every": s.every,
+                "area": s.area,
+                "pool": templates_json(&s.pool),
             })
         })
         .collect();
     json!({ "spawners": rows })
+}
+
+fn drops_json(list: &[Drop]) -> Vec<Value> {
+    list.iter().map(|d| json!({"item": d.item, "guid": d.guid, "name": d.name, "amount": d.amount, "rarity": d.rarity, "level": d.level, "chance": d.chance})).collect()
+}
+
+fn parse_drops(v: Option<&Value>) -> Vec<Drop> {
+    v.and_then(|d| d.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|d| {
+                    Some(Drop {
+                        item: d.get("item")?.as_u64()? as u32,
+                        guid: d.get("guid")?.as_str()?.to_string(),
+                        name: d.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        amount: d.get("amount").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 65535) as u32,
+                        rarity: d.get("rarity").and_then(|x| x.as_u64()).unwrap_or(0).min(4) as u32,
+                        level: d.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 255) as u32,
+                        chance: d.get("chance").and_then(|x| x.as_u64()).unwrap_or(100).clamp(1, 100) as u32,
+                    })
+                })
+                .take(MAX_DROPS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn templates_json(list: &[RaidTemplate]) -> Vec<Value> {
+    list.iter()
+        .map(|t| json!({"name": t.name, "template": t.template, "level": t.level, "count": t.count, "health": t.health, "damage": t.damage, "drops": drops_json(&t.drops)}))
+        .collect()
+}
+
+fn parse_templates(v: Option<&Value>) -> Vec<RaidTemplate> {
+    v.and_then(|d| d.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|t| {
+                    Some(RaidTemplate {
+                        name: t.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        template: t.get("template")?.as_str()?.to_string(),
+                        level: t.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 1000) as u32,
+                        count: t.get("count").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 20) as u32,
+                        health: t.get("health").and_then(|x| x.as_u64()).unwrap_or(0).min(2_000_000_000) as u32,
+                        damage: t.get("damage").and_then(|x| x.as_f64()).unwrap_or(1.0).clamp(0.0, 1000.0) as f32,
+                        drops: parse_drops(t.get("drops")),
+                    })
+                })
+                .take(MAX_TEMPLATES)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn load_templates(dir: &Path) -> Vec<RaidTemplate> {
+    std::fs::read_to_string(dir.join(TEMPLATES_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| parse_templates(v.get("templates"))).unwrap_or_default()
+}
+
+pub fn save_templates(dir: &Path, list: &[RaidTemplate]) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&json!({ "templates": templates_json(list) })).map_err(|e| e.to_string())?;
+    write_atomic(dir, TEMPLATES_FILE, "m182_raid_templates.json.tmp", &text)
 }
 
 fn round(x: f64) -> f64 {
@@ -98,11 +181,28 @@ fn wire_row(s: &Spawner) -> Value {
     if s.once {
         row["o"] = json!(1);
     }
+    let wire_drops = |list: &[Drop]| json!(list.iter().take(MAX_DROPS).map(|d| json!([d.item, d.guid.replace('-', ""), d.amount, d.rarity, d.level, d.chance])).collect::<Vec<_>>());
     if !s.drops.is_empty() {
-        row["k"] = json!(s.drops.iter().take(MAX_DROPS).map(|d| json!([d.item, d.guid.replace('-', ""), d.amount, d.rarity, d.level, d.chance])).collect::<Vec<_>>());
-        if !s.pickup.is_empty() {
-            row["q"] = json!(s.pickup.replace('-', ""));
-        }
+        row["k"] = wire_drops(&s.drops);
+    }
+    if (!s.drops.is_empty() || s.pool.iter().any(|t| !t.drops.is_empty())) && !s.pickup.is_empty() {
+        row["q"] = json!(s.pickup.replace('-', ""));
+    }
+    if !s.pool.is_empty() {
+        row["e"] = json!(s.every);
+        row["a"] = json!((f64::from(s.area) * 10.0).round() / 10.0);
+        row["m"] = json!(s
+            .pool
+            .iter()
+            .take(MAX_TEMPLATES)
+            .map(|t| {
+                let mut e = json!({"t": t.template.replace('-', ""), "l": t.level, "c": t.count, "h": t.health, "d": (f64::from(t.damage) * 100.0).round() / 100.0});
+                if !t.drops.is_empty() {
+                    e["k"] = wire_drops(&t.drops);
+                }
+                e
+            })
+            .collect::<Vec<_>>());
     }
     row
 }
@@ -178,26 +278,10 @@ pub fn parse(text: &str) -> Vec<Spawner> {
                 respawn: r.get("respawn").and_then(|x| x.as_u64()).unwrap_or(300).clamp(10, 86_400) as u32,
                 once: r.get("once").and_then(|x| x.as_bool()).unwrap_or(false),
                 pickup: r.get("pickup").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                drops: r
-                    .get("drops")
-                    .and_then(|d| d.as_array())
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(|d| {
-                                Some(Drop {
-                                    item: d.get("item")?.as_u64()? as u32,
-                                    guid: d.get("guid")?.as_str()?.to_string(),
-                                    name: d.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                    amount: d.get("amount").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 65535) as u32,
-                                    rarity: d.get("rarity").and_then(|x| x.as_u64()).unwrap_or(0).min(4) as u32,
-                                    level: d.get("level").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 255) as u32,
-                                    chance: d.get("chance").and_then(|x| x.as_u64()).unwrap_or(100).clamp(1, 100) as u32,
-                                })
-                            })
-                            .take(MAX_DROPS)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                drops: parse_drops(r.get("drops")),
+                every: r.get("every").and_then(|x| x.as_u64()).unwrap_or(0).min(604_800) as u32,
+                area: r.get("area").and_then(|x| x.as_f64()).unwrap_or(0.0).clamp(0.0, 600.0) as f32,
+                pool: parse_templates(r.get("pool")),
             })
         })
         .collect()
@@ -280,6 +364,10 @@ pub fn describe(live: Option<&Live>) -> String {
             Some(n) => format!("Muerto: reaparece en {}", clock(n)),
             None => "Reaparecerá pronto".to_string(),
         },
+        "wave_wait" => match l.next {
+            Some(n) => format!("Próxima oleada en {}", clock(n)),
+            None => "Oleada en curso".to_string(),
+        },
         "creando" => "Apareciendo…".to_string(),
         "esperando el mundo" => "Esperando a que cargue el mundo".to_string(),
         "sin jugadores cerca" => "En reposo: se activa al acercarte".to_string(),
@@ -307,6 +395,9 @@ mod tests {
             once: false,
             drops: Vec::new(),
             pickup: String::new(),
+            pool: Vec::new(),
+            every: 0,
+            area: 0.0,
         }
     }
 
@@ -394,6 +485,37 @@ mod tests {
         let old = Spawner { id: "s1000".into(), ..s };
         assert!(expired(&old, 1000 + RAID_LIFETIME_MS + 1));
         assert!(!expired(&old, 1000 + 60_000));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn automatic_raids_roundtrip_and_fit_the_wire() {
+        let tpl = |n: &str, c: u32| RaidTemplate {
+            name: n.into(),
+            template: "642098d4-fc09-48e2-811e-782d438bf551".into(),
+            level: 60,
+            count: c,
+            health: 0,
+            damage: 1.5,
+            drops: vec![Drop { item: 77, guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(), name: "Espada".into(), amount: 1, rarity: 3, level: 40, chance: 50 }],
+        };
+        let mut s = sample();
+        s.pool = (0..10).map(|i| tpl(&format!("T{i}"), i + 1)).collect();
+        s.every = 3600;
+        s.area = 40.0;
+        s.pickup = "c15a5c9d-4956-49ff-9d72-9f522229cf1c".into();
+        let wire = wire_row(&s);
+        assert_eq!(wire["e"], 3600);
+        assert_eq!(wire["m"].as_array().unwrap().len(), 10);
+        assert_eq!(wire["m"][1]["c"], 2);
+        let dir = std::env::temp_dir().join(format!("m182_pool_panel_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        save(&dir, &[s.clone()]).unwrap();
+        assert_eq!(load(&dir), vec![s.clone()]);
+        save_templates(&dir, &s.pool).unwrap();
+        assert_eq!(load_templates(&dir), s.pool);
+        let lines = crate::remote_proto::compose("secret-key", OP_FILE, &op_add(&s), crate::remote_proto::DEFAULT_LIMIT);
+        assert!(lines.len() <= 30, "{} lines", lines.len());
         let _ = std::fs::remove_dir_all(dir);
     }
 

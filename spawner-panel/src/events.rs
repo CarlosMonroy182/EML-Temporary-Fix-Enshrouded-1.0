@@ -17,6 +17,10 @@ pub struct EventState {
     pub drops: Vec<Drop>,
     pub chance: u32,
     pub notice: String,
+    pub templates: Vec<spawners::RaidTemplate>,
+    pub loaded: bool,
+    pub name: String,
+    pub minutes: u32,
 }
 
 /// Height for a zone: a saved place inside it, otherwise where the administrator stands.
@@ -27,6 +31,30 @@ pub fn zone_height(places: &[(f64, f64, f64)], zone: (f64, f64, f64), me: Option
         .find(|(x, _, z)| ((x - zx).powi(2) + (z - zz).powi(2)).sqrt() <= r)
         .map(|(_, y, _)| *y)
         .or_else(|| me.map(|p| p[1]))
+}
+
+/// A spawner that sends a random template to a random point of the zone every `every` seconds.
+pub fn automatic_raid(id: String, place: &str, at: [f64; 3], radius: f32, every: u32, templates: &[spawners::RaidTemplate], pickup: &str) -> Spawner {
+    let first = templates.first().cloned();
+    Spawner {
+        id,
+        creature: "Raids automáticos".to_string(),
+        template: first.map(|t| t.template).unwrap_or_default(),
+        place: place.to_string(),
+        at,
+        level: 1,
+        count: 1,
+        health: 0,
+        damage: 1.0,
+        radius: 3.0,
+        respawn: 300,
+        once: false,
+        drops: Vec::new(),
+        pickup: pickup.to_string(),
+        pool: templates.iter().take(spawners::MAX_TEMPLATES).cloned().collect(),
+        every,
+        area: radius,
+    }
 }
 
 /// One raid wave per target, with unique ids that carry their creation time.
@@ -95,6 +123,9 @@ impl App {
             once: true,
             drops: self.ev.drops.clone(),
             pickup: if self.ev.drops.is_empty() { String::new() } else { self.items.generic_pickup.clone() },
+            pool: Vec::new(),
+            every: 0,
+            area: 0.0,
         };
         let wave = build_raid(&base, &targets, spawners::now_ms());
         let op = spawners::op_add_many(&wave);
@@ -102,6 +133,74 @@ impl App {
         self.spawners.extend(wave);
         self.ev.notice = match spawners::save_change(&self.dir, &self.spawners, &op) {
             Ok(()) => format!("Enviado a {n} sitio(s). Aparece cuando haya un jugador a menos de {} m.", spawners::RANGE_METERS as u32),
+            Err(e) => format!("Error: {e}"),
+        };
+    }
+
+    /// Keeps the creature, amount, level and loot currently chosen as one of the (at most 10) templates.
+    fn save_template(&mut self) {
+        if self.ev.templates.len() >= spawners::MAX_TEMPLATES {
+            self.ev.notice = format!("Máximo {} plantillas.", spawners::MAX_TEMPLATES);
+            return;
+        }
+        let Some(entry) = self.creatures.selected.and_then(|i| self.creatures.entries.get(i)) else {
+            self.ev.notice = "Elige una criatura en la pestaña Criaturas.".to_string();
+            return;
+        };
+        let creature = entry.alias.clone().unwrap_or_else(|| entry.label.clone());
+        let name = if self.ev.name.trim().is_empty() { format!("{} {}", creature, self.ev.templates.len() + 1) } else { self.ev.name.trim().to_string() };
+        self.ev.templates.push(spawners::RaidTemplate {
+            name,
+            template: entry.guid.clone(),
+            level: self.level,
+            count: self.count,
+            health: self.effective_health(),
+            damage: self.damage,
+            drops: self.ev.drops.clone(),
+        });
+        self.ev.name.clear();
+        self.ev.notice = match spawners::save_templates(&self.dir, &self.ev.templates) {
+            Ok(()) => "Plantilla guardada.".to_string(),
+            Err(e) => format!("Error: {e}"),
+        };
+    }
+
+    /// Turns the chosen zones into automatic raid spots: every few minutes one template, picked at
+    /// random, appears at a random point inside the zone.
+    fn activate_auto(&mut self) {
+        if self.ev.templates.is_empty() {
+            self.ev.notice = "Crea al menos una plantilla.".to_string();
+            return;
+        }
+        if self.ev.zones.is_empty() {
+            self.ev.notice = "Elige al menos una zona.".to_string();
+            return;
+        }
+        let spots: Vec<(f64, f64, f64)> = self.places.iter().map(|p| (p.x, p.y, p.z)).collect();
+        let mut wave: Vec<Spawner> = Vec::new();
+        let base_ms = spawners::now_ms();
+        for (n, &i) in self.ev.zones.iter().enumerate() {
+            let Some(z) = self.social.zones.get(i) else { continue };
+            let Some(y) = zone_height(&spots, (z.x, z.z, z.radius), self.player) else {
+                self.ev.notice = format!("Para «{}» guarda un lugar dentro de la zona (hace falta su altura).", z.name);
+                return;
+            };
+            let id = self.spawners.iter().find(|s| !s.pool.is_empty() && s.place == z.name).map(|s| s.id.clone()).unwrap_or_else(|| format!("s{}", base_ms + n as u128));
+            wave.push(automatic_raid(id, &z.name, [z.x, y, z.z], z.radius as f32, self.ev.minutes.clamp(1, 1440) * 60, &self.ev.templates, &self.items.generic_pickup));
+        }
+        if wave.is_empty() {
+            return;
+        }
+        let op = spawners::op_add_many(&wave);
+        let n = wave.len();
+        for w in wave {
+            match self.spawners.iter().position(|s| s.id == w.id) {
+                Some(i) => self.spawners[i] = w,
+                None => self.spawners.push(w),
+            }
+        }
+        self.ev.notice = match spawners::save_change(&self.dir, &self.spawners, &op) {
+            Ok(()) => format!("Raids automáticos activos en {n} zona(s), cada {} min.", self.ev.minutes),
             Err(e) => format!("Error: {e}"),
         };
     }
@@ -145,6 +244,13 @@ impl App {
     pub fn events_tab(&mut self, ui: &mut egui::Ui) {
         if self.ev.chance == 0 {
             self.ev.chance = 100;
+        }
+        if self.ev.minutes == 0 {
+            self.ev.minutes = 60;
+        }
+        if !self.ev.loaded {
+            self.ev.loaded = true;
+            self.ev.templates = spawners::load_templates(&self.dir);
         }
         heading(ui, "Eventos y raids", 22.0);
         divider(ui);
@@ -222,6 +328,36 @@ impl App {
                 }
             });
             ui.label(RichText::new("Cantidad, rareza y nivel salen de la pestaña Ítems. Sin botín, los enemigos sueltan lo normal del juego.").color(MUTED).size(14.0));
+            label_title(ui, &format!("PLANTILLAS DE RAID ({}/{})", self.ev.templates.len(), spawners::MAX_TEMPLATES));
+            let mut drop_template = None;
+            for (i, t) in self.ev.templates.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} · {} × nv.{} · botín: {}", t.name, t.count, t.level, t.drops.len())).color(PARCHMENT));
+                    if button(ui, "Quitar", Vec2::new(70.0, 24.0), true, false) {
+                        drop_template = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = drop_template {
+                self.ev.templates.remove(i);
+                let _ = spawners::save_templates(&self.dir, &self.ev.templates);
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.ev.name).hint_text("Nombre de la plantilla").desired_width(220.0));
+                if button(ui, "Guardar plantilla", Vec2::new(180.0, 28.0), creature.is_some(), false) {
+                    self.save_template();
+                }
+            });
+            ui.label(RichText::new("Una plantilla guarda la criatura, cantidad, nivel y el botín de arriba.").color(MUTED).size(14.0));
+            label_title(ui, "RAIDS AUTOMÁTICOS EN LAS ZONAS ELEGIDAS");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Cada (minutos)");
+                ui.add(egui::Slider::new(&mut self.ev.minutes, 1..=1440));
+            });
+            if button(ui, "ACTIVAR EN LAS ZONAS ELEGIDAS", Vec2::new(ui.available_width(), 44.0), !self.ev.templates.is_empty() && !self.ev.zones.is_empty(), true) {
+                self.activate_auto();
+            }
+            ui.label(RichText::new("En cada ciclo se elige una plantilla al azar y aparece en un punto al azar dentro del radio de la zona, si hay un jugador a menos de 150 m. Para quitarlo, bórralo en la lista de apariciones de la pestaña Criaturas.").color(MUTED).size(14.0));
             ui.add_space(8.0);
             let ready = creature.is_some();
             if button(ui, "LANZAR", Vec2::new(ui.available_width(), 52.0), ready, true) {
@@ -254,6 +390,9 @@ mod tests {
             once: true,
             drops: Vec::new(),
             pickup: String::new(),
+            pool: Vec::new(),
+            every: 0,
+            area: 0.0,
         }
     }
 
@@ -275,4 +414,15 @@ mod tests {
         assert_eq!(zone_height(&places, (500.0, 500.0, 30.0), Some([0.0, 99.0, 0.0])), Some(99.0));
         assert_eq!(zone_height(&places, (500.0, 500.0, 30.0), None), None);
     }
+    #[test]
+    fn an_automatic_raid_carries_all_templates_and_the_zone_radius() {
+        let t = |n: &str| spawners::RaidTemplate { name: n.into(), template: format!("{n}-guid"), level: 5, count: 2, health: 0, damage: 1.0, drops: Vec::new() };
+        let s = automatic_raid("s9".into(), "Base", [1.0, 2.0, 3.0], 40.0, 3600, &[t("a"), t("b")], "pick");
+        assert_eq!((s.every, s.area, s.pool.len()), (3600, 40.0, 2));
+        assert_eq!(s.template, "a-guid");
+        assert!(!s.once);
+        let wire = spawners::op_add(&s);
+        assert!(wire.contains("\"e\":3600") && wire.contains("\"a\":40"));
+    }
+
 }

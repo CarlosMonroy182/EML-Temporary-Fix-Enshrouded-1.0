@@ -22,6 +22,7 @@ Zones, bases, teams, spawns, PvP and item/level/skill settings are saved in this
 Spawns only create creatures with a player within 150 m. If one does not show up, m182_spawner.log has "spawners: ... creature ... is at ..." lines with each creature's real position.
 Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
 Events and raids (panel tab "Events"): pick players, zones or places, a creature (Creatures tab) and optionally a loot list (Items tab). The wave is created once, only when a player is within 150 m, and disappears when all its creatures die. The loot falls where each enemy dies. Without a loot list they drop the normal game loot.
+Automatic raids: in the Events tab save up to 10 templates (creature, amount, level and loot), pick one or more zones and press Activate. Every N minutes (60 by default) one random template appears at a random point inside the zone radius, as long as a player is within 150 m of the zone center. The next wave is counted from the start of the previous one and waits until the previous wave is dead.
 Personal powers (god mode, energy) only last while that player is connected.
 
 

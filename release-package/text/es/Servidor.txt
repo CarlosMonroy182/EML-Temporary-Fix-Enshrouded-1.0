@@ -22,6 +22,7 @@ Zonas, bases, equipos, apariciones, PvP y ajustes de items/niveles/habilidades s
 Las apariciones solo crean criaturas con un jugador a menos de 150 m. Si una no aparece, m182_spawner.log trae las lineas "spawners: ... creature ... is at ..." con la posicion real de cada criatura.
 Los ajustes de items, niveles y habilidades sin costo se aplican cuando el servidor arranca: tras cambiarlos en el panel, reinicia el servidor.
 Eventos y raids (pestaña "Eventos" del panel): elige jugadores, zonas o lugares, una criatura (pestaña Criaturas) y, si quieres, una lista de botín (pestaña Ítems). La oleada se crea una sola vez, solo cuando hay un jugador a menos de 150 m, y desaparece cuando mueren todas sus criaturas. El botín cae donde muere cada enemigo. Sin lista de botín sueltan lo normal del juego.
+Raids automáticos: en la pestaña Eventos guarda hasta 10 plantillas (criatura, cantidad, nivel y botín), elige una o más zonas y pulsa Activar. Cada N minutos (60 por defecto) aparece una plantilla al azar en un punto al azar dentro del radio de la zona, siempre que haya un jugador a menos de 150 m del centro. La siguiente oleada se cuenta desde el inicio de la anterior y espera a que la anterior esté muerta.
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
 
