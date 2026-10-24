@@ -1077,7 +1077,7 @@ impl App {
                 ui.vertical(|ui| {
                     let times = if s.count > 1 { format!("{} × ", s.count) } else { String::new() };
                     ui.label(RichText::new(format!("{times}{}", s.creature)).color(PARCHMENT));
-                    let rhythm = if !s.pool.is_empty() { format!("{} plantillas, cada {} min, radio {:.0} m", s.pool.len(), s.every / 60, s.area) } else if s.once { "raid, una sola vez".to_string() } else { format!("cada {} min", s.respawn / 60) };
+                    let rhythm = if !s.pool.is_empty() && s.once { "raid de plantilla, una vez".to_string() } else if !s.pool.is_empty() { format!("{} plantillas, cada {} min, radio {:.0} m", s.pool.len(), s.every / 60, s.area) } else if s.once { "raid, una sola vez".to_string() } else { format!("cada {} min", s.respawn / 60) };
                     let loot = if s.drops.is_empty() { String::new() } else { format!(" · botín: {}", s.drops.len()) };
                     ui.label(RichText::new(format!("{} · nv.{} · {}{}", s.place, s.level, rhythm, loot)).color(MUTED).size(14.0));
                     if let Some(note) = spawners::distance_note(self.player, s.at) {
