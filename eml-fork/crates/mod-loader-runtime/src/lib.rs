@@ -18,7 +18,7 @@ fn load_registered(path: &std::path::Path) {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        extern "system" {
+        unsafe extern "system" {
             fn LoadLibraryW(name: *const u16) -> *mut core::ffi::c_void;
             fn GetLastError() -> u32;
         }
