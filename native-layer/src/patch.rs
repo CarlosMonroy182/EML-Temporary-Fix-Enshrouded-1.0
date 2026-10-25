@@ -503,6 +503,7 @@ pub fn install() -> Outcome {
         super::spawn_probe::install(&sections);
     }
 
+    super::guard::install(&sections);
     install_chat(&sections);
     if super::config::LIVE.spawner() || vfx {
         install_pump(&sections);

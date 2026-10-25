@@ -16,6 +16,9 @@ pub mod roster;
 mod signatures;
 
 #[cfg(windows)]
+mod guard;
+
+#[cfg(windows)]
 mod panel_host;
 
 #[cfg(windows)]
