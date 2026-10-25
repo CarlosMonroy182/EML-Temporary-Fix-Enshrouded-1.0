@@ -11,6 +11,9 @@ UPDATING
 Uploading this folder again does not touch your zones, teams, spawns or item settings (they are not in the package). If you already changed PvP from the panel and do not want to lose it, do not replace m182_native.json.
 If you are coming from an older version, in mods\zz_m182_item_stats you can delete m182_custom.txt, m182_custom_items.csv, m182_custom.skipped and m182_custom.running: "unique" weapons (copies) no longer exist.
 
+ADMIN ONLY
+Only players who have the kick/ban permission on the server can send commands through the panel; everyone else is ignored (m182_spawner.log says "is not an admin"). To turn it off, add "chat_admin_only": false to m182_native.json.
+
 KEY
 In m182_native.json the "chat_key" line is the chat channel key. It must be the same as "remote_key" in the m182_native.json of the Client folder. If you want to change it, change it in both places with the same string (no spaces) and restart the server.
 

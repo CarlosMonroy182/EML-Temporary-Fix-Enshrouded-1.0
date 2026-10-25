@@ -1,0 +1,68 @@
+M182 - CLIENT (administrator)
+================================
+
+FIRST SETUP - YOUR KEY (only to administer a dedicated server)
+Pick a secret of at least 6 characters, no spaces (for example: my-secret-2026). Write it in "remote_key" in m182_native.json of this Client folder, and the same string in "chat_key" in m182_native.json of the Server folder. Never share it. Playing only on your own game needs no key.
+
+INSTALL
+1. Close Enshrouded.
+2. Open the game folder (Steam > Enshrouded > Manage > Browse local files). It is the folder that contains enshrouded.exe.
+3. Copy and paste ALL the contents of this "M182_Client" folder into the game folder. If Windows asks, choose "Replace".
+   These get copied: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json and the mods folder. Your item settings (m182_item_stats.json and mods\zz_m182_item_stats\src\m182_data.lua) are not in this package: yours are kept.
+4. Start the game. Once you are inside the world, press the INSERT key: the M182 panel opens. Press INSERT again (or close the window) to hide it.
+
+IMPORTANT
+- Play in "Borderless window" (Options > Graphics > Display mode). The panel is its own window placed over the game; in exclusive fullscreen it will not show.
+- No .exe is needed. The first time, the panel takes a few seconds to appear after the game loads.
+
+IF YOU ARE UPDATING FROM AN OLDER VERSION
+- "Unique" weapons (copies) and the panel teleport no longer exist: travel works as normal in the game.
+- To get a different weapon, just change its level (and its stats) when you give it.
+- In mods\zz_m182_item_stats you can delete these files if they exist: m182_custom.txt, m182_custom_items.csv, m182_custom.skipped and m182_custom.running. They are no longer used.
+
+USING IT IN YOUR LOCAL GAME AND ON YOUR SERVER
+The panel detects by itself whether you are in your own game or on the server. There are no checkboxes to tick.
+- In your local game everything is applied directly.
+- On the server (dedicated) the "Server" folder must be installed (see its README); use the same key as the Server folder. The panel types for you in the game chat (messages starting with !m182) and the server hides them from the other players. While it sends, do not touch the keyboard or the chat; sending one request takes a few seconds.
+- Zones, bases, teams, spawns, PvP and settings live on the server: the panel only sends the changes when you make them. They keep working even if you disconnect. When you join, the panel only resends your personal powers (god mode and energy) and asks who is connected. The panel sends files compressed and does not send again a file the server already has with the same content (it remembers it in m182_sent.json), so joining is quick. The "Resend all" button (under the title) forgets that and sends everything again whenever you want (use it if you change server or another admin edits from another PC).
+- Only players with the kick/ban permission on the server can use the panel on it; commands from anyone else are ignored. To turn this check off, put "chat_admin_only": false in the server's m182_native.json.
+
+TABS
+- Creatures: summon creatures or create spawns that respawn on their own (at your position or at a saved place), with the level, health and damage you want.
+- Many spawns: you can create 50 or more (up to 20 creatures each). You can place several in the same spot. A spawn only creates its creatures when a player is within 150 m; when nobody is near it stays idle, and when someone returns the missing creatures come back at once. That way the server does not carry them all at the same time. The list shows how many metres you are from each spawn. When you create or delete one, only that change is sent to the server (about 5 chat messages), not the whole list; "Resend all" does send the full list (about 3 messages per spawn, it takes a while).
+- Items: give items with level, rarity and amount, and edit their stats. Changing an item's stats changes that item for everyone (applied when the server restarts); "Restore original values" puts it back as in the game.
+- Places: save positions to use for spawns and zones. On a server, "Save my position" and "Create where I am" ask the server for your position (it takes a few seconds); stay put until the place or zone appears.
+- Admin: god mode, infinite stamina and mana, heal yourself instantly.
+- PvP: turn combat between players on or off.
+- Zones and bases, and Teams (below).
+- Settings: server, key and chat limits; skills without cost and maximum levels.
+
+ZONES AND BASES
+- Safe zone: nobody loses health inside. On entering you hear and see the game's healing effect on the player, and while you stay inside a soft flash repeats every few seconds.
+- Protected base: create the zone where the base is, pick the "Owner team" and tick "Protected base". Anyone not in that team is a visitor inside: the game denies them opening chests and building or editing. Administrators are exempt (tick "Also applies to administrators" only to test it). If two bases overlap, the smaller one rules in the shared part (if they are the same size, the one whose centre is nearer to the player).
+
+TEAMS
+- On the server press "Find server players": the server answers in the chat with the connected names (everyone sees it, it is one short line). If a name could not be read it appears as "ID N". If you are alone on the server, you are listed with your name and your Steam ID (taken from Steam on your PC) and the server recognizes you by that name. You can also add a name by hand.
+- Team leaders: next to each person of a team there is a "leader" box. Leaders can manage their team from the game chat, with no panel and no administrator: "!team invite <name>" (the player must be connected), the invited player types "!team accept" (or "!team decline") within 2 minutes, "!team leave" to leave, "!team kick <name>" (leader). Everyone in the chat sees the answer. In Spanish: !equipo invitar / aceptar / rechazar / salir / expulsar. A player can only be in one team; to change team they leave first. People who join or leave this way are saved on the server (m182_members.json) and take effect at once; the panel does not list them, and sending the teams again from the panel does not remove them. Remove a leader from the panel by unticking the box.
+- Bringing someone back from the panel after they left by chat: untick and tick them again in their team, or press "Reapply to everyone" on the team. The latest change always wins, whether it was made in the panel or in the chat.
+- The panel asks the server for its real teams when you connect and every few minutes, so teams changed by chat (invite / leave) show up in the panel by themselves and both always match.
+- Chat typing speed: if the server loses letters, add "typing_burst": 1 and "typing_gap_ms": 4 to m182_panel.json.
+
+NOTES
+- Loot: summoned creatures drop the game's normal loot.
+- Skills without cost and item/player levels are applied when the game or the server starts: after changing them in Settings the panel also saves them on the server (mods\zz_m182_item_stats\src\m182_data.lua) and you only have to restart the server. Nothing needs to be uploaded by FTP.
+
+VFX (effects)
+- The package includes the M182 VFX effects (folder mods\m182_vfx). They start by themselves: glows while you charge a staff spell or a heavy melee attack and a burst when you release it. No panel and no settings are needed. Their log is m182_vfx.log in the game folder.
+- When you host a world locally, the walking auras are also available: the greet emote turns the aura on and off, and the victory emote switches to the next one. On a dedicated server only the staff charge effects run.
+- To turn the effects off, delete the folder mods\m182_vfx (or create m182_vfx.json with {"enabled": false}).
+
+IF THE GAME WILL NOT START
+- This package loads through dbghelp.dll. Another mod loader that also uses dbghelp.dll (for example the original EML) cannot run at the same time: keep only one dbghelp.dll in the game folder.
+- The loader now checks the game files after every patch and puts the original ones back by itself if anything looks wrong (see eml.log / m182_panel.log). Just start the game again.
+- If it still says "Could not find core resource package": close the game, delete dbghelp.dll, then in Steam: right click Enshrouded > Properties > Installed Files > Verify integrity of game files. Put the mod files back afterwards.
+
+UNINSTALL
+Delete dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json and the folders mods\m182_spawn_variants, mods\m182_vfx and mods\zz_m182_item_stats.
+
+Made by M182.

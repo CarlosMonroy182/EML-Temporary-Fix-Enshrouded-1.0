@@ -108,13 +108,22 @@ jobs:
           pack Servidor M182_Servidor panel LEEME.txt es/Servidor.txt
           pack Cliente M182_Client panel-en README.txt en/Cliente.txt
           pack Servidor M182_Server panel-en README.txt en/Servidor.txt
+          for side in Client Server; do
+            rm -rf dist/M182_Nexus_$side
+            cp -r dist/M182_$side dist/M182_Nexus_$side
+            lower=$(echo $side | tr A-Z a-z)
+            cp nexus-package/public/$lower/* dist/M182_Nexus_$side/
+            cp nexus-package/public/text/$side.txt dist/M182_Nexus_$side/README.txt
+            cp eml-fork/LICENSE dist/M182_Nexus_$side/ || true
+          done
+          if grep -rIl "7dde183b" dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "private key found in the public packages"; exit 1; fi
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src
           cp artifacts/native/dbghelp.dll dist/M182_PvP/
           cp nexus-package/m182_native.json nexus-package/eml.json nexus-package/README.txt dist/M182_PvP/
           cp eml-fork/LICENSE dist/M182_PvP/
           cp spawner-mods/m182_spawn_variants/mod.json dist/M182_PvP/mods/m182_spawn_variants/
           cp spawner-mods/m182_spawn_variants/src/mod.lua dist/M182_PvP/mods/m182_spawn_variants/src/
-          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server)
+          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server && zip -r M182_Nexus_Client.zip M182_Nexus_Client && zip -r M182_Nexus_Server.zip M182_Nexus_Server)
           (cd dist && sha256sum M182_*.zip > SHA256.txt)
       - name: Publish release
         env:
@@ -122,4 +131,4 @@ jobs:
         run: |
           tag=admin-pannel-latest
           gh release delete "$tag" --cleanup-tag --yes || true
-          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."
+          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/M182_Nexus_Client.zip dist/M182_Nexus_Server.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."

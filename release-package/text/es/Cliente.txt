@@ -21,7 +21,8 @@ USARLO EN TU PARTIDA (local) Y EN TU SERVIDOR
 El panel detecta solo si estas en tu partida o en el servidor. No hay casillas que marcar.
 - En tu partida local todo se aplica directamente.
 - En el servidor (Dathost) debe estar instalada la carpeta "Servidor" (ver su LEEME); la clave ya coincide. El panel escribe por ti en el chat del juego (mensajes que empiezan por !m182) y el servidor los oculta al resto de jugadores. Mientras envia, no toques el teclado ni el chat; el envio de un pedido dura unos segundos.
-- Zonas, bases, equipos, apariciones, PvP y ajustes viven en el servidor: el panel solo le manda los cambios cuando los haces. Siguen funcionando aunque tu te desconectes. Al entrar el panel solo reenvia tus poderes personales (modo dios y energia) y pregunta quien esta conectado. El boton "Reenviar todo" (bajo el titulo) vuelve a enviar todo lo demas cuando quieras.
+- Zonas, bases, equipos, apariciones, PvP y ajustes viven en el servidor: el panel solo le manda los cambios cuando los haces. Siguen funcionando aunque tu te desconectes. Al entrar el panel solo reenvia tus poderes personales (modo dios y energia) y pregunta quien esta conectado. El panel envia los archivos comprimidos y no vuelve a enviar un archivo que el servidor ya tiene con el mismo contenido (lo recuerda en m182_sent.json), asi que entrar es rapido. El boton "Reenviar todo" (bajo el titulo) olvida eso y vuelve a enviar todo cuando quieras (usalo si cambias de servidor o si otro admin edita desde otra PC).
+- Solo los jugadores con permiso de expulsar/banear en el servidor pueden usar el panel en el; los comandos de cualquier otro se ignoran. Para desactivar esta comprobacion pon "chat_admin_only": false en el m182_native.json del servidor.
 
 PESTAÑAS
 - Criaturas: invoca criaturas o crea apariciones que reaparecen solas (en tu posicion o en un lugar guardado), con nivel, vida y daño a tu gusto.
@@ -57,6 +58,6 @@ SI EL JUEGO NO ABRE
 - Si aun dice "Could not find core resource package": cierra el juego, borra dbghelp.dll y en Steam: clic derecho en Enshrouded > Propiedades > Archivos instalados > Verificar integridad de los archivos del juego. Despues vuelve a copiar los archivos del mod.
 
 DESINSTALAR
-Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json y las carpetas mods\m182_spawn_variants y mods\zz_m182_item_stats.
+Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json y las carpetas mods\m182_spawn_variants, mods\m182_vfx y mods\zz_m182_item_stats.
 
 Hecho por M182.

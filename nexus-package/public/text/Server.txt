@@ -1,0 +1,38 @@
+M182 - SERVER (dedicated)
+==========================
+
+FIRST SETUP - YOUR KEY
+Pick a secret of at least 6 characters, no spaces (for example: my-secret-2026). Write it in "chat_key" in m182_native.json of this folder, and the same string in "remote_key" in m182_native.json of the Client folder. Never share it. Without a key the panel cannot control the server.
+
+INSTALL
+1. Stop the server in your hosting panel.
+2. With FTP, go to the folder where enshrouded_server.exe is.
+3. Upload ALL the contents of this "M182_Server" folder (dbghelp.dll, eml.json, m182_native.json and the mods folder) to that folder, replacing what is there.
+4. Start the server. No .exe needs to be uploaded or opened.
+
+UPDATING
+Uploading this folder again does not touch your zones, teams, spawns or item settings (they are not in the package). If you already changed PvP from the panel and do not want to lose it, do not replace m182_native.json.
+If you are coming from an older version, in mods\zz_m182_item_stats you can delete m182_custom.txt, m182_custom_items.csv, m182_custom.skipped and m182_custom.running: "unique" weapons (copies) no longer exist.
+
+ADMIN ONLY
+Only players who have the kick/ban permission on the server can send commands through the panel; everyone else is ignored (m182_spawner.log says "is not an admin"). To turn it off, add "chat_admin_only": false to m182_native.json.
+
+KEY
+In m182_native.json the "chat_key" line is the chat channel key. It must be the same as "remote_key" in the m182_native.json of the Client folder. If you want to change it, change it in both places with the same string (no spaces) and restart the server.
+
+HOW IT IS USED
+You join the server with the "Client" folder installed, press INSERT and use the panel. The panel detects by itself that you are on the server. You do not have to type commands.
+
+WHAT LIVES ON THE SERVER
+Zones, bases, teams, spawns, PvP and item/level/skill settings are saved in this folder (m182_zones.json, m182_teams.json, m182_spawners.json, m182_native.json and mods\zz_m182_item_stats\src\m182_data.lua). The server reads them by itself and keeps them even when the administrator is not connected. The panel only sends the changes.
+Spawns only create creatures with a player within 150 m. If one does not show up, m182_spawner.log has "spawners: ... creature ... is at ..." lines with each creature's real position.
+Item settings, levels and skills without cost are applied when the server starts: after changing them in the panel, restart the server.
+Events and raids (panel tab "Events"): everything is set in that tab. A template is a group of enemies, for example 5 Renegades + 3 Wolves + 1 Explosive; each enemy has its own amount, level, damage and loot (with its own chance per item). You can create up to 10 templates and edit them at any time. Pick one or more zones, then activate automatic raids (every N minutes, 60 by default) or press "Launch now" on a template. Each raid picks a random template and appears at a random point inside the zone radius, as long as a player is within 150 m of the zone center. After editing templates, press "Apply the changes to the active raids". Automatic waves wait until the previous one is dead. Without loot, enemies drop the normal game loot; the loot you set falls where each enemy dies.
+Personal powers (god mode, energy) only last while that player is connected.
+
+
+VFX
+- The folder mods\m182_vfx is part of this package. On a dedicated server it makes the staff charge effects appear for everyone; nothing else is needed. Upload it with the rest of the folder. To turn it off, delete mods\m182_vfx. Its log is m182_vfx.log.
+- Light mode: on a dedicated server the effects are lighter by default (one effect per charge, at most one every 0.4 s, slower watching while nobody is charging). To use the full effects anyway, create m182_vfx.json in the server folder with {"server_light": false}.
+
+Made by M182.
