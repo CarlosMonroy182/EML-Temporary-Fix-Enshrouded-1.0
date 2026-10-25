@@ -26,6 +26,8 @@ pub struct EventState {
     pub chance: u32,
     /// Templates changed after the last time they were sent to the automatic raids.
     pub unapplied: bool,
+    /// The zone choice was restored from disk and from the raids that are already running.
+    pub restored: bool,
 }
 
 impl Default for EventState {
@@ -46,6 +48,7 @@ impl Default for EventState {
             item_level: 1,
             chance: 100,
             unapplied: false,
+            restored: false,
         }
     }
 }
@@ -92,7 +95,44 @@ fn new_member(creature: String, template: String) -> Member {
     Member { creature, template, level: 50, count: 3, health: 0, damage: 1.0, drops: Vec::new() }
 }
 
+pub const CHOICE_FILE: &str = "m182_events.json";
+
 impl App {
+    /// Brings back the zones and the interval chosen before: from the file the panel keeps and from
+    /// the automatic raids that are already running on the server.
+    fn restore_choice(&mut self) {
+        if self.ev.restored || self.social.zones.is_empty() {
+            return;
+        }
+        self.ev.restored = true;
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        if let Some(v) = std::fs::read_to_string(self.dir.join(CHOICE_FILE)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+            if let Some(list) = v.get("zones").and_then(|z| z.as_array()) {
+                names.extend(list.iter().filter_map(|n| n.as_str().map(str::to_string)));
+            }
+            if let Some(m) = v.get("minutes").and_then(|m| m.as_u64()) {
+                self.ev.minutes = (m as u32).clamp(1, 1440);
+            }
+        }
+        for s in self.spawners.iter().filter(|s| !s.pool.is_empty() && !s.once) {
+            names.insert(s.place.clone());
+            if s.every >= 60 {
+                self.ev.minutes = (s.every / 60).clamp(1, 1440);
+            }
+        }
+        for (i, z) in self.social.zones.iter().enumerate() {
+            if names.contains(&z.name) {
+                self.ev.zones.insert(i);
+            }
+        }
+    }
+
+    fn save_choice(&self) {
+        let names: Vec<&str> = self.ev.zones.iter().filter_map(|&i| self.social.zones.get(i).map(|z| z.name.as_str())).collect();
+        let body = serde_json::json!({ "zones": names, "minutes": self.ev.minutes }).to_string();
+        let _ = std::fs::write(self.dir.join(CHOICE_FILE), body);
+    }
+
     fn creature_name(&self, i: usize) -> Option<String> {
         self.creatures.entries.get(i).map(|e| e.alias.clone().unwrap_or_else(|| e.label.clone()))
     }
@@ -449,6 +489,8 @@ impl App {
     }
 
     fn launch_panel(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
+        self.restore_choice();
+        let before = (self.ev.zones.clone(), self.ev.minutes);
         label_title(ui, "ZONAS");
         if self.social.zones.is_empty() {
             ui.label(RichText::new("Crea zonas en la pestaña Zonas y bases.").color(MUTED));
@@ -470,6 +512,9 @@ impl App {
             ui.label("Raids automáticos cada (minutos)");
             ui.add(egui::Slider::new(&mut self.ev.minutes, 1..=1440));
         });
+        if (self.ev.zones.clone(), self.ev.minutes) != before {
+            self.save_choice();
+        }
         let usable = self.ev.templates.iter().any(|t| t.active && !t.members.is_empty());
         if button(ui, "ACTIVAR RAIDS AUTOMÁTICOS EN LAS ZONAS ELEGIDAS", Vec2::new(ui.available_width(), 44.0), usable && !self.ev.zones.is_empty(), true) {
             *action = Some(Action::Activate);

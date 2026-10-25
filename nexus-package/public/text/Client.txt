@@ -24,7 +24,7 @@ USING IT IN YOUR LOCAL GAME AND ON YOUR SERVER
 The panel detects by itself whether you are in your own game or on the server. There are no checkboxes to tick.
 - In your local game everything is applied directly.
 - On the server (dedicated) the "Server" folder must be installed (see its README); use the same key as the Server folder. The panel types for you in the game chat (messages starting with !m182) and the server hides them from the other players. While it sends, do not touch the keyboard or the chat; sending one request takes a few seconds.
-- Zones, bases, teams, spawns, PvP and settings live on the server: the panel only sends the changes when you make them. They keep working even if you disconnect. When you join, the panel only resends your personal powers (god mode and energy) and asks who is connected. The panel sends files compressed and does not send again a file the server already has with the same content (it remembers it in m182_sent.json), so joining is quick. The "Resend all" button (under the title) forgets that and sends everything again whenever you want (use it if you change server or another admin edits from another PC).
+- Zones, bases, teams, spawns, PvP and settings live on the server: the panel only sends the changes when you make them. They keep working even if you disconnect. When you join, the panel only resends your personal powers (god mode and energy) and asks who is connected. The panel sends files compressed and does not send again a file the server already has with the same content (it remembers it in m182_sent.json, m182_events.json), so joining is quick. The "Resend all" button (under the title) forgets that and sends everything again whenever you want (use it if you change server or another admin edits from another PC).
 - Only players with the kick/ban permission on the server can use the panel on it; commands from anyone else are ignored. To turn this check off, put "chat_admin_only": false in the server's m182_native.json.
 
 TABS
@@ -63,6 +63,6 @@ IF THE GAME WILL NOT START
 - If it still says "Could not find core resource package": close the game, delete dbghelp.dll, then in Steam: right click Enshrouded > Properties > Installed Files > Verify integrity of game files. Put the mod files back afterwards.
 
 UNINSTALL
-Delete dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json and the folders mods\m182_spawn_variants, mods\m182_vfx and mods\zz_m182_item_stats.
+Delete dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json, m182_events.json and the folders mods\m182_spawn_variants, mods\m182_vfx and mods\zz_m182_item_stats.
 
 Made by M182.
