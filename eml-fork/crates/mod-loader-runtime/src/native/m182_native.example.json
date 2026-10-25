@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "pvp": true,
+  "pvp_friend_checks": false,
+  "spawn_probe": false,
+  "spawner": true,
+  "spawn_key": "F8",
+  "spawn_template": "Enemy_LizardpeopleDrak01_Melee_Spear",
+  "spawn_level": 20,
+  "spawn_count": 1,
+  "spawn_distance": 5.0,
+  "spawn_health": 5000,
+  "spawn_damage": 4.0,
+  "dump_player_key": "F7",
+  "dump_spawned_key": "F6",
+  "watch_key": "F5",
+  "chat_key": "",
+  "chat_admin_only": true
+}

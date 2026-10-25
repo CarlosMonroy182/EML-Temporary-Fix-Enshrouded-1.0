@@ -36,6 +36,8 @@ pub struct NativeConfig {
     pub panel: bool,
     /// Test switch: act on the character shown on screen even when this game also hosts the world.
     pub force_client: bool,
+    /// Only players with the kick/ban permission may use the chat command channel.
+    pub chat_admin_only: bool,
 }
 
 impl Default for NativeConfig {
@@ -59,6 +61,7 @@ impl Default for NativeConfig {
             chat_key: String::new(),
             panel: true,
             force_client: false,
+            chat_admin_only: true,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct LiveState {
     pub spawn_probe: AtomicBool,
     pub spawner: AtomicBool,
     pub force_client: AtomicBool,
+    pub chat_admin_only: AtomicBool,
     pub chat_key: std::sync::Mutex<String>,
 }
 
@@ -157,6 +161,7 @@ pub static LIVE: LiveState = LiveState {
     spawn_probe: AtomicBool::new(false),
     spawner: AtomicBool::new(false),
     force_client: AtomicBool::new(false),
+    chat_admin_only: AtomicBool::new(true),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
@@ -168,6 +173,7 @@ impl LiveState {
         self.spawn_probe.store(cfg.enabled && cfg.spawn_probe, Ordering::Relaxed);
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
+        self.chat_admin_only.store(cfg.chat_admin_only, Ordering::Relaxed);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);
@@ -209,6 +215,11 @@ impl LiveState {
     #[inline]
     pub fn spawner(&self) -> bool {
         self.spawner.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn chat_admin_only(&self) -> bool {
+        self.chat_admin_only.load(Ordering::Relaxed)
     }
 
     #[inline]

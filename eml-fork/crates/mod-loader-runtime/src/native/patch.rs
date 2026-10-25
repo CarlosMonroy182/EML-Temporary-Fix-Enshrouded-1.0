@@ -265,6 +265,20 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
         super::chat::note_other(&message, client as u32);
         return 0;
     }
+    if LIVE.chat_admin_only() {
+        let table = super::table::entries();
+        match table.iter().find(|e| e.client == client as u32) {
+            Some(entry) if super::roster::is_admin(entry.permissions) => {}
+            Some(entry) => {
+                super::spawner::log(&format!("chat: client {} is not an admin (permissions {:#04x}); command ignored", client as u32, entry.permissions));
+                return 1;
+            }
+            None => {
+                super::spawner::log(&format!("chat: client {} not found in the player table; command ignored", client as u32));
+                return 1;
+            }
+        }
+    }
     let Ok(dir) = std::env::current_dir() else { return 0 };
     match super::chat::handle(&message, &key, client as u32, &dir) {
         super::chat::Verdict::Pass => 0,
