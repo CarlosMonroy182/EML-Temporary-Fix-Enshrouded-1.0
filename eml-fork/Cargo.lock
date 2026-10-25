@@ -1222,6 +1222,7 @@ dependencies = [
 name = "mod-loader-runtime"
 version = "0.1.2"
 dependencies = [
+ "miniz_oxide",
  "mod-loader-base",
  "parking_lot",
  "serde",

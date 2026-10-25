@@ -60,6 +60,7 @@ struct Job {
     file: String,
     lines: Vec<String>,
     tries: u8,
+    sum: Option<(String, u64)>,
 }
 
 struct State {
@@ -246,6 +247,53 @@ pub fn route(name: &str) -> Route {
     }
 }
 
+static SENT: Mutex<Option<std::collections::HashMap<String, u64>>> = Mutex::new(None);
+pub const SENT_FILE: &str = "m182_sent.json";
+
+fn checksum(key: &str, name: &str, body: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.bytes().chain(std::iter::once(0)).chain(name.bytes()).chain(std::iter::once(0)).chain(body.bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn sent_map<R>(f: impl FnOnce(&mut std::collections::HashMap<String, u64>) -> R) -> R {
+    let mut guard = SENT.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(|| {
+        let dir = LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        dir.and_then(|d| std::fs::read_to_string(d.join(SENT_FILE)).ok())
+            .and_then(|t| serde_json::from_str::<std::collections::HashMap<String, u64>>(&t).ok())
+            .unwrap_or_default()
+    });
+    f(map)
+}
+
+fn sent_before(file: &str, value: u64) -> bool {
+    sent_map(|m| m.get(file) == Some(&value))
+}
+
+fn remember_sent(file: &str, value: u64) {
+    let snapshot = sent_map(|m| {
+        m.insert(file.to_string(), value);
+        m.clone()
+    });
+    if let Some(dir) = LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Ok(text) = serde_json::to_string(&snapshot) {
+            let _ = std::fs::write(dir.join(SENT_FILE), text);
+        }
+    }
+}
+
+/// Forgets what the server is known to have, so the next submit of every file is sent again.
+pub fn forget_sent() {
+    sent_map(|m| m.clear());
+    if let Some(dir) = LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        let _ = std::fs::remove_file(dir.join(SENT_FILE));
+    }
+}
+
 fn push(job: Job, replace: bool) {
     let mut s = state();
     if replace {
@@ -264,28 +312,39 @@ pub fn submit(name: &str, text: &str) -> Result<(), String> {
     };
     let body = serde_json::from_str::<Value>(text).map_err(|e| format!("{name}: {e}"))?.to_string();
     let replace = !REMOTE_ONLY.contains(&name);
-    push(Job { file: name.to_string(), lines: proto::compose(&key, name, &body, limit), tries: 0 }, replace);
+    let sum = if replace { Some((name.to_string(), checksum(&key, name, &body))) } else { None };
+    if let Some((file, value)) = &sum {
+        let busy = {
+            let st = state();
+            st.status.sending || st.queue.iter().any(|j| &j.file == file)
+        };
+        if !busy && sent_before(file, *value) {
+            note(&format!("skipped {file}: the server already has this exact content"));
+            return Ok(());
+        }
+    }
+    push(Job { file: name.to_string(), lines: proto::compose_best(&key, name, &body, limit), tries: 0, sum }, replace);
     Ok(())
 }
 
 pub fn submit_pvp(on: bool) {
     let key = state().settings.key.clone();
-    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)], tries: 0 }, true);
+    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)], tries: 0, sum: None }, true);
 }
 
 pub fn submit_players(seq: u32) {
     let key = state().settings.key.clone();
-    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0 }, true);
+    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0, sum: None }, true);
 }
 
 pub fn submit_teams(seq: u32) {
     let key = state().settings.key.clone();
-    push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0 }, true);
+    push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0, sum: None }, true);
 }
 
 pub fn submit_ping() {
     let key = state().settings.key.clone();
-    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0 }, true);
+    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0, sum: None }, true);
 }
 
 pub fn status() -> Status {
@@ -350,6 +409,9 @@ fn worker() {
         s.status.sending = false;
         s.status.sent_lines += sent;
         if error.is_empty() {
+            if let Some((file, value)) = &job.sum {
+                remember_sent(file, *value);
+            }
             s.status.last = format!("{} enviado ({} mensaje{}, {:.1} s)", job.file, job.lines.len(), if job.lines.len() == 1 { "" } else { "s" }, started.elapsed().as_secs_f32());
         } else if retry {
             note(&format!("retrying {} (attempt {})", job.file, job.tries + 2));
@@ -373,6 +435,7 @@ pub fn reset_for_tests() {
     s.hosting = None;
     s.settings = Settings { enabled: false, key: String::new(), limit: DEFAULT_LIMIT };
     s.status = Status::default();
+    *SENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Default::default());
 }
 
 #[cfg(test)]

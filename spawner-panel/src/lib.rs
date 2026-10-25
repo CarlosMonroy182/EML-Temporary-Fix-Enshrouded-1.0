@@ -795,6 +795,7 @@ impl App {
 
     /// Manual button: sends the server everything the panel has configured.
     pub fn resend_state(&mut self) -> usize {
+        remote::forget_sent();
         let mut sent = 0;
         for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json"] {
             if let Ok(text) = std::fs::read_to_string(self.dir.join(name)) {

@@ -64,6 +64,51 @@ pub fn compose(key: &str, file: &str, body: &str, limit: usize) -> Vec<String> {
     lines
 }
 
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn b64(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for chunk in data.chunks(3) {
+        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(B64[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(B64[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// Same as `compose`, but the body is deflated and written in base64 (about 8 times fewer chat lines).
+pub fn compose_z(key: &str, file: &str, body: &str, limit: usize) -> Vec<String> {
+    let limit = limit.clamp(MIN_LIMIT, MAX_LIMIT);
+    let packed = b64(&miniz_oxide::deflate::compress_to_vec(body.as_bytes(), 9));
+    let single = format!("{}{}", head(key, "setz", file), packed);
+    if single.len() <= limit {
+        return vec![single];
+    }
+    let room = limit.saturating_sub(head(key, "addz", file).len()).max(8);
+    let mut lines = Vec::new();
+    for (i, part) in packed.as_bytes().chunks(room).enumerate() {
+        let command = if i == 0 { "putz" } else { "addz" };
+        lines.push(format!("{}{}", head(key, command, file), std::str::from_utf8(part).unwrap_or("")));
+    }
+    let end = format!("{PREFIX} {key} endz {file}");
+    lines.push(end.clone());
+    lines.push(end);
+    lines
+}
+
+/// The shorter of the two encodings (the plain one wins ties so small messages stay readable).
+pub fn compose_best(key: &str, file: &str, body: &str, limit: usize) -> Vec<String> {
+    let plain = compose(key, file, body, limit);
+    let packed = compose_z(key, file, body, limit);
+    if packed.len() < plain.len() { packed } else { plain }
+}
+
 pub fn pvp(key: &str, on: bool) -> String {
     format!("{PREFIX} {key} pvp {}", if on { "on" } else { "off" })
 }
@@ -138,5 +183,52 @@ mod tests {
         assert_eq!(ping("abcdefg"), "!m182 abcdefg ping");
         assert_eq!(players("abcdefg", 7), "!m182 abcdefg players 7");
         assert!(valid_key("abcdef") && !valid_key("abc") && !valid_key("abc def"));
+    }
+
+    #[test]
+    fn packed_bodies_use_far_fewer_lines() {
+        let body = serde_json::json!({"spawners": (0..160).map(|i| serde_json::json!({"id": format!("s17929{i:05}"), "name": format!("Raid {i}"), "x": i * 10, "z": -i * 7, "waves": [{"template": "Enemy_Wolf", "level": 20, "count": 5}]})).collect::<Vec<_>>()}).to_string();
+        let plain = compose("secret-key", "m182_spawners.json", &body, 200);
+        let packed = compose_z("secret-key", "m182_spawners.json", &body, 200);
+        assert!(packed.len() * 4 < plain.len(), "{} vs {}", packed.len(), plain.len());
+        assert!(packed.iter().all(|l| l.len() <= 200));
+        assert!(packed.iter().all(|l| l.chars().all(|c| c.is_ascii_alphanumeric() || " !-_.".contains(c))));
+        assert_eq!(compose_best("secret-key", "m182_spawners.json", &body, 200), packed);
+    }
+
+    fn unpack(lines: &[String]) -> String {
+        let mut packed = String::new();
+        for l in lines {
+            let mut parts = l.splitn(5, ' ');
+            let (_, _, command, _file) = (parts.next(), parts.next(), parts.next(), parts.next());
+            if matches!(command, Some("putz" | "addz" | "setz")) {
+                packed.push_str(parts.next().unwrap());
+            }
+        }
+        let mut out = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for c in packed.bytes() {
+            let v = B64.iter().position(|b| *b == c).unwrap() as u32;
+            acc = acc << 6 | v;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+                acc &= (1 << bits) - 1;
+            }
+        }
+        String::from_utf8(miniz_oxide::inflate::decompress_to_vec(&out).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn packed_bodies_rebuild_exactly() {
+        for body in [r#"{"a":1}"#.to_string(), serde_json::json!({"zones": (0..300).map(|i| serde_json::json!({"name": format!("Zona ñandú {i}"), "x": i * 13 % 977, "z": -(i * 31 % 811)})).collect::<Vec<_>>()}).to_string()] {
+            for limit in [80usize, 200, 900] {
+                let lines = compose_z("secret-key", "m182_zones.json", &body, limit);
+                assert!(lines.iter().all(|l| l.len() <= limit));
+                assert_eq!(unpack(&lines), body, "limit {limit}");
+            }
+        }
+        println!("VECTOR {}", compose_z("secret-key", "m182_zones.json", r#"{"zones":[{"name":"Base ñ","x":10,"z":-20,"radius":30},{"name":"Base ñ","x":10,"z":-20,"radius":30}]}"#, 900).join("\n"));
     }
 }

@@ -232,6 +232,64 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
                 None => Err(format!("file \"{file}\" is not allowed")),
             }
         }
+        "setz" => {
+            let (file, packed) = next_token(rest);
+            match unpack(packed) {
+                Ok(body) => {
+                    let written = write_json(dir, file, &body, client);
+                    if written.is_ok() {
+                        note_requester(file, client);
+                    }
+                    written
+                }
+                Err(why) => Err(why),
+            }
+        }
+        "putz" => {
+            let (file, chunk) = next_token(rest);
+            match allowed(file) {
+                Some(name) if chunk.len() <= MAX_BUFFER => {
+                    session.buffers.insert(name.to_string(), (chunk.to_string(), now));
+                    Ok(format!("putz {name} ({} bytes buffered)", chunk.len()))
+                }
+                Some(_) => Err("chunk too large".to_string()),
+                None => Err(format!("file \"{file}\" is not allowed")),
+            }
+        }
+        "addz" => {
+            let (file, chunk) = next_token(rest);
+            match allowed(file) {
+                Some(name) => match session.buffers.get_mut(name) {
+                    Some((buffer, at)) if buffer.len() + chunk.len() <= MAX_BUFFER => {
+                        buffer.push_str(chunk);
+                        *at = now;
+                        Ok(format!("addz {name} ({} bytes buffered)", buffer.len()))
+                    }
+                    Some(_) => Err("buffer too large".to_string()),
+                    None => Err(format!("nothing buffered for {name}; send putz first")),
+                },
+                None => Err(format!("file \"{file}\" is not allowed")),
+            }
+        }
+        "endz" => {
+            let (file, _) = next_token(rest);
+            match allowed(file) {
+                Some(name) => match session.buffers.remove(name) {
+                    Some((buffer, _)) => match unpack(&buffer) {
+                        Ok(body) => {
+                            let written = write_json(dir, name, &body, client);
+                            if written.is_ok() {
+                                note_requester(name, client);
+                            }
+                            written
+                        }
+                        Err(why) => Err(why),
+                    },
+                    None => Err(format!("nothing buffered for {name}")),
+                },
+                None => Err(format!("file \"{file}\" is not allowed")),
+            }
+        }
         "pvp" => {
             let (value, _) = next_token(rest);
             match value.to_ascii_lowercase().as_str() {
@@ -248,6 +306,38 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
         Ok(done) => format!("chat: client {client} ok: {done}"),
         Err(why) => format!("chat: client {client} rejected: {why}"),
     })
+}
+
+const MAX_UNPACKED: usize = 512 * 1024;
+
+fn unb64(text: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4 + 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return Err("packed payload has an invalid character".to_string()),
+        } as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Inverse of the panel's `compose_z`: base64 (url alphabet) of a deflate stream, holding JSON text.
+fn unpack(text: &str) -> Result<String, String> {
+    let raw = unb64(text)?;
+    let bytes = miniz_oxide::inflate::decompress_to_vec_with_limit(&raw, MAX_UNPACKED).map_err(|_| "packed payload is damaged".to_string())?;
+    String::from_utf8(bytes).map_err(|_| "packed payload is not text".to_string())
 }
 
 fn unhex(text: &str) -> Result<String, String> {
@@ -745,4 +835,22 @@ mod tests {
         assert_eq!(members[1]["drops"][0]["chance"], 30.0);
     }
 
+
+    #[test]
+    fn packed_commands_from_the_panel_are_unpacked() {
+        let dir = scratch("packed");
+        let mut s = Session::default();
+        let line = "!m182 secret-key setz m182_zones.json lcqxCYAwEEDRVeTXEaJ2V7qGWBx4hYURDIIkZChncDGzQqrXvEw6g0VkyQQ9DGHWaN334niQwTsS0o_VS7f9rnXyxTXttfw";
+        assert!(matches!(run(&mut s, &dir, line), Verdict::Swallowed(ref l) if l.contains("ok")));
+        let body = std::fs::read_to_string(dir.join("m182_zones.json")).unwrap();
+        assert_eq!(body, r#"{"zones":[{"name":"Base ñ","x":10,"z":-20,"radius":30},{"name":"Base ñ","x":10,"z":-20,"radius":30}]}"#);
+        let packed = line.rsplit(' ').next().unwrap();
+        let (a, b) = packed.split_at(40);
+        run(&mut s, &dir, &format!("!m182 secret-key putz m182_teams.json {a}"));
+        run(&mut s, &dir, &format!("!m182 secret-key addz m182_teams.json {b}"));
+        run(&mut s, &dir, "!m182 secret-key endz m182_teams.json");
+        assert_eq!(std::fs::read_to_string(dir.join("m182_teams.json")).unwrap(), body);
+        let Verdict::Swallowed(bad) = run(&mut s, &dir, "!m182 secret-key setz m182_powers.json AAAA") else { panic!() };
+        assert!(bad.contains("rejected"));
+    }
 }
