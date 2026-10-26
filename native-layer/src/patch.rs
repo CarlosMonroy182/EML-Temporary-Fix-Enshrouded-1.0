@@ -513,7 +513,8 @@ pub fn install() -> Outcome {
     };
 
     let vfx = super::vfx::wanted();
-    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx {
+    let pillar = super::pillar::wanted();
+    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx || pillar {
         super::spawn_probe::install(&sections);
     }
 

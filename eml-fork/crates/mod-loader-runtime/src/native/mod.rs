@@ -12,6 +12,7 @@ pub mod faction;
 pub mod groups;
 pub mod invites;
 pub mod market;
+pub mod pillar_cfg;
 pub mod roster;
 mod signatures;
 
@@ -20,6 +21,9 @@ mod guard;
 
 #[cfg(windows)]
 mod panel_host;
+
+#[cfg(windows)]
+mod pillar;
 
 #[cfg(windows)]
 mod patch;
