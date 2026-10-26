@@ -788,6 +788,8 @@ impl App {
     }
 
     fn send_powers(&self) {
+        // Powers only live while the player is connected: they are sent again on every join.
+        remote::forget_one(powers::POWERS_FILE);
         if let Ok(text) = std::fs::read_to_string(self.dir.join(powers::POWERS_FILE)) {
             let _ = remote::submit(powers::POWERS_FILE, &text);
         }

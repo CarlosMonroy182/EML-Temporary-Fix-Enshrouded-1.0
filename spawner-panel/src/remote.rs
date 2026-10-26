@@ -286,6 +286,19 @@ fn remember_sent(file: &str, value: u64) {
     }
 }
 
+/// Forgets what the server is known to have of one file, so the next submit of it is sent again.
+pub fn forget_one(file: &str) {
+    let snapshot = sent_map(|m| {
+        m.remove(file);
+        m.clone()
+    });
+    if let Some(dir) = LOG_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if let Ok(text) = serde_json::to_string(&snapshot) {
+            let _ = std::fs::write(dir.join(SENT_FILE), text);
+        }
+    }
+}
+
 /// Forgets what the server is known to have, so the next submit of every file is sent again.
 pub fn forget_sent() {
     sent_map(|m| m.clear());
@@ -440,6 +453,14 @@ pub fn reset_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_file_can_be_forgotten_so_it_is_sent_again() {
+        remember_sent("zz_test_forget.json", 5);
+        assert!(sent_before("zz_test_forget.json", 5));
+        forget_one("zz_test_forget.json");
+        assert!(!sent_before("zz_test_forget.json", 5));
+    }
+
     use super::*;
     use std::sync::Arc;
 
