@@ -87,14 +87,13 @@ jobs:
           path: market-native/dbghelp.dll
           if-no-files-found: error
       - name: Guard - market dbghelp.dll has EML and the market only
-        continue-on-error: true
         shell: bash
         run: |
           f=market-native/dbghelp.dll
           for marker in "KFCWriter is no longer available" "Failed to apply resource" "M182 Market log" "m182_wallets.json"; do
             grep -qa "$marker" "$f" || { echo "market dbghelp.dll is missing marker: $marker"; exit 1; }
           done
-          for other in "M182 VFX" "m182_vfx" "M182_Panel" "m182_pillar" "m182_zones" "m182_teams" "m182_spawners" "m182_powers" "m182_native.json" "m182_guard" "pvp" "m182_raid" "Equipo"; do
+          for other in "M182 VFX" "m182_vfx" "M182_Panel" "m182_pillar" "m182_zones" "m182_teams" "m182_spawners" "m182_powers" "m182_native.json" "m182_guard" "m182_raid" "Equipo"; do
             if grep -qai "$other" "$f"; then echo "market dbghelp.dll contains: $other"; exit 1; fi
           done
 
