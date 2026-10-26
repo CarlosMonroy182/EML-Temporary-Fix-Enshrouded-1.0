@@ -133,7 +133,7 @@ pub struct SwordConfig {
 impl Default for SwordConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             items: vec![518_418_528],
             effects: vec!["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fire".into(), "VFX_Trap_Electro_Impact".into()],
             scale: 0.7,
@@ -1322,11 +1322,11 @@ mod light_tests {
     use super::*;
 
     #[test]
-    fn the_sword_aura_defaults_to_the_enflamed_sword_and_can_be_changed() {
+    fn the_sword_aura_is_off_unless_asked_for() {
         let cfg = parse_config("{}").unwrap();
-        assert!(cfg.sword.enabled && cfg.sword.items == vec![518_418_528]);
-        let cfg = parse_config(r#"{"sword": {"enabled": false, "items": [1, 2]}}"#).unwrap();
-        assert!(!cfg.sword.enabled && cfg.sword.items == vec![1, 2] && cfg.sword.effects.len() == 2);
+        assert!(!cfg.sword.enabled && cfg.sword.items == vec![518_418_528]);
+        let cfg = parse_config(r#"{"sword": {"enabled": true, "items": [1, 2]}}"#).unwrap();
+        assert!(cfg.sword.enabled && cfg.sword.items == vec![1, 2] && cfg.sword.effects.len() == 2);
     }
 
     #[test]
