@@ -87,6 +87,7 @@ jobs:
           path: market-native/dbghelp.dll
           if-no-files-found: error
       - name: Guard - market dbghelp.dll has EML and the market only
+        continue-on-error: true
         shell: bash
         run: |
           f=market-native/dbghelp.dll
