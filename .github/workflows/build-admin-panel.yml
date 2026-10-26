@@ -81,6 +81,11 @@ jobs:
           mkdir -p ../market-native
           cargo build --release --locked -p dbghelp-proxy --features market-only
           cp target/release/dbghelp.dll ../market-native/dbghelp.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-market
+          path: market-native/dbghelp.dll
+          if-no-files-found: error
       - name: Guard - market dbghelp.dll has EML and the market only
         shell: bash
         run: |
@@ -91,11 +96,6 @@ jobs:
           for other in "M182 VFX" "m182_vfx" "M182_Panel" "m182_pillar" "m182_zones" "m182_teams" "m182_spawners" "m182_powers" "m182_native.json" "m182_guard" "pvp" "m182_raid" "Equipo"; do
             if grep -qai "$other" "$f"; then echo "market dbghelp.dll contains: $other"; exit 1; fi
           done
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-market
-          path: market-native/dbghelp.dll
-          if-no-files-found: error
 
   publish:
     needs: [panel, native]
