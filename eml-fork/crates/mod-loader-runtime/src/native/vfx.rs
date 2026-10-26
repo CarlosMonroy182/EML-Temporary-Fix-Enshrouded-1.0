@@ -337,6 +337,16 @@ fn template_guid(name: &str) -> Option<[u8; 16]> {
     found
 }
 
+/// Queues one effect entity; the server tick creates it (visible to every player).
+pub fn queue_effect(template: [u8; 16], at: (i64, i64, i64), scale: f32, life_ms: u64) {
+    let Ok(mut q) = QUEUE.lock() else { return };
+    if q.len() > 96 {
+        return;
+    }
+    q.push(Spawn { queued: now_ms(), template, at, scale, hand: None, life_ms: Some(life_ms) });
+    QUEUED.store(1, Ordering::SeqCst);
+}
+
 pub fn queue_burst(at: (i64, i64, i64), facing: (f64, f64), b: &Burst) {
     let points = burst_points(at.0, at.1, at.2, facing, b);
     let templates: Vec<[u8; 16]> = b.effects.iter().filter_map(|n| template_guid(n)).collect();

@@ -520,7 +520,7 @@ pub fn install() -> Outcome {
 
     super::guard::install(&sections);
     install_chat(&sections);
-    if super::config::LIVE.spawner() || vfx {
+    if super::config::LIVE.spawner() || vfx || pillar {
         install_pump(&sections);
     }
     if super::config::LIVE.spawner() {

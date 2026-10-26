@@ -8,6 +8,9 @@ pub const CONFIG_FILE: &str = "m182_pillar.json";
 /// Radius of the damage capsule of `Zone_Spell_Fire_Pillar_4`.
 pub const BASE_RADIUS_M: f32 = 3.0;
 
+/// `VFX_Scavenger_Camp_Bonfire`, a looping fire effect.
+pub const VISUAL_TEMPLATE: &str = "d0d55bba-7951-4213-8c2d-f8efb416fa2a";
+
 pub const ETERNAL_ZONE_TEMPLATE: &str = "a77023ba-4010-466b-8554-61fd3e9a621b";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -22,11 +25,20 @@ pub struct PillarConfig {
     pub set_duration: bool,
     /// Only enlarge pillars cast by a player with the kick/ban permission.
     pub admin_only: bool,
+    /// Adds game fire effects (seen by every player) around the zone, because the pillar's own
+    /// flames are drawn by each client at a fixed size.
+    pub visual: bool,
+    /// Effect templates (GUIDs) used for the visual field.
+    pub visual_templates: Vec<String>,
+    /// Size of each effect.
+    pub visual_scale: f32,
+    /// Effects placed in a circle around the centre (0 = only the centre one).
+    pub visual_ring: u32,
 }
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 25.0, max_dumps: 12, set_duration: true, admin_only: true }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 25.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8 }
     }
 }
 
@@ -52,6 +64,11 @@ impl PillarConfig {
         (self.duration_s.clamp(1.0, 120.0) as f64 * 1e9) as u64
     }
 
+    /// Radius of the circle of effects: inside the damage radius.
+    pub fn ring_radius_m(&self) -> f32 {
+        (self.radius_m * 0.6).clamp(1.0, 30.0)
+    }
+
     pub fn wanted(&self) -> bool {
         self.observing() || self.active()
     }
@@ -60,6 +77,14 @@ impl PillarConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_visual_field_has_sane_defaults() {
+        let c = PillarConfig::default();
+        assert!(c.visual && c.visual_ring == 8 && c.visual_scale == 4.0);
+        assert!(super::super::config::parse_guid(&c.visual_templates[0]).is_some());
+        assert_eq!(c.ring_radius_m(), 9.0);
+    }
 
     #[test]
     fn off_unless_asked() {

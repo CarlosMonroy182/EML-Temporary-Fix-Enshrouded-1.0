@@ -164,6 +164,10 @@ fn enlarge(manager: usize, desc: usize, cfg: &PillarConfig) -> usize {
         return desc;
     }
 
+    if cfg.visual {
+        visuals(&t, cfg);
+    }
+
     if !cfg.set_duration {
         return desc;
     }
@@ -182,4 +186,36 @@ fn enlarge(manager: usize, desc: usize, cfg: &PillarConfig) -> usize {
     head[0x20..0x28].copy_from_slice(&((count + 1) as u64).to_le_bytes());
     let head: &'static mut [u8] = Box::leak(head.into_boxed_slice());
     head.as_ptr() as usize
+}
+
+static LAST_VISUAL: Mutex<Option<(i64, i64, std::time::Instant)>> = Mutex::new(None);
+
+/// The game creates two entities per cast; the effects are queued once per cast.
+fn visuals(t: &[u8], cfg: &PillarConfig) {
+    let (x, y, z) = (u64_at(t, 0) as i64, u64_at(t, 8) as i64, u64_at(t, 16) as i64);
+    if let Ok(mut last) = LAST_VISUAL.lock() {
+        if let Some((lx, lz, at)) = *last {
+            let near = ((lx - x) as f64).abs() < METERS && ((lz - z) as f64).abs() < METERS;
+            if near && at.elapsed().as_secs() < 3 {
+                return;
+            }
+        }
+        *last = Some((x, z, std::time::Instant::now()));
+    }
+    let life_ms = (cfg.duration_s.clamp(1.0, 120.0) * 1000.0) as u64;
+    let templates: Vec<[u8; 16]> = cfg.visual_templates.iter().filter_map(|g| super::config::parse_guid(g)).collect();
+    if templates.is_empty() {
+        return;
+    }
+    let ring = cfg.visual_ring.min(24);
+    let radius = cfg.ring_radius_m() as f64;
+    for template in &templates {
+        super::vfx::queue_effect(*template, (x, y, z), cfg.visual_scale, life_ms);
+        for i in 0..ring {
+            let a = std::f64::consts::TAU * i as f64 / ring as f64;
+            let at = (x + (a.cos() * radius * METERS) as i64, y, z + (a.sin() * radius * METERS) as i64);
+            super::vfx::queue_effect(*template, at, cfg.visual_scale, life_ms);
+        }
+    }
+    log(&format!("pillar visual: {} effect(s) x {} around x={:.1} z={:.1}\n", templates.len(), ring + 1, x as f64 / METERS, z as f64 / METERS));
 }
