@@ -114,32 +114,6 @@ pub struct VfxConfig {
     pub auto: bool,
     /// On a dedicated server: fewer, shorter effects and a slower watch, to spare the server.
     pub server_light: bool,
-    pub sword: SwordConfig,
-}
-
-/// Fire and lightning on chosen weapons while a player holds them; every player sees it.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct SwordConfig {
-    pub enabled: bool,
-    /// Item ids (see export/m182_items.csv); the default is the Enflamed Sword.
-    pub items: Vec<u32>,
-    /// Effect names or template GUIDs.
-    pub effects: Vec<String>,
-    pub scale: f32,
-    pub every_ms: u64,
-}
-
-impl Default for SwordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            items: vec![518_418_528],
-            effects: vec!["VFX_Player_Projectile_Wand_EvadeAttack_Impact_Fire".into(), "VFX_Trap_Electro_Impact".into()],
-            scale: 0.7,
-            every_ms: 350,
-        }
-    }
 }
 
 impl Default for Burst {
@@ -172,7 +146,6 @@ impl Default for VfxConfig {
             test_key: "F9".into(),
             auto: true,
             server_light: true,
-            sword: SwordConfig::default(),
         }
     }
 }
@@ -217,7 +190,6 @@ pub struct PlayerCharge {
     pub heavy: bool,
     pub element: Option<Element>,
     pub last_hand: u64,
-    pub last_sword: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -435,7 +407,7 @@ fn run_queue(manager: usize) {
     let fresh: Vec<Spawn> = work.into_iter().filter(|s| now.saturating_sub(s.queued) <= MAX_DELAY_MS).collect();
     for s in fresh.into_iter().take(if LIGHT.load(Ordering::Relaxed) { LIGHT_BATCH } else { 24 }) {
         let id = match s.hand {
-            Some((entity, slot)) => create_on_slot_scaled(manager, s.template, entity, slot, s.at, s.life_ms.unwrap_or(HAND_LIFE_MS), s.scale),
+            Some((entity, slot)) => create_on_slot(manager, s.template, entity, slot, s.at, s.life_ms.unwrap_or(HAND_LIFE_MS)),
             None => create_effect_for(manager, s.template, s.at, s.scale, s.life_ms),
         };
         if id == 0 {
@@ -883,18 +855,13 @@ pub fn life_time_bytes(ms: u64) -> [u8; LIFE_TIME_SIZE] {
 
 /// Creates `template` glued (on the server) to `slot` of `entity`.
 pub fn create_on_slot(manager: usize, template: [u8; 16], entity: u32, slot: u8, at: (i64, i64, i64), life_ms: u64) -> u32 {
-    create_on_slot_scaled(manager, template, entity, slot, at, life_ms, 1.0)
-}
-
-/// Like `create_on_slot`, with the size of the effect.
-pub fn create_on_slot_scaled(manager: usize, template: [u8; 16], entity: u32, slot: u8, at: (i64, i64, i64), life_ms: u64, scale: f32) -> u32 {
     let mut transform = [0u8; TRANSFORM_SIZE];
     transform[0..8].copy_from_slice(&(at.0 as u64).to_le_bytes());
     transform[8..16].copy_from_slice(&(at.1 as u64).to_le_bytes());
     transform[16..24].copy_from_slice(&(at.2 as u64).to_le_bytes());
     transform[36..40].copy_from_slice(&1.0f32.to_le_bytes());
     for off in [40, 44, 48] {
-        transform[off..off + 4].copy_from_slice(&scale.to_le_bytes());
+        transform[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
     }
     let attach = server_slot_bytes(entity, slot, at);
     let life = life_time_bytes(life_ms);
@@ -921,15 +888,6 @@ pub fn queue_hand(template: [u8; 16], entity: u32, at: (i64, i64, i64)) {
 }
 
 /// Queues `template` glued (on the server) to `slot` of `entity` for `life_ms`.
-pub fn queue_slot_scaled(template: [u8; 16], entity: u32, slot: u8, at: (i64, i64, i64), life_ms: u64, scale: f32) {
-    let Ok(mut q) = QUEUE.lock() else { return };
-    if q.len() > 48 {
-        return;
-    }
-    q.push(Spawn { queued: now_ms(), template, at, scale, hand: Some((entity, slot)), life_ms: Some(life_ms) });
-    QUEUED.store(1, Ordering::SeqCst);
-}
-
 pub fn queue_slot(template: [u8; 16], entity: u32, slot: u8, at: (i64, i64, i64), life_ms: u64) {
     let Ok(mut q) = QUEUE.lock() else { return };
     if q.len() > 48 {
@@ -1278,21 +1236,6 @@ fn run_loop(dir: std::path::PathBuf) {
                 log(&format!("vfx: entity {id} started charging (flags {flags:#x})"));
             }
             let charging = st.since.is_some();
-            if cfg.sword.enabled && flags & (1 << FLAG_DEAD) == 0 && now.saturating_sub(st.last_sword) >= cfg.sword.every_ms.clamp(150, 2000) {
-                st.last_sword = now;
-                if let Some((visual, item)) = main_hand(manager, id) {
-                    if visual != 0 && cfg.sword.items.contains(&item) {
-                        let at = slot_world(manager, id, SLOT_HAND_R).map(|(h, _)| h).or_else(|| position_of(manager, id).map(|(p, _)| p));
-                        if let Some(at) = at {
-                            for name in cfg.sword.effects.iter().take(4) {
-                                if let Some(template) = template_guid(name) {
-                                    queue_slot_scaled(template, id, SLOT_HAND_R as u8, at, cfg.sword.every_ms.clamp(150, 2000) + 150, cfg.sword.scale.clamp(0.1, 5.0));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             let aura = auras.entry(id).or_default();
             match gesture_step(aura, flags, last_emote(manager, id), now) {
                 Gesture::Toggle => log(&format!("vfx: entity {id} aura {} ({})", if aura.on { "on" } else { "off" }, aura_list()[aura.index % aura_list().len()].name)),
@@ -1320,14 +1263,6 @@ fn run_loop(dir: std::path::PathBuf) {
 #[cfg(test)]
 mod light_tests {
     use super::*;
-
-    #[test]
-    fn the_sword_aura_is_off_unless_asked_for() {
-        let cfg = parse_config("{}").unwrap();
-        assert!(!cfg.sword.enabled && cfg.sword.items == vec![518_418_528]);
-        let cfg = parse_config(r#"{"sword": {"enabled": true, "items": [1, 2]}}"#).unwrap();
-        assert!(cfg.sword.enabled && cfg.sword.items == vec![1, 2] && cfg.sword.effects.len() == 2);
-    }
 
     #[test]
     fn server_light_is_on_unless_switched_off() {
