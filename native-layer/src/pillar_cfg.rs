@@ -38,7 +38,7 @@ pub struct PillarConfig {
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 25.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8 }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8 }
     }
 }
 
@@ -92,14 +92,14 @@ mod tests {
         assert!(!PillarConfig::parse("not json").wanted());
         assert!(PillarConfig::parse(r#"{"mode":"Observe"}"#).observing());
         let on = PillarConfig::parse(r#"{"mode":"on","radius_m":12}"#);
-        assert!(on.active() && on.radius_m == 12.0 && on.duration_s == 25.0);
+        assert!(on.active() && on.radius_m == 12.0 && on.duration_s == 15.0);
     }
 
     #[test]
     fn radius_and_time_are_converted_and_limited() {
         let c = PillarConfig::default();
         assert_eq!(c.scale(), 5.0);
-        assert_eq!(c.duration_ns(), 25_000_000_000);
+        assert_eq!(c.duration_ns(), 15_000_000_000);
         let wild = PillarConfig::parse(r#"{"radius_m":900,"duration_s":9999}"#);
         assert_eq!(wild.scale(), 10.0);
         assert_eq!(wild.duration_ns(), 120_000_000_000);

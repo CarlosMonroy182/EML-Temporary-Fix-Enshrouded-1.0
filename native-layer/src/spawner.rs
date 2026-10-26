@@ -4004,6 +4004,8 @@ struct SpawnerRt {
     part: usize,
     part_spawned: u32,
     owner: HashMap<u32, usize>,
+    /// Creatures of waves that were left behind when the next wave came (id, their loot).
+    detached: Vec<(u32, Vec<DropDef>)>,
 }
 
 impl SpawnerRt {
@@ -4038,6 +4040,18 @@ impl SpawnerRt {
 }
 
 const SPAWNER_RANGE_METERS: f64 = 150.0;
+
+/// Seconds from `unix` to the next multiple of `every` since the epoch: every automatic raid
+/// zone with the same interval is due at the same instant, whenever the server was started.
+fn secs_to_boundary(unix: u64, every: u64) -> u64 {
+    let every = every.max(1);
+    every - unix % every
+}
+
+fn next_boundary(now: Instant, every: Duration) -> Instant {
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    now + Duration::from_secs(secs_to_boundary(unix, every.as_secs()))
+}
 
 fn player_positions(manager: usize) -> Vec<(f64, f64)> {
     let mut ids: Vec<u32> = TRACKED.lock().map(|list| list.iter().map(|p| p.id).collect()).unwrap_or_default();
@@ -4114,10 +4128,13 @@ fn load_spawners(set: &mut SpawnerSet, dir: &std::path::Path) {
         match set.list.iter().position(|r| r.def.id == def.id) {
             Some(i) => {
                 let mut rt = set.list.swap_remove(i);
+                if rt.def.every != def.every && !def.pool.is_empty() && !def.once {
+                    rt.next_wave = Some(next_boundary(Instant::now(), Duration::from_secs(def.every.clamp(60, 604_800) as u64)));
+                }
                 rt.def = def;
                 next.push(rt);
             }
-            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: None, next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new() }),
+            None => next.push(SpawnerRt { def, ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "preparando", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: None, next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new(), detached: Vec::new() }),
         }
     }
     set.list = next;
@@ -4360,6 +4377,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             rt.part = 0;
             rt.part_spawned = 0;
             rt.owner.clear();
+            rt.detached.clear();
         }
         if rt.done {
             rt.state = "completado";
@@ -4396,6 +4414,25 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
                 }
             }
         }
+        if !rt.detached.is_empty() {
+            let mut missing = std::mem::take(&mut rt.missing);
+            let old = std::mem::take(&mut rt.detached);
+            for (id, drops) in old {
+                if creature_alive(manager, id, &mut missing) {
+                    if !drops.is_empty() {
+                        if let Some(tr) = transform_of(manager, id) {
+                            rt.last.insert(id, [le_i64(&tr, 0) as f64 / METERS, le_i64(&tr, 8) as f64 / METERS, le_i64(&tr, 16) as f64 / METERS]);
+                        }
+                    }
+                    rt.detached.push((id, drops));
+                } else if let Some(spot) = rt.last.remove(&id) {
+                    if !woke {
+                        queue_drop_list(&drops, &rt.cur().pickup, spot);
+                    }
+                }
+            }
+            rt.missing = missing;
+        }
         let respawn = Duration::from_secs(rt.def.respawn.clamp(1, 86_400) as u64);
         if rt.ids.len() < before && rt.respawn_at.is_none() {
             if woke {
@@ -4422,9 +4459,23 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
             }
         }
         let pooled = !rt.def.pool.is_empty();
+        if pooled && !rt.def.once && rt.wave.is_some() && rt.next_wave.map(|d| now >= d).unwrap_or(false) {
+            // The next wave is due: it comes even if the players have not cleared the last one.
+            let ids = std::mem::take(&mut rt.ids);
+            let left: Vec<(u32, Vec<DropDef>)> = ids.iter().map(|id| (*id, rt.drops_of(*id).to_vec())).collect();
+            log(&format!("spawners: {} next wave is due, {} creature(s) of the last one stay", rt.def.id, left.len()));
+            rt.detached.extend(left);
+            rt.wave = None;
+            rt.spawned = 0;
+            rt.part = 0;
+            rt.part_spawned = 0;
+            rt.owner.clear();
+            rt.check_at = None;
+            rt.respawn_at = None;
+        }
         if pooled && rt.wave.is_none() {
             let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
-            let first = if rt.def.once { now } else { now + every };
+            let first = if rt.def.once { now } else { next_boundary(now, every) };
             let due = *rt.next_wave.get_or_insert(first);
             if now < due {
                 rt.state = "wave_wait";
@@ -4443,6 +4494,9 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
                     rt.owner.clear();
                     rt.respawn_at = None;
                     rt.wave_started = Some(now);
+                    if !rt.def.once {
+                        rt.next_wave = Some(next_boundary(now, every));
+                    }
                 }
                 None => {
                     rt.next_wave = Some(now + every);
@@ -4455,9 +4509,6 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
         if once && rt.spawned as usize >= want {
             if rt.ids.is_empty() && rt.check_at.is_none() && set.pending.is_none() {
                 if pooled && !rt.def.once {
-                    let every = Duration::from_secs(rt.def.every.clamp(60, 604_800) as u64);
-                    let planned = rt.wave_started.map(|t| t + every).unwrap_or(now + every);
-                    rt.next_wave = Some(planned.max(now + Duration::from_secs(30)));
                     rt.wave = None;
                     rt.spawned = 0;
                     rt.state = "wave_wait";
@@ -4641,6 +4692,17 @@ mod raid_tests {
     }
 
     #[test]
+    fn every_zone_is_due_at_the_same_moment() {
+        assert_eq!(secs_to_boundary(0, 1800), 1800);
+        assert_eq!(secs_to_boundary(1799, 1800), 1);
+        assert_eq!(secs_to_boundary(1800, 1800), 1800);
+        for unix in [1_761_500_000u64, 1_761_500_333] {
+            assert_eq!((unix + secs_to_boundary(unix, 1800)) % 1800, 0);
+        }
+        assert_eq!(secs_to_boundary(5, 0), 1);
+    }
+
+    #[test]
     fn a_wave_mixes_enemies_and_each_keeps_its_own_loot() {
         let def: SpawnerDef = serde_json::from_str(r#"{"id":"z1","at":[0.0,0.0,0.0],"area":10.0,"every":60,
             "pool":[{"name":"mix","members":[
@@ -4650,7 +4712,7 @@ mod raid_tests {
         let w = pick_wave(&def).unwrap();
         assert_eq!(w.parts.len(), 3);
         assert_eq!(w.count, 9);
-        let mut rt = SpawnerRt { def: def.clone(), ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "x", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: Some(w), next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new() };
+        let mut rt = SpawnerRt { def: def.clone(), ids: Vec::new(), missing: HashMap::new(), respawn_at: None, spawned: 0, manager: 0, state: "x", was_active: false, check_at: None, last: HashMap::new(), done: false, wave: Some(w), next_wave: None, wave_started: None, part: 0, part_spawned: 0, owner: HashMap::new(), detached: Vec::new() };
         assert_eq!(rt.total(), 9);
         rt.owner.insert(11, 0);
         rt.owner.insert(12, 1);
