@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 authors.workspace = true
 
+[features]
+market-only = []
+
 [dependencies]
 mod-loader = { package = "mod-loader-base", path = "../mod-loader-base" }
 

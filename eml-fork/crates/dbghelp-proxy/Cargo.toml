@@ -8,6 +8,9 @@ rust-version = "1.88"
 name = "dbghelp"
 crate-type = ["cdylib"]
 
+[features]
+market-only = ["mod-loader/market-only"]
+
 [dependencies]
 mod-loader = { path = "../mod-loader", features = ["lua", "runtime"] }
 
