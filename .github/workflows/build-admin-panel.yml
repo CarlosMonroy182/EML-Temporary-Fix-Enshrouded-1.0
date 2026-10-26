@@ -123,7 +123,12 @@ jobs:
           cp eml-fork/LICENSE dist/M182_PvP/
           cp spawner-mods/m182_spawn_variants/mod.json dist/M182_PvP/mods/m182_spawn_variants/
           cp spawner-mods/m182_spawn_variants/src/mod.lua dist/M182_PvP/mods/m182_spawn_variants/src/
-          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server && zip -r M182_Nexus_Client.zip M182_Nexus_Client && zip -r M182_Nexus_Server.zip M182_Nexus_Server)
+          mkdir -p dist/M182_Inferno_Magic
+          cp artifacts/native/dbghelp.dll dist/M182_Inferno_Magic/
+          cp nexus-package/inferno/m182_native.json nexus-package/inferno/m182_pillar.json nexus-package/inferno/eml.json nexus-package/inferno/README.txt dist/M182_Inferno_Magic/
+          cp eml-fork/LICENSE dist/M182_Inferno_Magic/
+          if grep -rIl "7dde183b" dist/M182_Inferno_Magic; then echo "private key found in the Inferno package"; exit 1; fi
+          (cd dist && zip -r M182_Inferno_Magic.zip M182_Inferno_Magic && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server && zip -r M182_Nexus_Client.zip M182_Nexus_Client && zip -r M182_Nexus_Server.zip M182_Nexus_Server)
           (cd dist && sha256sum M182_*.zip > SHA256.txt)
       - name: Publish release
         env:
@@ -131,4 +136,4 @@ jobs:
         run: |
           tag=admin-pannel-latest
           gh release delete "$tag" --cleanup-tag --yes || true
-          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/M182_Nexus_Client.zip dist/M182_Nexus_Server.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."
+          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/M182_Inferno_Magic.zip dist/M182_Nexus_Client.zip dist/M182_Nexus_Server.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."

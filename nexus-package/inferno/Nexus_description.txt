@@ -1,0 +1,44 @@
+M182 Inferno Magic
+Turn the Eternal Pillar Of Flames into a huge fire field that everyone on the server can see.
+
+What is it?
+A small mod that makes the Eternal Pillar Of Flames spell much bigger for the player who casts it: a 15 m radius of damaging fire, ringed by big flames, for 15 seconds. By default only the admin of the server (or the host of a world) gets the big version; everybody else casts the normal spell. Damage is not increased, the fire just covers a much wider area.
+
+Features
+- 15 m damage radius (the normal pillar is 3 m).
+- Ring of big flames around the pillar, created by the server so every player sees it without installing anything.
+- Configurable duration, radius, flame size and number of flames.
+- Admin only by default (kick/ban permission), or open to every player with one setting.
+- Works in single player, on a hosted world and on a dedicated server.
+- Everything needed is included in the download: the loader (EML-compatible dbghelp.dll), the configuration files and the instructions. Nothing else to download.
+
+Requirements
+- Enshrouded 1.0 on Windows.
+- On a server, only the server needs the mod. Players join with the normal game (PC or PS5).
+
+Installation
+1. Close the game (or stop the server).
+2. Copy dbghelp.dll, m182_native.json, m182_pillar.json and eml.json next to enshrouded.exe (or enshrouded_server.exe).
+3. Start the game or server and cast the Eternal Pillar Of Flames.
+Full steps are in README.txt inside the archive.
+
+Configuration (m182_pillar.json)
+- mode: "on" (default) / "off"
+- radius_m: 15.0 (meters of damaging fire)
+- duration_s: 15.0 (seconds)
+- set_duration: true
+- admin_only: true (false = every player)
+- visual: true
+- visual_scale: 4.0
+- visual_ring: 8
+
+Notes
+- Only one dbghelp.dll can be active in the game folder. The one in this package loads the mods of the "mods" folder like EML does, so other EML-style mods keep working; a mod that ships a different dbghelp.dll cannot be installed at the same time.
+- The pillar's own flames are drawn by each player's game at their original size; the big flames are extra game effects placed by the server.
+- If the game updates, the mod stays inactive until it is updated (it checks the game code first).
+- Some antivirus programs flag DLL loaders like this one. The full source code is on GitHub.
+
+Credits
+Made by M182.
+Based on EML by Brabb3l (GPL-3.0).
+Buy me a coffee - PayPal: https://www.paypal.me/MoradoGames

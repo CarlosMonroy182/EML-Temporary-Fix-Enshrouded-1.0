@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "pvp": false,
+  "pvp_friend_checks": false,
+  "spawn_probe": false,
+  "spawner": false,
+  "panel": false,
+  "chat_key": ""
+}
