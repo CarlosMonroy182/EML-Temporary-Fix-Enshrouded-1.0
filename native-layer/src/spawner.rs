@@ -116,6 +116,10 @@ pub fn log(message: &str) {
 }
 
 pub fn start() {
+    if !LIVE.spawner() && super::market::active() {
+        start_market_only();
+        return;
+    }
     if !LIVE.spawner() || STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -133,6 +137,40 @@ pub fn start() {
     }
     if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
+    }
+}
+
+/// The market on its own (no admin tools): players are tracked and purchases are dropped next to the buyer.
+fn start_market_only() {
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = CLOCK.get_or_init(Instant::now);
+    log("market enabled (market only)");
+    if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
+    }
+    if let Err(e) = std::thread::Builder::new().name("m182-market".into()).spawn(market_loop) {
+        tracing::warn!(target: "m182::spawner", error = %e, "could not start market thread");
+    }
+}
+
+fn market_loop() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    if let Ok(mut d) = MARKET_DIR.lock() {
+        *d = Some(dir.clone());
+    }
+    let mut tick = 0u32;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        tick = tick.wrapping_add(1);
+        if SERVER_MGR.load(Ordering::SeqCst) == 0 {
+            continue;
+        }
+        let _ = std::panic::catch_unwind(deliveries_tick);
+        if tick % 5 == 0 {
+            let _ = std::panic::catch_unwind(|| super::market::tick(&dir));
+        }
     }
 }
 

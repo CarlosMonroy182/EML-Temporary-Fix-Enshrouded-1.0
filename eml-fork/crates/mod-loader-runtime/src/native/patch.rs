@@ -245,7 +245,7 @@ fn market_command(text: usize, message: &str, client: u32) -> u8 {
 
 extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
-    if key.is_empty() {
+    if key.is_empty() && !super::market::active() {
         return 0;
     }
     let Some(head) = super::spawn_probe::read_bytes(text, 16) else { return 0 };
@@ -255,6 +255,12 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     }
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
+    if key.is_empty() {
+        if super::market::is_command(&message) && super::market::configured() {
+            return market_command(text, &message, client as u32);
+        }
+        return 0;
+    }
     if super::invites::is_command(&message) {
         return team_command(text, &message, client as u32);
     }
@@ -455,7 +461,7 @@ fn install_permissions(sections: &[&'static [u8]]) {
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
-    if LIVE.chat_key().is_empty() {
+    if LIVE.chat_key().is_empty() && !super::market::active() {
         return;
     }
     let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {
@@ -514,13 +520,14 @@ pub fn install() -> Outcome {
 
     let vfx = super::vfx::wanted();
     let pillar = super::pillar::wanted();
-    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx || pillar {
+    let market = super::market::activate();
+    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx || pillar || market {
         super::spawn_probe::install(&sections);
     }
 
     super::guard::install(&sections);
     install_chat(&sections);
-    if super::config::LIVE.spawner() || vfx || pillar {
+    if super::config::LIVE.spawner() || vfx || pillar || market {
         install_pump(&sections);
     }
     if super::config::LIVE.spawner() {

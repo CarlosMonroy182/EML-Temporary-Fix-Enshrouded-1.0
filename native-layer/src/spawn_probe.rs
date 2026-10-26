@@ -130,7 +130,7 @@ extern "win64" fn hook_create(manager: usize, edx: u32, desc: usize, r9: usize, 
         log_call(manager, edx as usize, desc, caller);
     }
     let desc = super::pillar::before(manager, desc);
-    let hooked = LIVE.spawner() || super::vfx::wanted();
+    let hooked = LIVE.spawner() || super::vfx::wanted() || super::market::active();
     if hooked {
         spawner::before(manager, edx);
     }
