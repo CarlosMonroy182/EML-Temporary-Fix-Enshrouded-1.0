@@ -11,6 +11,7 @@ use super::spawn_probe::{hex, read_bytes, u32_at, u64_at};
 
 static WANTED: AtomicBool = AtomicBool::new(false);
 static DUMPS: AtomicU32 = AtomicU32::new(0);
+static DECISIONS: AtomicU32 = AtomicU32::new(0);
 static CONFIG: Mutex<Option<PillarConfig>> = Mutex::new(None);
 static ZONE: Mutex<Option<[u8; 16]>> = Mutex::new(None);
 
@@ -53,32 +54,55 @@ fn config() -> PillarConfig {
     CONFIG.lock().ok().and_then(|c| c.clone()).unwrap_or_default()
 }
 
-/// True when the pillar at (x, z) was cast by an administrator: the nearest connected player is one
-/// (or the only one) and stands within casting range.
-fn cast_by_admin(manager: usize, x: f64, z: f64) -> (bool, String) {
+/// True when the pillar at (x, z) was cast by an administrator. Only players within casting range
+/// count; when administrators and other players are mixed in that range the caster cannot be told
+/// apart, so the pillar stays normal unless `nearest_decides` is set.
+fn cast_by_admin(manager: usize, x: f64, z: f64, nearest_decides: bool) -> (bool, String) {
     let table = super::table::entries();
     if table.is_empty() {
         return (false, "player table not available".to_string());
     }
-    let mut nearest: Option<(f64, bool, String)> = None;
+    let mut near: Vec<(f64, bool, String)> = Vec::new();
+    let mut far: Option<(f64, String)> = None;
+    let mut unknown = 0usize;
     for e in &table {
-        let Some(t) = super::spawner::transform_of(manager, e.entity()) else { continue };
+        let name = e.name.clone().unwrap_or_default();
+        let Some(t) = super::spawner::transform_of(manager, e.entity()) else {
+            unknown += 1;
+            continue;
+        };
         let (px, pz) = (u64_at(&t, 0) as i64 as f64 / METERS, u64_at(&t, 16) as i64 as f64 / METERS);
         let d = ((px - x).powi(2) + (pz - z).powi(2)).sqrt();
         let admin = super::roster::is_admin(e.permissions);
-        if nearest.as_ref().is_none_or(|(best, _, _)| d < *best) {
-            nearest = Some((d, admin, e.name.clone().unwrap_or_default()));
+        if d <= MAX_CASTER_DISTANCE_M {
+            near.push((d, admin, name));
+        } else if far.as_ref().is_none_or(|(best, _)| d < *best) {
+            far = Some((d, name));
         }
     }
-    match nearest {
-        Some((d, admin, name)) if d <= MAX_CASTER_DISTANCE_M => (admin, format!("nearest player {name} at {d:.1} m (admin: {admin})")),
-        Some((d, _, name)) => (false, format!("nearest player {name} is {d:.1} m away, too far")),
-        None if table.len() == 1 => {
+    near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let list = near.iter().map(|(d, a, n)| format!("{n} {d:.1} m admin={a}")).collect::<Vec<_>>().join(", ");
+    if near.is_empty() {
+        if unknown > 0 && table.len() == 1 {
             let admin = super::roster::is_admin(table[0].permissions);
-            (admin, format!("only player {} (position unknown, admin: {admin})", table[0].name.clone().unwrap_or_default()))
+            return (admin, format!("only player {} (position unknown, admin: {admin})", table[0].name.clone().unwrap_or_default()));
         }
-        None => (false, "player positions unknown".to_string()),
+        return match far {
+            Some((d, name)) => (false, format!("nearest player {name} is {d:.1} m away, too far")),
+            None => (false, "player positions unknown".to_string()),
+        };
     }
+    let admins = near.iter().filter(|p| p.1).count();
+    if admins == near.len() {
+        return (true, format!("near the cast: {list}"));
+    }
+    if admins == 0 {
+        return (false, format!("near the cast: {list}"));
+    }
+    if nearest_decides {
+        return (near[0].1, format!("administrators and players mixed, nearest decides: {list}"));
+    }
+    (false, format!("administrators and players mixed, caster unknown, left normal: {list}"))
 }
 
 /// Called before the game creates an entity from `desc`. Returns the descriptor the game must use.
@@ -145,8 +169,8 @@ fn enlarge(manager: usize, desc: usize, cfg: &PillarConfig) -> usize {
     let (x, z) = (u64_at(&t, 0) as i64 as f64 / METERS, u64_at(&t, 16) as i64 as f64 / METERS);
 
     if cfg.admin_only {
-        let (admin, why) = cast_by_admin(manager, x, z);
-        if DUMPS.fetch_add(1, Ordering::SeqCst) < cfg.max_dumps {
+        let (admin, why) = cast_by_admin(manager, x, z, cfg.nearest_decides);
+        if DECISIONS.fetch_add(1, Ordering::SeqCst) < 500 {
             log(&format!("pillar at x={x:.1} z={z:.1}: {why} -> {}\n", if admin { "enlarged" } else { "left as it is" }));
         }
         if !admin {

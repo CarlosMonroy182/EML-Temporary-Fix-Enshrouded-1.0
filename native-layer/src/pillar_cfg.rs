@@ -34,11 +34,14 @@ pub struct PillarConfig {
     pub visual_scale: f32,
     /// Effects placed in a circle around the centre (0 = only the centre one).
     pub visual_ring: u32,
+    /// When an administrator and another player both stand near the cast, the nearest one decides
+    /// (default false: the pillar stays normal, because the caster cannot be told apart).
+    pub nearest_decides: bool,
 }
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8 }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false }
     }
 }
 
@@ -84,6 +87,12 @@ mod tests {
         assert!(c.visual && c.visual_ring == 8 && c.visual_scale == 4.0);
         assert!(super::super::config::parse_guid(&c.visual_templates[0]).is_some());
         assert_eq!(c.ring_radius_m(), 9.0);
+    }
+
+    #[test]
+    fn mixed_casters_stay_normal_by_default() {
+        assert!(!PillarConfig::default().nearest_decides);
+        assert!(PillarConfig::parse(r#"{"nearest_decides":true}"#).nearest_decides);
     }
 
     #[test]
