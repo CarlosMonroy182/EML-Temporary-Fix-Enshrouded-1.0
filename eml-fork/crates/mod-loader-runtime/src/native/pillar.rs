@@ -42,23 +42,66 @@ fn log(text: &str) {
     }
 }
 
-/// Called before the game creates an entity from `desc`.
-pub fn before(desc: usize) {
+const HASH_CURRENT_TRANSFORM: u32 = 0x027a_c564;
+const HASH_LIFE_TIME: u32 = 0xf22c_253c;
+const TRANSFORM_SIZE: usize = 56;
+const SCALE_AT: usize = 40;
+const METERS: f64 = 4_294_967_296.0;
+const MAX_CASTER_DISTANCE_M: f64 = 45.0;
+
+fn config() -> PillarConfig {
+    CONFIG.lock().ok().and_then(|c| c.clone()).unwrap_or_default()
+}
+
+/// True when the pillar at (x, z) was cast by an administrator: the nearest connected player is one
+/// (or the only one) and stands within casting range.
+fn cast_by_admin(manager: usize, x: f64, z: f64) -> (bool, String) {
+    let table = super::table::entries();
+    if table.is_empty() {
+        return (false, "player table not available".to_string());
+    }
+    let mut nearest: Option<(f64, bool, String)> = None;
+    for e in &table {
+        let Some(t) = super::spawner::transform_of(manager, e.entity()) else { continue };
+        let (px, pz) = (u64_at(&t, 0) as i64 as f64 / METERS, u64_at(&t, 16) as i64 as f64 / METERS);
+        let d = ((px - x).powi(2) + (pz - z).powi(2)).sqrt();
+        let admin = super::roster::is_admin(e.permissions);
+        if nearest.as_ref().is_none_or(|(best, _, _)| d < *best) {
+            nearest = Some((d, admin, e.name.clone().unwrap_or_default()));
+        }
+    }
+    match nearest {
+        Some((d, admin, name)) if d <= MAX_CASTER_DISTANCE_M => (admin, format!("nearest player {name} at {d:.1} m (admin: {admin})")),
+        Some((d, _, name)) => (false, format!("nearest player {name} is {d:.1} m away, too far")),
+        None if table.len() == 1 => {
+            let admin = super::roster::is_admin(table[0].permissions);
+            (admin, format!("only player {} (position unknown, admin: {admin})", table[0].name.clone().unwrap_or_default()))
+        }
+        None => (false, "player positions unknown".to_string()),
+    }
+}
+
+/// Called before the game creates an entity from `desc`. Returns the descriptor the game must use.
+pub fn before(manager: usize, desc: usize) -> usize {
     if !WANTED.load(Ordering::Relaxed) || desc < 0x10000 {
-        return;
+        return desc;
     }
-    let Some(head) = read_bytes(desc, 0x30) else { return };
+    let Some(head) = read_bytes(desc, 0x30) else { return desc };
     if head.len() < 0x28 {
-        return;
+        return desc;
     }
-    let Ok(zone) = ZONE.lock() else { return };
-    let Some(zone) = *zone else { return };
+    let Ok(zone) = ZONE.lock() else { return desc };
+    let Some(zone) = *zone else { return desc };
     if head[4..20] != zone {
-        return;
+        return desc;
     }
-    let max = CONFIG.lock().ok().and_then(|c| c.as_ref().map(|c| c.max_dumps)).unwrap_or(12);
+    let cfg = config();
+    if cfg.active() {
+        return enlarge(manager, desc, &cfg);
+    }
+    let max = cfg.max_dumps;
     if DUMPS.fetch_add(1, Ordering::SeqCst) >= max {
-        return;
+        return desc;
     }
     let array = u64_at(&head, 0x18) as usize;
     let count = (u64_at(&head, 0x20) as usize).min(96);
@@ -76,4 +119,67 @@ pub fn before(desc: usize) {
         text.push_str(&format!("  player entity={} client={} permissions={:#04x} name={}\n", e.entity(), e.client, e.permissions, e.name.clone().unwrap_or_default()));
     }
     log(&text);
+    desc
+}
+
+fn enlarge(manager: usize, desc: usize, cfg: &PillarConfig) -> usize {
+    let head = read_bytes(desc, 0x100).or_else(|| read_bytes(desc, 0x30).map(|mut h| { h.resize(0x100, 0); h }));
+    let Some(mut head) = head else { return desc };
+    head.resize(0x100, 0);
+    let array = u64_at(&head, 0x18) as usize;
+    let count = (u64_at(&head, 0x20) as usize).min(96);
+    let Some(entries) = read_bytes(array, count * 24) else { return desc };
+    let count = (entries.len() / 24).min(count);
+
+    let mut transform_at = None;
+    for i in 0..count {
+        if u32_at(&entries, i * 24) == HASH_CURRENT_TRANSFORM && u64_at(&entries, i * 24 + 16) as usize >= TRANSFORM_SIZE {
+            transform_at = Some(u64_at(&entries, i * 24 + 8) as usize);
+        }
+    }
+    let Some(transform_at) = transform_at else { return desc };
+    let Some(t) = read_bytes(transform_at, TRANSFORM_SIZE) else { return desc };
+    if t.len() < TRANSFORM_SIZE {
+        return desc;
+    }
+    let (x, z) = (u64_at(&t, 0) as i64 as f64 / METERS, u64_at(&t, 16) as i64 as f64 / METERS);
+
+    if cfg.admin_only {
+        let (admin, why) = cast_by_admin(manager, x, z);
+        if DUMPS.fetch_add(1, Ordering::SeqCst) < cfg.max_dumps {
+            log(&format!("pillar at x={x:.1} z={z:.1}: {why} -> {}\n", if admin { "enlarged" } else { "left as it is" }));
+        }
+        if !admin {
+            return desc;
+        }
+    }
+
+    let scale = cfg.scale();
+    let mut bytes = [0u8; 12];
+    for part in bytes.chunks_mut(4) {
+        part.copy_from_slice(&scale.to_le_bytes());
+    }
+    if !super::spawner::write_bytes(transform_at + SCALE_AT, &bytes) {
+        log("pillar: could not write the scale\n");
+        return desc;
+    }
+
+    if !cfg.set_duration {
+        return desc;
+    }
+    let mut new_entries = Vec::with_capacity((count + 1) * 24);
+    new_entries.extend_from_slice(&entries[..count * 24]);
+    let mut life = [0u8; 24];
+    life[..8].copy_from_slice(&cfg.duration_ns().to_le_bytes());
+    let life: &'static mut [u8; 24] = Box::leak(Box::new(life));
+    let mut extra = [0u8; 24];
+    extra[..4].copy_from_slice(&HASH_LIFE_TIME.to_le_bytes());
+    extra[8..16].copy_from_slice(&(life.as_ptr() as u64).to_le_bytes());
+    extra[16..24].copy_from_slice(&24u64.to_le_bytes());
+    new_entries.extend_from_slice(&extra);
+    let new_entries: &'static mut [u8] = Box::leak(new_entries.into_boxed_slice());
+    head[0x18..0x20].copy_from_slice(&(new_entries.as_ptr() as u64).to_le_bytes());
+    head[0x20..0x28].copy_from_slice(&((count + 1) as u64).to_le_bytes());
+    let head: &'static mut [u8] = Box::leak(head.into_boxed_slice());
+    head.as_ptr() as usize
 }
