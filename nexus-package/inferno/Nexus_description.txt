@@ -6,7 +6,7 @@ A small mod that makes the Eternal Pillar Of Flames spell much bigger for whoeve
 
 Features
 - 15 m damage radius (the normal pillar is 3 m).
-- Eternal Veil Beam (continuous veil ray): a much thicker beam, 3 m wide instead of 0.4 m, with a matching wide damage area. The damage area works for everyone on the server; players who also copy the small folder mods/m182_inferno_beam see the thick beam drawn.
+- Eternal Veil Beam (continuous veil ray): big effects along the beam, created by the server so every player sees a thick beam without installing anything, and a wide damage area (1.5 m radius instead of 0.2 m).
 - Ring of big flames around the pillar, created by the server so every player sees it without installing anything.
 - Configurable duration, radius, flame size and number of flames.
 - Open to every player by default, or limited to admins (kick/ban permission) with one setting.

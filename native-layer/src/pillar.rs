@@ -34,7 +34,7 @@ pub fn wanted() -> bool {
     wanted
 }
 
-fn log(text: &str) {
+pub(super) fn log(text: &str) {
     let Ok(dir) = std::env::current_dir() else { return };
     let dir = dir.join("m182_pillar");
     let _ = std::fs::create_dir_all(&dir);
@@ -50,7 +50,7 @@ const SCALE_AT: usize = 40;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_CASTER_DISTANCE_M: f64 = 45.0;
 
-fn config() -> PillarConfig {
+pub(super) fn config() -> PillarConfig {
     CONFIG.lock().ok().and_then(|c| c.clone()).unwrap_or_default()
 }
 

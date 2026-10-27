@@ -6,5 +6,10 @@
   "admin_only": false,
   "visual": true,
   "visual_scale": 4.0,
-  "visual_ring": 8
+  "visual_ring": 8,
+  "beam": true,
+  "beam_scale": 3.0,
+  "beam_spots": 6,
+  "beam_length_m": 18.0,
+  "beam_every_ms": 500
 }

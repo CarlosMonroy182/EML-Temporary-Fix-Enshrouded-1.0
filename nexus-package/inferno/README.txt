@@ -17,7 +17,7 @@ INSTALL - dedicated server
 1. Stop the server.
 2. With FTP, go to the folder where enshrouded_server.exe is.
 3. Upload dbghelp.dll, m182_native.json, m182_pillar.json, eml.json and the folder mods (or only mods/m182_inferno_beam if the server already has a mods folder) there, replacing what is there.
-4. Start the server. Players join with the normal game. The big pillar and the wide damage area of the Veil Beam work for everyone; to also see the thick Veil Beam, a player copies the folder mods/m182_inferno_beam, together with this dbghelp.dll, into his own game folder.
+4. Start the server. Players join with the normal game, they do not install anything.
 
 CONFIG (m182_pillar.json) - read when the game or server starts
   "mode": "on"            "on" enables the mod, "off" disables it
@@ -29,11 +29,17 @@ CONFIG (m182_pillar.json) - read when the game or server starts
   "visual_scale": 4.0     size of each flame of the ring
   "visual_ring": 8        number of flames in the circle (0 = only the centre one)
 
-VEIL BEAM (mods/m182_inferno_beam/src/mod.lua) - values at the top of the file, read when the game or server starts
+CONFIG - Eternal Veil Beam (m182_pillar.json)
+  "beam": true            draws big effects along the beam while it is channelled, false = no effects
+  "beam_scale": 3.0       size of each effect
+  "beam_spots": 6         number of effects along the beam
+  "beam_length_m": 18.0   length covered by the effects, in meters
+  "beam_every_ms": 500    how often the effects are renewed, in milliseconds
+  The effects are drawn at chest height in the direction the character faces.
+
+DAMAGE AREA OF THE VEIL BEAM (mods/m182_inferno_beam/src/mod.lua) - value at the top of the file
   HIT_RADIUS = 1.5        radius of the damaging beam, in meters (original 0.2)
-  VISUAL_RADIUS = 1.5     radius of the drawn beam, in meters (original 0.1)
-  LIGHT_RADIUS = 12.0     radius of the light of the beam (original 3.0)
-  Delete the folder m182_inferno_beam to get the original beam back.
+  Delete the folder m182_inferno_beam to get the original damage area back.
 
 If you already use other mods that install their own dbghelp.dll, keep only one dbghelp.dll in the folder. This one loads the mods of the "mods" folder like EML does.
 

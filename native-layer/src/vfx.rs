@@ -307,7 +307,7 @@ pub fn is_vanilla(name: &str) -> bool {
     CATALOG.iter().any(|(n, _)| *n == name)
 }
 
-fn template_guid(name: &str) -> Option<[u8; 16]> {
+pub(super) fn template_guid(name: &str) -> Option<[u8; 16]> {
     if let Ok(known) = GUIDS.lock() {
         if let Some((_, g)) = known.iter().find(|(n, _)| n == name) {
             return *g;

@@ -13,6 +13,15 @@ pub const VISUAL_TEMPLATE: &str = "d0d55bba-7951-4213-8c2d-f8efb416fa2a";
 
 pub const ETERNAL_ZONE_TEMPLATE: &str = "a77023ba-4010-466b-8554-61fd3e9a621b";
 
+/// Item ids of the veil beam spells (`Ammo_T7_Spell_Fog_Beam_Channel_lvl45_Eternal` and
+/// `Ammo_T5_Spell_Fog_Beam_Channel_lvl30`).
+pub const BEAM_ITEMS: [u32; 2] = [803_538_053, 2_153_855_871];
+
+/// `keen::actor::StateFlag::InRangeCombatShooting`: set while a channelled spell is held.
+pub const FLAG_SHOOTING: u32 = 27;
+
+pub const BEAM_EFFECT: &str = "VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Fog";
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct PillarConfig {
@@ -37,11 +46,23 @@ pub struct PillarConfig {
     /// When an administrator and another player both stand near the cast, the nearest one decides
     /// (default false: the pillar stays normal, because the caster cannot be told apart).
     pub nearest_decides: bool,
+    /// Draws big game effects along the veil beam while it is channelled (seen by every player).
+    pub beam: bool,
+    /// Effects (names of the VFX catalog or GUIDs) placed along the beam.
+    pub beam_effects: Vec<String>,
+    /// Size of each effect of the beam.
+    pub beam_scale: f32,
+    /// Effects along the beam.
+    pub beam_spots: u32,
+    /// Length covered by the effects, in meters.
+    pub beam_length_m: f32,
+    /// Milliseconds between two refreshes of the effects.
+    pub beam_every_ms: u64,
 }
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: false, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: false, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false, beam: true, beam_effects: vec![BEAM_EFFECT.into()], beam_scale: 3.0, beam_spots: 6, beam_length_m: 18.0, beam_every_ms: 500 }
     }
 }
 
@@ -70,6 +91,33 @@ impl PillarConfig {
     /// Radius of the circle of effects: inside the damage radius.
     pub fn ring_radius_m(&self) -> f32 {
         (self.radius_m * 0.6).clamp(1.0, 30.0)
+    }
+
+    /// Points along the beam from `origin`, pushed along `facing` (horizontal) at chest height.
+    pub fn beam_points(&self, origin: (i64, i64, i64), facing: (f64, f64)) -> Vec<(i64, i64, i64)> {
+        const METERS: f64 = 4_294_967_296.0;
+        let spots = self.beam_spots.clamp(1, 12);
+        let length = self.beam_length_m.clamp(3.0, 20.0) as f64;
+        let first = 2.0f64.min(length);
+        (0..spots)
+            .map(|i| {
+                let d = if spots == 1 { length } else { first + (length - first) * i as f64 / (spots - 1) as f64 };
+                (
+                    origin.0 + (facing.0 * d * METERS) as i64,
+                    origin.1 + (1.2 * METERS) as i64,
+                    origin.2 + (facing.1 * d * METERS) as i64,
+                )
+            })
+            .collect()
+    }
+
+    /// Milliseconds an effect of the beam lives: a little longer than the refresh time.
+    pub fn beam_life_ms(&self) -> u64 {
+        self.beam_every_ms.clamp(200, 2000) + 150
+    }
+
+    pub fn beam_size(&self) -> f32 {
+        if self.beam_scale.is_finite() { self.beam_scale.clamp(0.5, 10.0) } else { 3.0 }
     }
 
     pub fn wanted(&self) -> bool {
@@ -119,6 +167,41 @@ mod tests {
         assert_eq!(wild.scale(), 10.0);
         assert_eq!(wild.duration_ns(), 120_000_000_000);
         assert_eq!(PillarConfig::parse(r#"{"radius_m":0.1}"#).scale(), 1.0);
+    }
+
+    #[test]
+    fn the_beam_defaults_are_sane() {
+        let c = PillarConfig::default();
+        assert!(c.beam && c.beam_spots == 6 && c.beam_every_ms == 500);
+        assert_eq!(c.beam_life_ms(), 650);
+        assert_eq!(c.beam_size(), 3.0);
+        assert!(!PillarConfig::parse(r#"{"beam":false}"#).beam);
+        assert_eq!(PillarConfig::parse(r#"{"beam_scale":99}"#).beam_size(), 10.0);
+        assert_eq!(PillarConfig::parse(r#"{"beam_every_ms":1}"#).beam_life_ms(), 350);
+    }
+
+    #[test]
+    fn the_beam_points_run_ahead_of_the_caster() {
+        const M: f64 = 4_294_967_296.0;
+        let c = PillarConfig::default();
+        let pts = c.beam_points((0, 0, 0), (0.0, 1.0));
+        assert_eq!(pts.len(), 6);
+        assert_eq!(pts[0].2, (2.0 * M) as i64);
+        assert_eq!(pts[5].2, (18.0 * M) as i64);
+        assert!(pts.iter().all(|p| p.0 == 0 && p.1 == (1.2 * M) as i64));
+        assert!(pts.windows(2).all(|w| w[0].2 < w[1].2));
+        let one = PillarConfig::parse(r#"{"beam_spots":1,"beam_length_m":10}"#).beam_points((0, 0, 0), (1.0, 0.0));
+        assert_eq!(one, vec![((10.0 * M) as i64, (1.2 * M) as i64, 0)]);
+        let wild = PillarConfig::parse(r#"{"beam_spots":500,"beam_length_m":900}"#).beam_points((0, 0, 0), (0.0, 1.0));
+        assert_eq!(wild.len(), 12);
+        assert_eq!(wild[11].2, (20.0 * M) as i64);
+    }
+
+    #[test]
+    fn the_beam_effect_and_items_are_known() {
+        assert!(BEAM_ITEMS.contains(&803_538_053));
+        assert_eq!(FLAG_SHOOTING, 27);
+        assert!(BEAM_EFFECT.starts_with("VFX_"));
     }
 
     #[test]

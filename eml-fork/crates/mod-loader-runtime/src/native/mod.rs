@@ -38,6 +38,9 @@ mod spawner;
 mod table;
 
 #[cfg(windows)]
+mod veil_beam;
+
+#[cfg(windows)]
 mod vfx;
 
 use std::path::PathBuf;

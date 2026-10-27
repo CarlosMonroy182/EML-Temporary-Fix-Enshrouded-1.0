@@ -409,6 +409,7 @@ unsafe extern "win64" fn stub_pump() {
 
 extern "win64" fn hook_pump() {
     super::vfx::server_tick();
+    super::veil_beam::tick();
 }
 
 fn install_pump(sections: &[&'static [u8]]) {
