@@ -212,6 +212,7 @@ EN = {
 "Combate entre jugadores": "Player vs player combat",
 "Activar PvP: los jugadores se pueden atacar entre sí": "Enable PvP: players can attack each other",
 "También aplicar a las comprobaciones de aliados": "Also apply to ally checks",
+"Fuego amigo: los compañeros de equipo también se pueden dañar": "Friendly fire: teammates can also hurt each other",
 "Guardado. El juego lo aplica solo.": "Saved. The game applies it on its own.",
 "Enviado al juego. Se aplica en menos de un segundo.": "Sent to the game. Applies in under a second.",
 "Admin del jugador": "Player admin",

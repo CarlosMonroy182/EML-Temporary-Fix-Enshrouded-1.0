@@ -298,6 +298,14 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
                 _ => Err("pvp needs on or off".to_string()),
             }
         }
+        "friendlyfire" => {
+            let (value, _) = next_token(rest);
+            match value.to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" => set_flag(dir, "pvp_friendly_fire", "friendlyfire", true),
+                "off" | "false" | "0" => set_flag(dir, "pvp_friendly_fire", "friendlyfire", false),
+                _ => Err("friendlyfire needs on or off".to_string()),
+            }
+        }
         "" => Err("missing command".to_string()),
         other => Err(format!("unknown command \"{other}\"")),
     };
@@ -591,6 +599,10 @@ fn store(dir: &Path, name: &str, body: &str) -> Result<(), String> {
 }
 
 fn set_pvp(dir: &Path, on: bool) -> Result<String, String> {
+    set_flag(dir, "pvp", "pvp", on)
+}
+
+fn set_flag(dir: &Path, key: &str, label: &str, on: bool) -> Result<String, String> {
     let path = dir.join(NATIVE_CONFIG);
     let mut value = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text).map_err(|e| format!("{NATIVE_CONFIG} is invalid: {e}"))?,
@@ -598,10 +610,10 @@ fn set_pvp(dir: &Path, on: bool) -> Result<String, String> {
         Err(e) => return Err(format!("cannot read {NATIVE_CONFIG}: {e}")),
     };
     let Some(map) = value.as_object_mut() else { return Err(format!("{NATIVE_CONFIG} is not an object")) };
-    map.insert("pvp".to_string(), serde_json::Value::Bool(on));
+    map.insert(key.to_string(), serde_json::Value::Bool(on));
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     store(dir, NATIVE_CONFIG, &text)?;
-    Ok(format!("pvp {}", if on { "on" } else { "off" }))
+    Ok(format!("{label} {}", if on { "on" } else { "off" }))
 }
 
 #[cfg(test)]
@@ -776,6 +788,21 @@ mod tests {
         assert_eq!(v["spawner"], true);
         assert_eq!(v["spawn_level"], 30);
         let Verdict::Swallowed(line) = run(&mut s, &dir, "/m182 secret-key pvp maybe") else { panic!() };
+        assert!(line.contains("on or off"));
+    }
+
+    #[test]
+    fn friendly_fire_edits_only_its_own_field() {
+        let dir = scratch("friendly_fire");
+        std::fs::write(dir.join(NATIVE_CONFIG), "{\"pvp\": true, \"spawn_level\": 30}").unwrap();
+        let mut s = Session::default();
+        let Verdict::Swallowed(line) = run(&mut s, &dir, "/m182 secret-key friendlyfire on") else { panic!() };
+        assert!(line.contains("friendlyfire on"), "{line}");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(NATIVE_CONFIG)).unwrap()).unwrap();
+        assert_eq!(v["pvp_friendly_fire"], true);
+        assert_eq!(v["pvp"], true);
+        assert_eq!(v["spawn_level"], 30);
+        let Verdict::Swallowed(line) = run(&mut s, &dir, "/m182 secret-key friendlyfire maybe") else { panic!() };
         assert!(line.contains("on or off"));
     }
 

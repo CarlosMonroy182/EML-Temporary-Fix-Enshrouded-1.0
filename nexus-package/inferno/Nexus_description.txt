@@ -2,13 +2,13 @@ M182 Inferno Magic
 Turn the Eternal Pillar Of Flames into a huge fire field that everyone on the server can see.
 
 What is it?
-A small mod that makes the Eternal Pillar Of Flames spell much bigger for the player who casts it: a 15 m radius of damaging fire, ringed by big flames, for 15 seconds. By default only the admin of the server (or the host of a world) gets the big version; everybody else casts the normal spell. Damage is not increased, the fire just covers a much wider area.
+A small mod that makes the Eternal Pillar Of Flames spell much bigger for whoever casts it: a 15 m radius of damaging fire, ringed by big flames, for 15 seconds. Every player who has the spell gets the big version; it can be limited to admins with one setting. Damage is not increased, the fire just covers a much wider area.
 
 Features
 - 15 m damage radius (the normal pillar is 3 m).
 - Ring of big flames around the pillar, created by the server so every player sees it without installing anything.
 - Configurable duration, radius, flame size and number of flames.
-- Admin only by default (kick/ban permission), or open to every player with one setting.
+- Open to every player by default, or limited to admins (kick/ban permission) with one setting.
 - Works in single player, on a hosted world and on a dedicated server.
 - Everything needed is included in the download: the loader (EML-compatible dbghelp.dll), the configuration files and the instructions. Nothing else to download.
 
@@ -27,7 +27,7 @@ Configuration (m182_pillar.json)
 - radius_m: 15.0 (meters of damaging fire)
 - duration_s: 15.0 (seconds)
 - set_duration: true
-- admin_only: true (false = every player)
+- admin_only: false (true = only admins)
 - visual: true
 - visual_scale: 4.0
 - visual_ring: 8

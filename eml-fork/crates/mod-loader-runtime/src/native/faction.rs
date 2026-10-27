@@ -10,6 +10,22 @@ pub const PLAYER: u8 = 7;
 pub const TEAM_FACTIONS: [u8; 2] = [8, 11];
 
 static TEAM_MASK: AtomicU32 = AtomicU32::new(0);
+static FRIENDLY_FIRE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Members of the same team can hurt each other (off by default: teams protect their members).
+pub fn set_friendly_fire(on: bool) {
+    FRIENDLY_FIRE.store(on, Ordering::Relaxed);
+}
+
+pub fn friendly_fire() -> bool {
+    FRIENDLY_FIRE.load(Ordering::Relaxed)
+}
+
+/// Two members of the same lent team faction.
+#[inline]
+fn same_team_in(a: u8, b: u8, mask: u32) -> bool {
+    a == b && TEAM_FACTIONS.contains(&a) && mask & (1u32 << a) != 0
+}
 
 /// Faction values currently lent to teams (bit n set = value n is a team).
 pub fn set_team_mask(mask: u32) {
@@ -88,13 +104,16 @@ pub fn enemy_in(a: u8, b: u8, pvp: bool, mask: u32) -> bool {
 }
 
 pub fn enemy(a: u8, b: u8, pvp: bool) -> bool {
-    if pvp && player_pair(a, b) {
+    if pvp && (player_pair(a, b) || (friendly_fire() && same_team_in(a, b, team_mask()))) {
         return true;
     }
     enemy_vanilla(a, b)
 }
 
 pub fn friend(a: u8, b: u8, pvp: bool) -> bool {
+    if friendly_fire() && same_team_in(a, b, team_mask()) {
+        return false;
+    }
     if pvp && player_pair(a, b) {
         return false;
     }
@@ -102,6 +121,9 @@ pub fn friend(a: u8, b: u8, pvp: bool) -> bool {
 }
 
 pub fn friend_opts(a: u8, b: u8, flag: bool, pvp: bool) -> bool {
+    if friendly_fire() && same_team_in(a, b, team_mask()) {
+        return false;
+    }
     if pvp && player_pair(a, b) {
         return false;
     }
@@ -194,6 +216,16 @@ mod tests {
         assert!(!enemy_in(8, 11, false, both));
         assert!(enemy_in(4, 8, true, both));
         assert!(enemy_in(8, 4, true, both));
+    }
+
+    #[test]
+    fn friendly_fire_makes_only_teammates_hostile() {
+        let mask = 1u32 << 8;
+        assert!(!same_team_in(PLAYER, PLAYER, mask));
+        assert!(same_team_in(8, 8, mask));
+        assert!(!same_team_in(8, 8, 0));
+        assert!(!same_team_in(8, 11, (1 << 8) | (1 << 11)));
+        assert!(!same_team_in(4, 4, 1 << 4));
     }
 
     #[test]

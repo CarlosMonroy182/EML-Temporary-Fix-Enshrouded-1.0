@@ -113,6 +113,10 @@ pub fn pvp(key: &str, on: bool) -> String {
     format!("{PREFIX} {key} pvp {}", if on { "on" } else { "off" })
 }
 
+pub fn friendly_fire(key: &str, on: bool) -> String {
+    format!("{PREFIX} {key} friendlyfire {}", if on { "on" } else { "off" })
+}
+
 pub fn ping(key: &str) -> String {
     format!("{PREFIX} {key} ping")
 }
@@ -180,6 +184,8 @@ mod tests {
     fn small_commands() {
         assert_eq!(pvp("abcdefg", true), "!m182 abcdefg pvp on");
         assert_eq!(pvp("abcdefg", false), "!m182 abcdefg pvp off");
+        assert_eq!(friendly_fire("abcdefg", true), "!m182 abcdefg friendlyfire on");
+        assert_eq!(friendly_fire("abcdefg", false), "!m182 abcdefg friendlyfire off");
         assert_eq!(ping("abcdefg"), "!m182 abcdefg ping");
         assert_eq!(players("abcdefg", 7), "!m182 abcdefg players 7");
         assert!(valid_key("abcdef") && !valid_key("abc") && !valid_key("abc def"));

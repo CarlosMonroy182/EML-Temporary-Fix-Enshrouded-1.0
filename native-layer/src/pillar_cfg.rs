@@ -41,7 +41,7 @@ pub struct PillarConfig {
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: true, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: false, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false }
     }
 }
 
@@ -87,6 +87,12 @@ mod tests {
         assert!(c.visual && c.visual_ring == 8 && c.visual_scale == 4.0);
         assert!(super::super::config::parse_guid(&c.visual_templates[0]).is_some());
         assert_eq!(c.ring_radius_m(), 9.0);
+    }
+
+    #[test]
+    fn every_player_gets_the_big_pillar_unless_limited_to_admins() {
+        assert!(!PillarConfig::default().admin_only);
+        assert!(PillarConfig::parse(r#"{"admin_only":true}"#).admin_only);
     }
 
     #[test]

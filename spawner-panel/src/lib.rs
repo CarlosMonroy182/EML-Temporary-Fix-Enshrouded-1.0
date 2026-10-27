@@ -137,6 +137,7 @@ pub struct App {
     damage: f32,
     pvp: bool,
     pvp_friends: bool,
+    pvp_friendly_fire: bool,
     target: Target,
     place_index: usize,
     respawn_minutes: u32,
@@ -546,6 +547,7 @@ impl App {
             damage: get_f("spawn_damage", 1.0).clamp(0.0, 20.0),
             pvp: get_b("pvp"),
             pvp_friends: get_b("pvp_friend_checks"),
+            pvp_friendly_fire: get_b("pvp_friendly_fire"),
             target: Target::Around,
             place_index: 0,
             respawn_minutes: spawners::DEFAULT_RESPAWN_MINUTES,
@@ -610,6 +612,9 @@ impl App {
         if remote::active() {
             if let Some(on) = entries.iter().find(|(key, _)| *key == "pvp").and_then(|(_, v)| v.as_bool()) {
                 remote::submit_pvp(on);
+            }
+            if let Some(on) = entries.iter().find(|(key, _)| *key == "pvp_friendly_fire").and_then(|(_, v)| v.as_bool()) {
+                remote::submit_friendly_fire(on);
             }
         }
         Ok(())
@@ -1266,8 +1271,9 @@ impl App {
         let mut changed = false;
         changed |= ui.checkbox(&mut self.pvp, "Activar PvP: los jugadores se pueden atacar entre sí").changed();
         changed |= ui.add_enabled(self.pvp, egui::Checkbox::new(&mut self.pvp_friends, "También aplicar a las comprobaciones de aliados")).changed();
+        changed |= ui.add_enabled(self.pvp, egui::Checkbox::new(&mut self.pvp_friendly_fire, "Fuego amigo: los compañeros de equipo también se pueden dañar")).changed();
         if changed {
-            self.notice = match self.set_config(&[("pvp", json!(self.pvp)), ("pvp_friend_checks", json!(self.pvp && self.pvp_friends))]) {
+            self.notice = match self.set_config(&[("pvp", json!(self.pvp)), ("pvp_friend_checks", json!(self.pvp && self.pvp_friends)), ("pvp_friendly_fire", json!(self.pvp_friendly_fire))]) {
                 Ok(()) => "Guardado. El juego lo aplica solo.".to_string(),
                 Err(e) => format!("Error: {e}"),
             };
@@ -1371,6 +1377,7 @@ mod tests {
             damage: 1.5,
             pvp: true,
             pvp_friends: false,
+            pvp_friendly_fire: false,
             target: Target::Around,
             place_index: 0,
             respawn_minutes: 5,

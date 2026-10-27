@@ -23,7 +23,7 @@ CONFIG (m182_pillar.json) - read when the game or server starts
   "radius_m": 15.0        radius of the damaging fire, in meters
   "duration_s": 15.0      how long the fire lasts, in seconds
   "set_duration": true    false keeps the original duration
-  "admin_only": true      true = only players with the kick/ban permission get the big pillar (on a single-player world, the host); false = every player
+  "admin_only": false     false = every player gets the big pillar; true = only players with the kick/ban permission (on a single-player world, the host)
   "visual": true          adds the ring of big flames around the pillar, false = only the damage area grows
   "visual_scale": 4.0     size of each flame of the ring
   "visual_ring": 8        number of flames in the circle (0 = only the centre one)

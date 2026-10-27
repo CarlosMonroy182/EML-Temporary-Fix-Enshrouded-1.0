@@ -18,6 +18,8 @@ pub struct NativeConfig {
     pub pvp: bool,
     /// Also apply the player-vs-player rule to the "friend" checks.
     pub pvp_friend_checks: bool,
+    /// With pvp on, members of the same team can hurt each other too.
+    pub pvp_friendly_fire: bool,
     pub spawn_probe: bool,
     pub spawner: bool,
     pub spawn_key: String,
@@ -46,6 +48,7 @@ impl Default for NativeConfig {
             enabled: true,
             pvp: false,
             pvp_friend_checks: false,
+            pvp_friendly_fire: false,
             spawn_probe: false,
             spawner: false,
             spawn_key: "F8".to_string(),
@@ -170,6 +173,7 @@ impl LiveState {
         self.pvp.store(cfg.enabled && cfg.pvp, Ordering::Relaxed);
         self.pvp_friend_checks
             .store(cfg.enabled && cfg.pvp && cfg.pvp_friend_checks, Ordering::Relaxed);
+        super::faction::set_friendly_fire(cfg.enabled && cfg.pvp && cfg.pvp_friendly_fire);
         self.spawn_probe.store(cfg.enabled && cfg.spawn_probe, Ordering::Relaxed);
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
