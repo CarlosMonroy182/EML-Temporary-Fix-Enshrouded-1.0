@@ -6,6 +6,7 @@ A small mod that makes the Eternal Pillar Of Flames spell much bigger for whoeve
 
 Features
 - 15 m damage radius (the normal pillar is 3 m).
+- Eternal Veil Beam (continuous veil ray): a much thicker beam, 3 m wide instead of 0.4 m, with a matching wide damage area. The damage area works for everyone on the server; players who also copy the small folder mods/m182_inferno_beam see the thick beam drawn.
 - Ring of big flames around the pillar, created by the server so every player sees it without installing anything.
 - Configurable duration, radius, flame size and number of flames.
 - Open to every player by default, or limited to admins (kick/ban permission) with one setting.
@@ -18,8 +19,8 @@ Requirements
 
 Installation
 1. Close the game (or stop the server).
-2. Copy dbghelp.dll, m182_native.json, m182_pillar.json and eml.json next to enshrouded.exe (or enshrouded_server.exe).
-3. Start the game or server and cast the Eternal Pillar Of Flames.
+2. Copy dbghelp.dll, m182_native.json, m182_pillar.json, eml.json and the folder mods next to enshrouded.exe (or enshrouded_server.exe).
+3. Start the game or server and cast the Eternal Pillar Of Flames or the Eternal Veil Beam.
 Full steps are in README.txt inside the archive.
 
 Configuration (m182_pillar.json)

@@ -1,0 +1,11 @@
+{
+    "id": "m182_inferno_beam",
+    "name": "M182 Veil Beam",
+    "description": "Makes the Eternal Veil Beam (continuous veil ray) thick and wide, like a kamehameha.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}
