@@ -1196,7 +1196,7 @@ fn run_loop(dir: std::path::PathBuf) {
                                 }
                             }
                             if light {
-                                burst.effects.truncate(1);
+                                burst.effects.truncate(if matches!(element, Element::Fire | Element::Lightning | Element::Physical) { 2 } else { 1 });
                             }
                             queue_burst(at, facing, &burst);
                         }
