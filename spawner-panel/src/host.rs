@@ -209,6 +209,9 @@ impl Pace {
         if let Some(n) = get("typing_hold_ms") {
             pace.hold = n.clamp(20, 500);
         }
+        if let Some(n) = get("typing_opened_ms") {
+            pace.opened = n.clamp(100, 3000);
+        }
         pace
     }
 }
@@ -592,6 +595,10 @@ mod tests {
         assert_eq!((p.burst, p.gap), (8, 1));
         let p = Pace::from_settings(r#"{"typing_burst":0,"typing_gap_ms":900}"#);
         assert_eq!((p.burst, p.gap), (1, 50));
+        assert_eq!(Pace::from_settings("{}").opened, 300);
+        assert_eq!(Pace::from_settings(r#"{"typing_opened_ms":1000}"#).opened, 1000);
+        assert_eq!(Pace::from_settings(r#"{"typing_opened_ms":9}"#).opened, 100);
+        assert_eq!(Pace::from_settings(r#"{"typing_opened_ms":99999}"#).opened, 3000);
     }
 
     #[test]
