@@ -149,6 +149,8 @@ jobs:
           cp artifacts/native/dbghelp.dll dist/M182_Inferno_Magic/
           cp nexus-package/inferno/m182_native.json nexus-package/inferno/m182_pillar.json nexus-package/inferno/eml.json nexus-package/inferno/README.txt dist/M182_Inferno_Magic/
           cp eml-fork/LICENSE dist/M182_Inferno_Magic/
+          mkdir -p dist/M182_Inferno_Magic/mods
+          cp -r spawner-mods/m182_inferno_beam dist/M182_Inferno_Magic/mods/
           if grep -rIl "7dde183b" dist/M182_Inferno_Magic; then echo "private key found in the Inferno package"; exit 1; fi
           for side in Client Server; do
             out=dist/M182_Market_Test_$side
