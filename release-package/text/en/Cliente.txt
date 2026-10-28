@@ -64,6 +64,7 @@ Delete dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_pane
 
 INFERNO MAGIC (Eternal Pillar Of Flames and Eternal Veil Beam)
 - m182_pillar.json is part of this package. Eternal Pillar Of Flames: "radius_m" (15) and "duration_s" (15) set its size and time, "admin_only": false lets every player with the spell use the big one, "mode": "off" turns it off. The big pillar is drawn for every player.
-- The folder mods\m182_inferno_beam makes the Eternal Veil Beam red and its damage land only where the beam hits (hit radius 0.9 m). Players who have this folder in their own game see the red beam; the others see the normal beam. Delete the folder to get the original beam back.
+- Eternal Veil Beam, drawn for every player: while a player channels the beam, the server places big fire flames along it ("beam": true; "beam_scale" size of each flame, "beam_spots" how many, "beam_length_m" how far, "beam_every_ms" how often they are renewed). Set "beam": false to turn it off.
+- The folder mods\m182_inferno_beam makes the beam red for the players who have this folder in their own game and makes its damage land only where the beam hits (hit radius 0.9 m). Delete the folder to get the original beam back.
 
 Made by M182.
