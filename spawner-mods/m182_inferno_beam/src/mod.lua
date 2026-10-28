@@ -1,24 +1,16 @@
 local TAG = "[m182-beam]"
 local TEMPLATE_TYPE = "keen::ecs::TemplateResource"
 local BEAM = "a0f608e8-f3d5-4e09-85d9-a03095ac9a3a"
-local ORIGINAL_LOOK = "f1e95f07-8e76-48b4-9d5c-a380da64b2ff"
-local WIDE_LOOK = "0411cdb6-03ff-4bfa-a155-3bd9ba8f81d8"
-local VFX_TYPE = "keen::VfxResource"
 
 local HIT_RADIUS = 0.9
 local ORIGINAL_HIT_RADIUS = 0.2
 local SWEEP_DAMAGE = false
-local BEAM_RADIUS = 1.5
-local BEAM_LENGTH = 20.0
-local BRIGHTNESS = 1.0
-
-local function bits(x)
-    return (string.unpack("<I4", string.pack("<f", x)))
-end
+local RED = 255
+local GREEN = 40
+local BLUE = 20
 
 local function color(r, g, b)
-    local function c(v) return math.floor(v * BRIGHTNESS + 0.5) end
-    return 4278190080 + c(b) * 65536 + c(g) * 256 + c(r)
+    return 4278190080 + b * 65536 + g * 256 + r
 end
 
 local function try(f)
@@ -70,7 +62,7 @@ for _, c in ipairs(resource.data.components) do
         end
     elseif t == "keen::ecs::VfxParametersTemplateComponent" then
         local block = c.value.parameters.data
-        block[4] = color(255, 40, 20)
+        block[4] = color(RED, GREEN, BLUE)
         visual = visual + 1
     end
 end
