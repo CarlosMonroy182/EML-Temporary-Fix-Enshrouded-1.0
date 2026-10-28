@@ -311,5 +311,7 @@ EN = {
 "BOTÍN PERSONALIZADO": "CUSTOM LOOT",
 "No se conoce tu posición. Entra al mundo y espera unos segundos.": "Your position is unknown. Enter the world and wait a few seconds.",
 "Cerca de ti": "Near you",
-"Cada enemigo suelta estos objetos al morir, con su probabilidad. Sin objetos suelta el botín normal del juego. Vale para «Invocar» y para «Crear aparición».": "Each enemy drops these items when it dies, with their chance. With no items it drops the game's normal loot. Works for “Summon” and “Create spawn”.",
+"Objetos extra que suelta cada enemigo al morir, con su probabilidad, además de su botín normal del juego. Vale para «Invocar» y para «Crear aparición».": "Extra items each enemy drops when it dies, with their chance, on top of its normal game loot. Works for “Summon” and “Create spawn”.",
+"Sin botín extra": "No extra loot",
+"Botín extra: {} objeto(s)": "Extra loot: {} item(s)",
 }

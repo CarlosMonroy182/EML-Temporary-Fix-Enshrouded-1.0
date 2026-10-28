@@ -1212,9 +1212,9 @@ impl App {
             ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
             divider(ui);
             label_title(ui, "BOTÍN PERSONALIZADO");
-            let label = if self.creature_drops.is_empty() { "Botín: el normal del juego".to_string() } else { format!("Botín: {} objeto(s)", self.creature_drops.len()) };
+            let label = if self.creature_drops.is_empty() { "Sin botín extra".to_string() } else { format!("Botín extra: {} objeto(s)", self.creature_drops.len()) };
             ui.label(RichText::new(label).color(GOLD_DIM).size(14.0));
-            ui.label(RichText::new("Cada enemigo suelta estos objetos al morir, con su probabilidad. Sin objetos suelta el botín normal del juego. Vale para «Invocar» y para «Crear aparición».").color(MUTED).size(13.5));
+            ui.label(RichText::new("Objetos extra que suelta cada enemigo al morir, con su probabilidad, además de su botín normal del juego. Vale para «Invocar» y para «Crear aparición».").color(MUTED).size(13.5));
             let mut drops = std::mem::take(&mut self.creature_drops);
             let mut changed = false;
             self.loot_editor(ui, &mut drops, &mut changed);
