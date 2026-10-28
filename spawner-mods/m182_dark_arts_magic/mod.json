@@ -1,0 +1,11 @@
+{
+    "id": "m182_dark_arts_magic",
+    "name": "M182 Dark Arts Magic",
+    "description": "Bigger Eternal Pillar Of Flames and a red Eternal Veil Beam that damages only where it hits.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}
