@@ -7,7 +7,7 @@
   "visual": true,
   "visual_scale": 4.0,
   "visual_ring": 8,
-  "beam": true,
+  "beam": false,
   "beam_effects": ["d0d55bba-7951-4213-8c2d-f8efb416fa2a"],
   "beam_scale": 2.0,
   "beam_spots": 10,

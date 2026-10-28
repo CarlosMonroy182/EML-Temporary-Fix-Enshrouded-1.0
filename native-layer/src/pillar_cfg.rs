@@ -62,7 +62,7 @@ pub struct PillarConfig {
 
 impl Default for PillarConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: false, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false, beam: true, beam_effects: vec![BEAM_EFFECT.into()], beam_scale: 3.0, beam_spots: 6, beam_length_m: 18.0, beam_every_ms: 500 }
+        Self { mode: "off".into(), radius_m: 15.0, duration_s: 15.0, max_dumps: 12, set_duration: true, admin_only: false, visual: true, visual_templates: vec![VISUAL_TEMPLATE.into()], visual_scale: 4.0, visual_ring: 8, nearest_decides: false, beam: false, beam_effects: vec![BEAM_EFFECT.into()], beam_scale: 3.0, beam_spots: 6, beam_length_m: 18.0, beam_every_ms: 500 }
     }
 }
 
@@ -172,10 +172,10 @@ mod tests {
     #[test]
     fn the_beam_defaults_are_sane() {
         let c = PillarConfig::default();
-        assert!(c.beam && c.beam_spots == 6 && c.beam_every_ms == 500);
+        assert!(!c.beam && c.beam_spots == 6 && c.beam_every_ms == 500);
         assert_eq!(c.beam_life_ms(), 650);
         assert_eq!(c.beam_size(), 3.0);
-        assert!(!PillarConfig::parse(r#"{"beam":false}"#).beam);
+        assert!(PillarConfig::parse(r#"{"beam":true}"#).beam);
         assert_eq!(PillarConfig::parse(r#"{"beam_scale":99}"#).beam_size(), 10.0);
         assert_eq!(PillarConfig::parse(r#"{"beam_every_ms":1}"#).beam_life_ms(), 350);
     }
