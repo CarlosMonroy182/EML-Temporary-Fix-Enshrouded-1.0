@@ -1,0 +1,11 @@
+{
+    "id": "m182_inferno_pillar",
+    "name": "M182 Eternal Pillar Of Flames",
+    "description": "Bigger and longer Eternal Pillar Of Flames.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}

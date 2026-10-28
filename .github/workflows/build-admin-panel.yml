@@ -121,6 +121,9 @@ jobs:
             cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
             cp spawner-mods/m182_vfx/mod.json $out/mods/m182_vfx/
             cp spawner-mods/m182_vfx/src/mod.lua $out/mods/m182_vfx/src/
+            mkdir -p $out/mods/m182_inferno_beam/src
+            cp spawner-mods/m182_inferno_beam/mod.json $out/mods/m182_inferno_beam/
+            cp spawner-mods/m182_inferno_beam/src/mod.lua $out/mods/m182_inferno_beam/src/
             if [ "$side" = Cliente ]; then
               cp artifacts/$panel/m182_spawner_panel.dll $out/M182_Panel.dll
               cp eml-fork/LICENSE $out/ || true
@@ -137,6 +140,7 @@ jobs:
             cp nexus-package/public/$lower/* dist/M182_Nexus_$side/
             cp nexus-package/public/text/$side.txt dist/M182_Nexus_$side/README.txt
             cp eml-fork/LICENSE dist/M182_Nexus_$side/ || true
+            rm -rf dist/M182_Nexus_$side/m182_pillar.json dist/M182_Nexus_$side/mods/m182_inferno_beam
           done
           if grep -rIl "7dde183b" dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "private key found in the public packages"; exit 1; fi
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src

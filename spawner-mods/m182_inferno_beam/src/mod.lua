@@ -1,14 +1,25 @@
 local TAG = "[m182-beam]"
 local TEMPLATE_TYPE = "keen::ecs::TemplateResource"
 local BEAM = "a0f608e8-f3d5-4e09-85d9-a03095ac9a3a"
+local ORIGINAL_LOOK = "f1e95f07-8e76-48b4-9d5c-a380da64b2ff"
+local WIDE_LOOK = "0411cdb6-03ff-4bfa-a155-3bd9ba8f81d8"
+local VFX_TYPE = "keen::VfxResource"
 
-local HIT_RADIUS = 1.5
-local VISUAL_RADIUS = 1.5
-local LIGHT_RADIUS = 12.0
-
+local HIT_RADIUS = 0.9
 local ORIGINAL_HIT_RADIUS = 0.2
-local ORIGINAL_VISUAL_RADIUS = 0.1
-local ORIGINAL_LIGHT_RADIUS = 3.0
+local SWEEP_DAMAGE = false
+local BEAM_RADIUS = 1.5
+local BEAM_LENGTH = 20.0
+local BRIGHTNESS = 1.0
+
+local function bits(x)
+    return (string.unpack("<I4", string.pack("<f", x)))
+end
+
+local function color(r, g, b)
+    local function c(v) return math.floor(v * BRIGHTNESS + 0.5) end
+    return 4278190080 + c(b) * 65536 + c(g) * 256 + c(r)
+end
 
 local function try(f)
     local ok, r = pcall(f)
@@ -21,14 +32,6 @@ local function num(v)
     local inner = try(function() return v.value end)
     if type(inner) == "number" then return inner end
     return tonumber(tostring(v))
-end
-
-local function bits(x)
-    return (string.unpack("<I4", string.pack("<f", x)))
-end
-
-local function float_of(n)
-    return (string.unpack("<f", string.pack("<I4", math.floor(n) % 4294967296)))
 end
 
 local function value_of(x)
@@ -58,19 +61,18 @@ for _, c in ipairs(resource.data.components) do
                 local r = shape and num(shape.radius)
                 if shape ~= nil and close(r, ORIGINAL_HIT_RADIUS) then
                     local ok = pcall(function() shape.radius = HIT_RADIUS end)
-                    if ok then hit = hit + 1 end
+                    if ok then
+                        hit = hit + 1
+                        if not SWEEP_DAMAGE then pcall(function() data.continuous = false end) end
+                    end
                 end
             end
         end
     elseif t == "keen::ecs::VfxParametersTemplateComponent" then
         local block = c.value.parameters.data
-        local radius, light = num(block[1]), num(block[2])
-        if radius and light and close(float_of(radius), ORIGINAL_VISUAL_RADIUS) and close(float_of(light), ORIGINAL_LIGHT_RADIUS) then
-            block[1] = bits(VISUAL_RADIUS)
-            block[2] = bits(LIGHT_RADIUS)
-            visual = visual + 1
-        end
+        block[4] = color(255, 40, 20)
+        visual = visual + 1
     end
 end
 
-print(string.format("%s veil beam: hit areas=%d looks=%d (hit radius %.2f m, beam radius %.2f m)", TAG, hit, visual, HIT_RADIUS, VISUAL_RADIUS))
+print(string.format("%s veil beam: hit areas=%d looks=%d (hit radius %.2f m, red original effect)", TAG, hit, visual, HIT_RADIUS))

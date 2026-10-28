@@ -1,0 +1,11 @@
+{
+  "mode": "on",
+  "radius_m": 15.0,
+  "duration_s": 15.0,
+  "set_duration": true,
+  "admin_only": false,
+  "visual": true,
+  "visual_scale": 4.0,
+  "visual_ring": 8,
+  "beam": false
+}
