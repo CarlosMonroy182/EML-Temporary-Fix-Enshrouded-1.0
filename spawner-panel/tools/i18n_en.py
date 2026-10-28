@@ -308,4 +308,7 @@ EN = {
 "Los equipos cambiaron en el servidor y ya se muestran aquí.": "The teams changed on the server and are now shown here.",
 "La lista de equipos del servidor llegó incompleta; se ignora.": "The server's team list arrived incomplete; it is ignored.",
 "Sacar del equipo": "Remove from team",
+"BOTÍN PERSONALIZADO": "CUSTOM LOOT",
+"No se conoce tu posición. Entra al mundo y espera unos segundos.": "Your position is unknown. Enter the world and wait a few seconds.",
+"Cerca de ti": "Near you",
 }

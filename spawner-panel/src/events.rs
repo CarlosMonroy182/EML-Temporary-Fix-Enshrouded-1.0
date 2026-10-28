@@ -396,7 +396,7 @@ impl App {
                     }
                 });
                 if open {
-                    self.loot_editor(ui, m, changed);
+                    self.loot_editor(ui, &mut m.drops, changed);
                 }
             });
             ui.add_space(4.0);
@@ -427,10 +427,10 @@ impl App {
         }
     }
 
-    fn loot_editor(&mut self, ui: &mut egui::Ui, m: &mut Member, changed: &mut bool) {
+    pub(crate) fn loot_editor(&mut self, ui: &mut egui::Ui, drops: &mut Vec<Drop>, changed: &mut bool) {
         ui.separator();
         let mut remove = None;
-        for (i, d) in m.drops.iter_mut().enumerate() {
+        for (i, d) in drops.iter_mut().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&d.name).color(PARCHMENT));
                 *changed |= ui.add(egui::DragValue::new(&mut d.amount).range(1..=65535).prefix("× ")).changed();
@@ -441,10 +441,10 @@ impl App {
             });
         }
         if let Some(i) = remove {
-            m.drops.remove(i);
+            drops.remove(i);
             *changed = true;
         }
-        if m.drops.len() >= MAX_DROPS {
+        if drops.len() >= MAX_DROPS {
             ui.label(RichText::new(format!("Máximo {MAX_DROPS} objetos.")).color(MUTED));
             return;
         }
@@ -479,7 +479,7 @@ impl App {
             if let Some(i) = self.ev.item {
                 if let Some(item) = self.items.rows.get(i).filter(|r| r.deliverable()).cloned() {
                     let name = self.item_name(i).unwrap_or_else(|| item.name.clone());
-                    m.drops.push(Drop { item: item.id, guid: item.guid.clone(), name, amount: self.ev.amount.clamp(1, 65535), rarity: self.ev.rarity.min(4), level: self.ev.item_level.clamp(1, 255), chance: self.ev.chance.clamp(1, 100) });
+                    drops.push(Drop { item: item.id, guid: item.guid.clone(), name, amount: self.ev.amount.clamp(1, 65535), rarity: self.ev.rarity.min(4), level: self.ev.item_level.clamp(1, 255), chance: self.ev.chance.clamp(1, 100) });
                     *changed = true;
                 } else {
                     self.ev.notice = "Ese objeto no se puede entregar.".to_string();

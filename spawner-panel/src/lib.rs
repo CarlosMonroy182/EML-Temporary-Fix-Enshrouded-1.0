@@ -154,6 +154,7 @@ pub struct App {
     status: Status,
     notice: String,
     spawner_notice: String,
+    creature_drops: Vec<spawners::Drop>,
     remote_cfg: remote::Settings,
     remote_notice: String,
 }
@@ -556,6 +557,7 @@ impl App {
             spawner_checked: Instant::now(),
             player: read_player(&dir),
             player_checked: Instant::now(),
+            creature_drops: Vec::new(),
             here: None,
             synced: false,
             places,
@@ -650,8 +652,8 @@ impl App {
             radius: if self.count > 1 { self.distance } else { 3.0 },
             respawn: self.respawn_minutes.clamp(1, 1440) * 60,
             once: false,
-            drops: Vec::new(),
-            pickup: String::new(),
+            drops: self.creature_drops.clone(),
+            pickup: if self.creature_drops.is_empty() { String::new() } else { self.items.generic_pickup.clone() },
             pool: Vec::new(),
             every: 0,
             area: 0.0,
@@ -663,6 +665,43 @@ impl App {
             Err(e) => Status::Error(e),
         };
         self.spawner_notice = format!("Aparición creada en «{}» (cada {} min).", place.name, self.respawn_minutes);
+    }
+
+    /// Summons creatures around the player that drop the chosen loot: a one-time spawner on the
+    /// player's position, which is how raids carry their loot.
+    fn summon_with_loot(&mut self) {
+        let Some(index) = self.creatures.selected else { return };
+        let Some(entry) = self.creatures.entries.get(index) else { return };
+        let (creature, template) = (entry.alias.clone().unwrap_or_else(|| entry.label.clone()), entry.guid.clone());
+        let Some(at) = self.player else {
+            self.status = Status::Error("No se conoce tu posición. Entra al mundo y espera unos segundos.".to_string());
+            return;
+        };
+        let spawner = spawners::Spawner {
+            id: spawners::new_id(),
+            creature,
+            template,
+            place: "Cerca de ti".to_string(),
+            at,
+            level: self.level,
+            count: self.count,
+            health: self.effective_health(),
+            damage: self.damage,
+            radius: self.distance,
+            respawn: 300,
+            once: true,
+            drops: self.creature_drops.clone(),
+            pickup: self.items.generic_pickup.clone(),
+            pool: Vec::new(),
+            every: 0,
+            area: 0.0,
+        };
+        let op = spawners::op_add(&spawner);
+        self.spawners.push(spawner);
+        self.status = match spawners::save_change(&self.dir, &self.spawners, &op) {
+            Ok(()) => Status::Delivered,
+            Err(e) => Status::Error(e),
+        };
     }
 
     fn delete_spawner(&mut self, id: &str) {
@@ -1171,6 +1210,14 @@ impl App {
             ui.add_enabled(self.custom_health, egui::Slider::new(&mut self.health, 10..=1_000_000).logarithmic(true));
             label_title(ui, "DAÑO  (1.00 = normal)");
             ui.add(egui::Slider::new(&mut self.damage, 0.0..=20.0).fixed_decimals(2));
+            divider(ui);
+            label_title(ui, "BOTÍN PERSONALIZADO");
+            let label = if self.creature_drops.is_empty() { "Botín: el normal del juego".to_string() } else { format!("Botín: {} objeto(s)", self.creature_drops.len()) };
+            ui.label(RichText::new(label).color(GOLD_DIM).size(14.0));
+            let mut drops = std::mem::take(&mut self.creature_drops);
+            let mut changed = false;
+            self.loot_editor(ui, &mut drops, &mut changed);
+            self.creature_drops = drops;
         }
         divider(ui);
 
@@ -1194,8 +1241,10 @@ impl App {
                 if button(ui, label, Vec2::new(ui.available_width(), 52.0), enabled, true) {
                     if place_mode {
                         self.create_spawner();
-                    } else {
+                    } else if self.creature_drops.is_empty() {
                         self.spawn(mode);
+                    } else {
+                        self.summon_with_loot();
                     }
                 }
                 let (text, color) = self.status_text();
@@ -1388,6 +1437,7 @@ mod tests {
             new_place: String::new(),
             player: None,
             player_checked: Instant::now(),
+            creature_drops: Vec::new(),
             here: None,
             synced: false,
             icons: HashMap::new(),
@@ -1565,6 +1615,41 @@ mod tests {
         app.create_spawner();
         assert!(matches!(app.status, Status::Error(_)));
         assert!(spawners::load(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn enemies_summoned_with_custom_loot_carry_it_to_the_server() {
+        let dir = temp_dir("cl");
+        std::fs::write(dir.join("m182_player.json"), r#"{"x":10.5,"y":20.0,"z":-3.25}"#).unwrap();
+        let mut app = app_in(&dir, vec![entry("642098d4-fc09-48e2-811e-782d438bf551", "A", "Drak", false)]);
+        app.items.generic_pickup = "c15a5c9d-4956-49ff-9d72-9f522229cf1c".into();
+        app.places.push(Place { name: "Torre".into(), x: 1.0, y: 2.0, z: 3.0 });
+        app.creature_drops = vec![spawners::Drop { item: 77, guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(), name: "Espada".into(), amount: 4, rarity: 2, level: 30, chance: 35 }];
+        app.player = read_player(&dir);
+        app.count = 3;
+        app.distance = 12.0;
+        app.summon_with_loot();
+        let around = spawners::load(&dir);
+        assert_eq!(around.len(), 1);
+        assert!(around[0].once);
+        assert_eq!(around[0].at, [10.5, 20.0, -3.25]);
+        assert_eq!((around[0].count, around[0].radius), (3, 12.0));
+        assert_eq!(around[0].drops.len(), 1);
+        assert_eq!(around[0].pickup, "c15a5c9d-4956-49ff-9d72-9f522229cf1c");
+        assert!(spawners::op_add(&around[0]).contains("\"k\":[[77,"));
+
+        app.create_spawner();
+        let placed = spawners::load(&dir);
+        let on_place = placed.iter().find(|s| !s.once).unwrap();
+        assert_eq!(on_place.drops.len(), 1);
+        assert_eq!(on_place.drops[0].chance, 35);
+        assert_eq!(on_place.pickup, "c15a5c9d-4956-49ff-9d72-9f522229cf1c");
+
+        app.creature_drops.clear();
+        app.create_spawner();
+        let plain = spawners::load(&dir);
+        assert!(plain.iter().filter(|s| !s.once).any(|s| s.drops.is_empty() && s.pickup.is_empty()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
