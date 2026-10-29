@@ -227,25 +227,9 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
     if replace_text(text, &line) { 0 } else { 1 }
 }
 
-fn market_command(text: usize, message: &str, client: u32) -> u8 {
-    let asking = (client & 0x3f) + 1;
-    let online: Vec<super::invites::Person> = super::table::entries()
-        .into_iter()
-        .map(|e| super::invites::Person { entity: e.entity(), name: e.name.clone().unwrap_or_else(|| format!("ID {}", e.entity())), id: e.id.clone() })
-        .collect();
-    let Some(who) = online.iter().find(|p| p.entity == asking).cloned() else { return 1 };
-    let Ok(dir) = std::env::current_dir() else { return 1 };
-    let Some(reply) = super::market::handle(message, &who, &online, &dir) else { return 1 };
-    super::spawner::log(&format!("market: {} -> {}", who.name, reply.line));
-    for delivery in &reply.deliveries {
-        super::spawner::queue_delivery(delivery);
-    }
-    if replace_text(text, &reply.line) { 0 } else { 1 }
-}
-
 extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
-    if key.is_empty() && !super::market::active() {
+    if key.is_empty() {
         return 0;
     }
     let Some(head) = super::spawn_probe::read_bytes(text, 16) else { return 0 };
@@ -255,17 +239,8 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     }
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
-    if key.is_empty() {
-        if super::market::is_command(&message) && super::market::configured() {
-            return market_command(text, &message, client as u32);
-        }
-        return 0;
-    }
     if super::invites::is_command(&message) {
         return team_command(text, &message, client as u32);
-    }
-    if super::market::is_command(&message) && super::market::configured() {
-        return market_command(text, &message, client as u32);
     }
     if !super::chat::has_prefix(&message) {
         super::chat::note_other(&message, client as u32);
@@ -291,12 +266,6 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
             1
-        }
-        super::chat::Verdict::Wallets(seq) => {
-            let line = super::spawner::wallets_line(seq);
-            let sent = replace_text(text, &line);
-            super::spawner::log(&format!("chat: client {} asked for the market balances ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
-            if sent { 0 } else { 1 }
         }
         super::chat::Verdict::Teams(seq) => {
             let line = super::spawner::teams_line(seq);
@@ -462,7 +431,7 @@ fn install_permissions(sections: &[&'static [u8]]) {
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
-    if LIVE.chat_key().is_empty() && !super::market::active() {
+    if LIVE.chat_key().is_empty() {
         return;
     }
     let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {
@@ -521,14 +490,13 @@ pub fn install() -> Outcome {
 
     let vfx = super::vfx::wanted();
     let pillar = super::pillar::wanted();
-    let market = super::market::activate();
-    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx || pillar || market {
+    if super::config::LIVE.spawn_probe() || super::config::LIVE.spawner() || vfx || pillar {
         super::spawn_probe::install(&sections);
     }
 
     super::guard::install(&sections);
     install_chat(&sections);
-    if super::config::LIVE.spawner() || vfx || pillar || market {
+    if super::config::LIVE.spawner() || vfx || pillar {
         install_pump(&sections);
     }
     if super::config::LIVE.spawner() {

@@ -14,7 +14,7 @@ pub const PREFIXES: [&str; 2] = ["/m182", "!m182"];
 pub const MIN_KEY_LEN: usize = 6;
 
 /// Files a chat command may write; each one is polled by the native layer.
-pub const FILES: [&str; 9] = [
+pub const FILES: [&str; 8] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -23,7 +23,6 @@ pub const FILES: [&str; 9] = [
     "m182_spawners.json",
     "m182_data.json",
     "m182_spawner_op.json",
-    "m182_market.json",
 ];
 
 pub const SPAWNER_OP_FILE: &str = "m182_spawner_op.json";
@@ -50,8 +49,6 @@ pub enum Verdict {
     Roster(u32),
     /// Ours: the message is replaced by the server's real teams (sequence number echoed).
     Teams(u32),
-    /// Ours: the message is replaced by balances and recent market events.
-    Wallets(u32),
 }
 
 #[derive(Default)]
@@ -171,10 +168,6 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     if command == "players" {
         let (seq, _) = next_token(rest);
         return Verdict::Roster(seq.parse().unwrap_or(0));
-    }
-    if command == "wallets" {
-        let (seq, _) = next_token(rest);
-        return Verdict::Wallets(seq.parse().unwrap_or(0));
     }
     if command == "teams" {
         let (seq, _) = next_token(rest);

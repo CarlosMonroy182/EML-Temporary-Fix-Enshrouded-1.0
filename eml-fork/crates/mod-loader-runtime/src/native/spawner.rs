@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use super::config::{SpawnSettings, LIVE, SPAWN};
 use super::groups;
-use super::market;
 use super::roster;
 use super::spawn_probe::{hex, original_create, read_bytes, u32_at, u64_at};
 
@@ -116,10 +115,6 @@ pub fn log(message: &str) {
 }
 
 pub fn start() {
-    if !LIVE.spawner() && super::market::active() {
-        start_market_only();
-        return;
-    }
     if !LIVE.spawner() || STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -137,40 +132,6 @@ pub fn start() {
     }
     if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
-    }
-}
-
-/// The market on its own (no admin tools): players are tracked and purchases are dropped next to the buyer.
-fn start_market_only() {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let _ = CLOCK.get_or_init(Instant::now);
-    log("market enabled (market only)");
-    if let Err(e) = std::thread::Builder::new().name("m182-players".into()).spawn(players_loop) {
-        tracing::warn!(target: "m182::spawner", error = %e, "could not start player scan thread");
-    }
-    if let Err(e) = std::thread::Builder::new().name("m182-market".into()).spawn(market_loop) {
-        tracing::warn!(target: "m182::spawner", error = %e, "could not start market thread");
-    }
-}
-
-fn market_loop() {
-    let Ok(dir) = std::env::current_dir() else { return };
-    if let Ok(mut d) = MARKET_DIR.lock() {
-        *d = Some(dir.clone());
-    }
-    let mut tick = 0u32;
-    loop {
-        std::thread::sleep(Duration::from_millis(200));
-        tick = tick.wrapping_add(1);
-        if SERVER_MGR.load(Ordering::SeqCst) == 0 {
-            continue;
-        }
-        let _ = std::panic::catch_unwind(deliveries_tick);
-        if tick % 5 == 0 {
-            let _ = std::panic::catch_unwind(|| super::market::tick(&dir));
-        }
     }
 }
 
@@ -586,17 +547,6 @@ const REQUEST_FILE: &str = "m182_spawn.request";
 
 static DELIVERIES: Mutex<std::collections::VecDeque<(GiveSpec, String, u32)>> = Mutex::new(std::collections::VecDeque::new());
 
-/// Queues the pickups of a market purchase; they are dropped next to the buyer one at a time.
-pub fn queue_delivery(d: &super::market::Delivery) {
-    let guid = super::config::parse_guid(&d.offer.guid).unwrap_or([0u8; 16]);
-    let spec = GiveSpec { item: d.offer.item, level: d.offer.level.clamp(1, 255), rarity: d.offer.rarity.min(4), amount: d.offer.amount.clamp(1, 65535), guid };
-    if let Ok(mut q) = DELIVERIES.lock() {
-        for _ in 0..d.copies.min(20) {
-            q.push_back((spec, d.template.clone(), d.entity));
-        }
-    }
-}
-
 fn deliveries_tick() {
     if PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true) {
         return;
@@ -633,7 +583,7 @@ fn deliveries_tick() {
         *t = None;
     }
     PENDING.store(1, Ordering::SeqCst);
-    log(&format!("market: dropping item {} next to entity {entity}", spec.item));
+    log(&format!("delivery: dropping item {} next to entity {entity}", spec.item));
 }
 
 pub fn poll_request() {
@@ -2581,12 +2531,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         log(&format!("teams: {} defined {:?}", st.groups.teams.len(), st.groups.teams));
     }
     publish_live_teams(dir, &st.groups.teams);
-    if let Ok(mut d) = MARKET_DIR.lock() {
-        if d.is_none() {
-            *d = Some(dir.to_path_buf());
-        }
-    }
-    super::market::tick(dir);
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
     if manager == 0 {
@@ -2648,7 +2592,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     id,
                     serde_json::Value::String(p.name.clone().unwrap_or_default())
                 ));
-                super::market::note_position(id, st.groups.zones.iter().filter(|zone| groups::inside(std::slice::from_ref(zone), x, z)).map(|zone| zone.name.clone()).collect());
                 let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
                 if in_safe {
                     inside_ids.push(id);
@@ -2758,13 +2701,6 @@ fn publish_live_teams(dir: &std::path::Path, teams: &[groups::TeamDef]) {
     if let Ok(mut shared) = LIVE_TEAMS.lock() {
         *shared = live;
     }
-}
-
-static MARKET_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
-
-pub fn wallets_line(seq: u32) -> String {
-    let dir = MARKET_DIR.lock().ok().and_then(|d| d.clone()).unwrap_or_default();
-    super::market::live_line(seq, &dir)
 }
 
 pub fn teams_line(seq: u32) -> String {
@@ -3505,35 +3441,6 @@ fn find_teams(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<groups::LiveT
     find_reply(regions, &groups::live_tag(seq), |text| groups::parse_live_line(text, seq))
 }
 
-fn find_market(regions: &[(usize, usize)], seq: u32) -> Option<String> {
-    find_reply(regions, &market::live_tag(seq), |text| market::parse_live_line(text, seq))
-}
-
-fn scan_market(seq: u32, dir: std::path::PathBuf) {
-    let started = Instant::now();
-    let found = loop {
-        let regions = data_regions();
-        if let Some(found) = find_market(&regions, seq) {
-            break Some(found);
-        }
-        if started.elapsed() > Duration::from_secs(60) {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(400));
-    };
-    match found {
-        Some(text) => {
-            let tmp = dir.join("m182_market_live.json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join(market::LIVE_FILE));
-            }
-            log(&format!("market {seq}: balances read from the chat, {} ms", started.elapsed().as_millis()));
-        }
-        None => log(&format!("market {seq}: the answer never appeared in memory")),
-    }
-    SCAN_BUSY.store(false, Ordering::SeqCst);
-}
-
 fn scan_teams(seq: u32, dir: std::path::PathBuf) {
     let started = Instant::now();
     let found = loop {
@@ -3571,7 +3478,7 @@ fn scan_request(_st: &mut PowerState, dir: &std::path::Path) {
         return;
     }
     let dir = dir.to_path_buf();
-    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || match kind.as_str() { "teams" => scan_teams(seq, dir), "market" => scan_market(seq, dir), _ => scan_roster(seq, dir) }).is_err() {
+    if std::thread::Builder::new().name("m182-roster".into()).spawn(move || match kind.as_str() { "teams" => scan_teams(seq, dir), _ => scan_roster(seq, dir) }).is_err() {
         SCAN_BUSY.store(false, Ordering::SeqCst);
         log("roster: could not start the search");
     }

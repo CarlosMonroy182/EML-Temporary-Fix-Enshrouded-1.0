@@ -4,10 +4,6 @@ use mod_loader::ModEnvironment;
 // use parking_lot::Mutex;
 
 mod log;
-#[cfg(not(feature = "market-only"))]
-pub mod native;
-#[cfg(feature = "market-only")]
-#[path = "market_native/mod.rs"]
 pub mod native;
 
 pub struct RuntimeOptions {
