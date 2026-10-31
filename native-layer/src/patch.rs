@@ -45,7 +45,7 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
 
 extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
     let (a, b) = (rcx as u8, rdx as u8);
-    let hostile = faction::enemy(a, b, LIVE.pvp());
+    let hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
     team_check_report(a, b, hostile, "values");
     hostile as u8
 }
@@ -58,7 +58,7 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
         }
         return 0;
     }
-    let hostile = faction::enemy(fa, fb, LIVE.pvp());
+    let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
     team_check_report(fa, fb, hostile, "pointers");
     hostile as u8
 }
