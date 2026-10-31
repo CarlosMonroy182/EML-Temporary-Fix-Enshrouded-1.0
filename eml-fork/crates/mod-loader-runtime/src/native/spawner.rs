@@ -2495,6 +2495,8 @@ fn zone_team_factions(present: &[usize]) -> Vec<u8> {
     by_team
 }
 
+static PVP_ZONE_STATE: Mutex<String> = Mutex::new(String::new());
+
 static NO_FACTION: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 fn note_faction(id: u32, missing: bool) {
@@ -2592,6 +2594,17 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     }
     let lent = if zone_mode { zone_team_factions(&present) } else { team_factions(&present, LIVE.pvp()) };
     super::faction::set_zone_pvp(zone_mode);
+    {
+        let inside: Vec<u32> = seen.iter().enumerate().filter(|(i, _)| in_pvp[*i]).map(|(_, p)| p.id).collect();
+        let state = format!("pvp zones={} zone_mode={} inside={:?}", pvp_zones.len(), zone_mode, inside);
+        if let Ok(mut last) = PVP_ZONE_STATE.lock() {
+            if *last != state {
+                log(&format!("zones: {state}"));
+                super::diag::line(&format!("zones: {state}"));
+                *last = state;
+            }
+        }
+    }
     let mut mask = 0u32;
     let mut rows = Vec::new();
     let mut map: Vec<(usize, u8)> = Vec::new();
