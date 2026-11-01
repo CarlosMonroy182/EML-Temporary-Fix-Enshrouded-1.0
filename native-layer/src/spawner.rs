@@ -524,6 +524,30 @@ struct Request {
 }
 
 #[derive(Debug, Clone, Copy)]
+static DROP_FACTOR: OnceLock<f64> = OnceLock::new();
+
+fn server_drop_factor() -> f64 {
+    *DROP_FACTOR.get_or_init(|| {
+        let factor = std::env::current_dir()
+            .ok()
+            .and_then(|d| std::fs::read_to_string(d.join("enshrouded_server.json")).ok())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["gameSettings"]["resourceDropStackAmountFactor"].as_f64())
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .unwrap_or(1.0);
+        log(&format!("loot: the server multiplies picked-up stacks by {factor}; configured amounts are divided by it"));
+        factor
+    })
+}
+
+fn compensated_amount(amount: u32) -> u32 {
+    let f = server_drop_factor();
+    if (f - 1.0).abs() < 1e-6 {
+        return amount.clamp(1, 65535);
+    }
+    ((amount as f64 / f).round() as u32).clamp(1, 65535)
+}
+
 pub struct GiveSpec {
     pub item: u32,
     pub level: u32,
@@ -1816,7 +1840,7 @@ fn spawn_now(manager: usize) {
             pickup[4..20].copy_from_slice(&g.guid);
             pickup[20..24].copy_from_slice(&g.level.to_le_bytes());
             pickup[24] = g.rarity as u8;
-            pickup[26..28].copy_from_slice(&(g.amount as u16).to_le_bytes());
+            pickup[26..28].copy_from_slice(&(compensated_amount(g.amount) as u16).to_le_bytes());
             write_u32(&mut entries.0, 24, HASH_PICKUP_ITEM);
             write_u64(&mut entries.0, 32, pickup.as_ptr() as u64);
             write_u64(&mut entries.0, 40, PICKUP_ITEM_SIZE as u64);
