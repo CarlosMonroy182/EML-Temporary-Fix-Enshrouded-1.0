@@ -312,6 +312,7 @@ EN = {
 "Objetos extra que suelta cada enemigo al morir, con su probabilidad, además de su botín normal del juego. Vale para «Invocar» y para «Crear aparición».": "Extra items each enemy drops when it dies, with their chance, on top of its normal game loot. Works for “Summon” and “Create spawn”.",
 "Sin botín extra": "No extra loot",
 "Botín extra: {} objeto(s)": "Extra loot: {} item(s)",
+"El PvP está activado en todo el mundo (pestaña PvP). Apágalo ahí para que las zonas de PvP siempre activo se noten.": "PvP is on for the whole world (PvP tab). Turn it off there so the always-on PvP zones make a difference.",
 "Combate en la zona": "Combat in the zone",
 "Según la pestaña PvP": "As set in the PvP tab",
 "PvP siempre activo": "PvP always on",

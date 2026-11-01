@@ -765,6 +765,9 @@ impl App {
         divider(ui);
         let mut changed = false;
         let mut remove = None;
+        if self.pvp && self.social.zones.iter().any(|z| z.pvp) {
+            ui.label(RichText::new("El PvP está activado en todo el mundo (pestaña PvP). Apágalo ahí para que las zonas de PvP siempre activo se noten.").color(GOLD));
+        }
         let team_names: Vec<String> = self.social.teams.iter().map(|t| t.name.clone()).collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, z) in self.social.zones.iter_mut().enumerate() {
