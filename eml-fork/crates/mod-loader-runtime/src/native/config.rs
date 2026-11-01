@@ -40,12 +40,15 @@ pub struct NativeConfig {
     pub force_client: bool,
     /// Only players with the kick/ban permission may use the chat command channel.
     pub chat_admin_only: bool,
+    /// Administrators build without spending materials.
+    pub free_building: bool,
 }
 
 impl Default for NativeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            free_building: true,
             pvp: false,
             pvp_friend_checks: false,
             pvp_friendly_fire: false,
@@ -89,6 +92,7 @@ pub struct LiveState {
     pub spawner: AtomicBool,
     pub force_client: AtomicBool,
     pub chat_admin_only: AtomicBool,
+    pub free_building: AtomicBool,
     pub chat_key: std::sync::Mutex<String>,
 }
 
@@ -165,6 +169,7 @@ pub static LIVE: LiveState = LiveState {
     spawner: AtomicBool::new(false),
     force_client: AtomicBool::new(false),
     chat_admin_only: AtomicBool::new(true),
+    free_building: AtomicBool::new(true),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
@@ -179,6 +184,7 @@ impl LiveState {
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
         self.chat_admin_only.store(cfg.chat_admin_only, Ordering::Relaxed);
+        self.free_building.store(cfg.enabled && cfg.free_building, Ordering::Relaxed);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);
@@ -220,6 +226,11 @@ impl LiveState {
     #[inline]
     pub fn spawner(&self) -> bool {
         self.spawner.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn free_building(&self) -> bool {
+        self.free_building.load(Ordering::Relaxed)
     }
 
     #[inline]

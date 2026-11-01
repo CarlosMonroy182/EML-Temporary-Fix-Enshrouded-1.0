@@ -94,3 +94,11 @@ pub static SAVE_DESERIALIZE: [u8; 35] = [
 ];
 
 pub const SAVE_DESERIALIZE_DISPLACED: usize = 15;
+
+/// The server's and the game's building payment: `bool(context, costs, pay)`. The first byte of the
+/// context is the payment mode (0 = the player's inventory transaction at `+8`).
+pub static PAY_COSTS: [u8; 16] = [
+    0x40, 0x55, 0x56, 0x48, 0x83, 0xec, 0x78, 0x48, 0x8b, 0xf2, 0x48, 0x8b, 0xe9, 0x0f, 0xb6, 0x11,
+];
+
+pub const PAY_COSTS_DISPLACED: usize = 16;

@@ -448,6 +448,71 @@ fn install_permissions(sections: &[&'static [u8]]) {
     }
 }
 
+pub(super) static PAY_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static PAY_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8) -> u8 {
+    if LIVE.free_building() {
+        if let Some(head) = super::spawn_probe::read_bytes(context, 16) {
+            if head[0] == 0 {
+                let transaction = super::spawn_probe::u64_at(&head, 8) as usize;
+                if let Some(raw) = super::spawn_probe::read_bytes(transaction + 0xe0, 4) {
+                    let owner = super::spawn_probe::u32_at(&raw, 0);
+                    let admin = super::table::entries().iter().any(|e| e.entity() == owner && super::roster::is_admin(e.permissions));
+                    if PAY_LOGGED.fetch_add(1, Ordering::Relaxed) < 16 {
+                        let known: Vec<u32> = super::table::entries().iter().map(|e| e.entity()).collect();
+                        super::spawner::log(&format!(
+                            "free building: payment by owner {owner} (pay={pay}) -> {} (players online {known:?})",
+                            if admin { "free, administrator" } else { "charged" }
+                        ));
+                    }
+                    if admin {
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    let original = PAY_TRAMPOLINE.load(Ordering::SeqCst);
+    if original == 0 {
+        return 0;
+    }
+    let call: extern "win64" fn(usize, usize, u8) -> u8 = unsafe { std::mem::transmute(original) };
+    call(context, costs, pay)
+}
+
+fn install_pay_costs(sections: &[&'static [u8]]) {
+    let target = match find_unique(sections, &signatures::PAY_COSTS) {
+        Ok(addr) => addr,
+        Err(count) => {
+            super::spawner::log(&format!("free building off: payment function signature matched {count} times"));
+            return;
+        }
+    };
+    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+    if page.is_null() {
+        super::spawner::log("free building off: trampoline allocation failed");
+        return;
+    }
+    let displaced = signatures::PAY_COSTS_DISPLACED;
+    unsafe {
+        std::ptr::copy_nonoverlapping(target, page, displaced);
+        let tail = page.add(displaced);
+        tail.write(0xFF);
+        tail.add(1).write(0x25);
+        tail.add(2).cast::<u32>().write_unaligned(0);
+        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+    }
+    PAY_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
+    match unsafe { write_jump(target, hook_pay_costs as usize) } {
+        Ok(()) => super::spawner::log("free building ready: administrators build without spending materials"),
+        Err(code) => {
+            PAY_TRAMPOLINE.store(0, Ordering::SeqCst);
+            super::spawner::log(&format!("free building off: VirtualProtect failed ({code})"));
+        }
+    }
+}
+
 fn install_chat(sections: &[&'static [u8]]) {
     if LIVE.chat_key().is_empty() {
         return;
@@ -519,6 +584,9 @@ pub fn install() -> Outcome {
     }
     if super::config::LIVE.spawner() {
         install_permissions(&sections);
+        if super::config::LIVE.free_building() {
+            install_pay_costs(&sections);
+        }
     }
 
     let targets = [
