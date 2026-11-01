@@ -42,6 +42,8 @@ pub struct NativeConfig {
     pub chat_admin_only: bool,
     /// Administrators build without spending materials.
     pub free_building: bool,
+    /// On the game client, the hammer works away from any Flame Altar.
+    pub client_build_anywhere: bool,
 }
 
 impl Default for NativeConfig {
@@ -49,6 +51,7 @@ impl Default for NativeConfig {
         Self {
             enabled: true,
             free_building: true,
+            client_build_anywhere: true,
             pvp: false,
             pvp_friend_checks: false,
             pvp_friendly_fire: false,
@@ -93,6 +96,7 @@ pub struct LiveState {
     pub force_client: AtomicBool,
     pub chat_admin_only: AtomicBool,
     pub free_building: AtomicBool,
+    pub client_build_anywhere: AtomicBool,
     pub chat_key: std::sync::Mutex<String>,
 }
 
@@ -170,6 +174,7 @@ pub static LIVE: LiveState = LiveState {
     force_client: AtomicBool::new(false),
     chat_admin_only: AtomicBool::new(true),
     free_building: AtomicBool::new(true),
+    client_build_anywhere: AtomicBool::new(true),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
@@ -185,6 +190,7 @@ impl LiveState {
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
         self.chat_admin_only.store(cfg.chat_admin_only, Ordering::Relaxed);
         self.free_building.store(cfg.enabled && cfg.free_building, Ordering::Relaxed);
+        self.client_build_anywhere.store(cfg.enabled && cfg.client_build_anywhere, Ordering::Relaxed);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);
@@ -226,6 +232,11 @@ impl LiveState {
     #[inline]
     pub fn spawner(&self) -> bool {
         self.spawner.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn client_build_anywhere(&self) -> bool {
+        self.client_build_anywhere.load(Ordering::Relaxed)
     }
 
     #[inline]

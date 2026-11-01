@@ -60,7 +60,23 @@ local function patch_items()
     print(string.format("%s build items %d: build zone not required %d, material check off %d, reach raised %d", TAG, total, zone, materials, reach))
 end
 
+local function placed_entities()
+    local set = {}
+    local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
+    if type(items) ~= "table" then return set end
+    for _, resource in ipairs(items) do
+        pcall(function()
+            local equipment = resource.data.equipment
+            if tostring(equipment.slot) == "BuildTool" then
+                set[tostring(equipment.placedEntity):lower()] = true
+            end
+        end)
+    end
+    return set
+end
+
 local function patch_doors()
+    local placed = placed_entities()
     local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end)
     if type(templates) ~= "table" then return end
     local donor
@@ -77,24 +93,31 @@ local function patch_doors()
         print(TAG .. " door lock source not found, doors unchanged")
         return
     end
-    local locked, failed = 0, 0
+    local locked, stations = 0, 0
     for _, resource in ipairs(templates) do
         pcall(function()
             local name = tostring(resource.data.name)
-            if not (name:find("Door") and name:find("Crafted")) or name:find("DEPRECATED") then return end
-            local toggle, lock = false, false
+            local door = name:find("Door") and name:find("Crafted") and not name:find("DEPRECATED")
+            local station = config.stations_need_permission ~= false and placed[tostring(resource.guid):lower()] and not name:find("FlameAltar")
+            if not door and not station then return end
+            local toggle, lock, craft = false, false, false
             for _, c in ipairs(resource.data.components) do
                 local t = tostring(c.type)
                 if t == "keen::ecs::InteractionToggle" then toggle = true end
                 if t == "keen::ecs::InteractionLock" then lock = true end
+                if t == "keen::ecs::CraftingInteraction" then craft = true end
             end
-            if toggle and not lock then
+            if lock then return end
+            if door and toggle then
                 table.insert(resource.data.components, donor)
                 locked = locked + 1
+            elseif station and craft then
+                table.insert(resource.data.components, donor)
+                stations = stations + 1
             end
         end)
     end
-    print(string.format("%s player doors that need the building permission: %d", TAG, locked))
+    print(string.format("%s player doors that need the building permission: %d, crafting stations: %d", TAG, locked, stations))
 end
 
 patch_items()

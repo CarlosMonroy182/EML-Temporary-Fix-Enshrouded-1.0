@@ -513,6 +513,85 @@ fn install_pay_costs(sections: &[&'static [u8]]) {
     }
 }
 
+pub(super) static ZONES_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static ZONES_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+fn add_everywhere_area(world: usize) {
+    let array = world + signatures::BUILD_ZONES_AT;
+    let Some(head) = super::spawn_probe::read_bytes(array, 24) else { return };
+    let (data, count, capacity) = (super::spawn_probe::u64_at(&head, 0) as usize, super::spawn_probe::u64_at(&head, 8), super::spawn_probe::u64_at(&head, 16));
+    if data == 0 || count >= capacity || count > 4096 {
+        if ZONES_LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+            super::spawner::log(&format!("build anywhere: no room for the extra area (count {count}, capacity {capacity})"));
+        }
+        return;
+    }
+    let mut entry = [0u8; 24];
+    for (i, value) in [-1.0e6f32, -1.0e5, -1.0e6, 1.0e6, 1.0e5, 1.0e6].iter().enumerate() {
+        entry[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    if count > 0 {
+        if let Some(last) = super::spawn_probe::read_bytes(data + (count as usize - 1) * 24, 24) {
+            if last == entry {
+                return;
+            }
+        }
+    }
+    if super::spawner::write_bytes(data + count as usize * 24, &entry) && super::spawner::write_bytes(array + 8, &(count + 1).to_le_bytes()) {
+        if ZONES_LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+            super::spawner::log(&format!("build anywhere: whole-map building area added ({} areas now)", count + 1));
+        }
+    }
+}
+
+extern "win64" fn hook_build_zones_set(world: usize, zones: usize) {
+    let original = ZONES_TRAMPOLINE.load(Ordering::SeqCst);
+    if original == 0 {
+        return;
+    }
+    let call: extern "win64" fn(usize, usize) = unsafe { std::mem::transmute(original) };
+    call(world, zones);
+    if LIVE.client_build_anywhere() {
+        add_everywhere_area(world);
+    }
+}
+
+fn install_build_zones(sections: &[&'static [u8]]) {
+    let client = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase())).is_some_and(|n| n == "enshrouded.exe");
+    if !client {
+        return;
+    }
+    let target = match find_unique(sections, &signatures::BUILD_ZONES_SET) {
+        Ok(addr) => addr,
+        Err(count) => {
+            super::spawner::log(&format!("build anywhere off: building-area setter matched {count} times"));
+            return;
+        }
+    };
+    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+    if page.is_null() {
+        super::spawner::log("build anywhere off: trampoline allocation failed");
+        return;
+    }
+    let displaced = signatures::BUILD_ZONES_SET_DISPLACED;
+    unsafe {
+        std::ptr::copy_nonoverlapping(target, page, displaced);
+        let tail = page.add(displaced);
+        tail.write(0xFF);
+        tail.add(1).write(0x25);
+        tail.add(2).cast::<u32>().write_unaligned(0);
+        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+    }
+    ZONES_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
+    match unsafe { write_jump(target, hook_build_zones_set as usize) } {
+        Ok(()) => super::spawner::log("build anywhere ready: the hammer works away from altars"),
+        Err(code) => {
+            ZONES_TRAMPOLINE.store(0, Ordering::SeqCst);
+            super::spawner::log(&format!("build anywhere off: VirtualProtect failed ({code})"));
+        }
+    }
+}
+
 fn install_chat(sections: &[&'static [u8]]) {
     if LIVE.chat_key().is_empty() {
         return;
@@ -578,6 +657,9 @@ pub fn install() -> Outcome {
     }
 
     super::guard::install(&sections);
+    if super::config::LIVE.client_build_anywhere() {
+        install_build_zones(&sections);
+    }
     install_chat(&sections);
     if super::config::LIVE.spawner() || vfx || pillar {
         install_pump(&sections);
