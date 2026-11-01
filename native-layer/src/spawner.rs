@@ -2471,7 +2471,7 @@ fn lend_faction(addr: usize, value: u8) -> bool {
 
 fn team_factions(present: &[usize], pvp: bool) -> Vec<u8> {
     let mut by_team: Vec<u8> = vec![super::faction::PLAYER; present.len()];
-    if !pvp {
+    if !pvp || super::faction::friendly_fire_setting() {
         return by_team;
     }
     let mut next = 0usize;
@@ -2489,6 +2489,9 @@ fn team_factions(present: &[usize], pvp: bool) -> Vec<u8> {
 /// (`PEACE`) is never lent to a team.
 fn zone_team_factions(present: &[usize]) -> Vec<u8> {
     let mut by_team: Vec<u8> = vec![super::faction::PLAYER; present.len()];
+    if super::faction::friendly_fire_setting() {
+        return by_team;
+    }
     if let Some(index) = present.iter().position(|n| *n >= 2) {
         by_team[index] = super::faction::TEAM_FACTIONS[1];
     }
@@ -2654,9 +2657,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                         map.push((addr, team));
                     }
                     if lend_faction(addr, wanted) {
-                        if wanted != super::faction::PLAYER && wanted != super::faction::PEACE {
-                            mask |= 1u32 << wanted;
-                        }
+                        mask |= super::faction::mask_bit(wanted, zone_mode);
                     } else {
                         log(&format!("teams: could not set the faction of entity {id}"));
                     }

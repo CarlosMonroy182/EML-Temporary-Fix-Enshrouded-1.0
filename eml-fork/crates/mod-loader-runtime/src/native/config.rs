@@ -174,6 +174,7 @@ impl LiveState {
         self.pvp_friend_checks
             .store(cfg.enabled && cfg.pvp && cfg.pvp_friend_checks, Ordering::Relaxed);
         super::faction::set_friendly_fire(cfg.enabled && cfg.pvp && cfg.pvp_friendly_fire);
+        super::faction::set_friendly_fire_setting(cfg.enabled && cfg.pvp_friendly_fire);
         self.spawn_probe.store(cfg.enabled && cfg.spawn_probe, Ordering::Relaxed);
         self.spawner.store(cfg.enabled && cfg.spawner, Ordering::Relaxed);
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
