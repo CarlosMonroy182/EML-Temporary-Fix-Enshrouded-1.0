@@ -523,7 +523,6 @@ struct Request {
     stats: Option<StatsPatch>,
 }
 
-#[derive(Debug, Clone, Copy)]
 static DROP_FACTOR: OnceLock<f64> = OnceLock::new();
 
 fn server_drop_factor() -> f64 {
@@ -548,6 +547,7 @@ fn compensated_amount(amount: u32) -> u32 {
     ((amount as f64 / f).round() as u32).clamp(1, 65535)
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct GiveSpec {
     pub item: u32,
     pub level: u32,
