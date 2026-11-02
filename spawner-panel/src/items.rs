@@ -1199,9 +1199,43 @@ impl App {
         }
     }
 
+    fn profile_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("PERFIL DEL SERVIDOR").font(title_font(22.0)).color(GOLD));
+        ui.label(RichText::new("Cada perfil guarda sus propias zonas, apariciones, equipos, lugares y plantillas. Se carga siempre el último que usaste.").color(GOLD_DIM).size(14.5));
+        ui.add_space(6.0);
+        let mut chosen: Option<String> = None;
+        ui.horizontal(|ui| {
+            ui.label("Perfil activo");
+            egui::ComboBox::from_id_salt("profile").width(260.0).selected_text(self.profile.clone()).show_ui(ui, |ui| {
+                for name in &self.profiles {
+                    if ui.selectable_label(*name == self.profile, name).clicked() {
+                        chosen = Some(name.clone());
+                    }
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.profile_new).hint_text("Nombre del perfil nuevo").desired_width(260.0));
+            let ready = crate::profile::clean_name(&self.profile_new).is_some();
+            if button(ui, "CREAR PERFIL", Vec2::new(160.0, 30.0), ready, false) {
+                chosen = crate::profile::clean_name(&self.profile_new);
+                self.profile_new.clear();
+            }
+        });
+        if let Some(name) = chosen {
+            self.change_profile(&name);
+        }
+        if !self.profile_notice.is_empty() {
+            ui.label(RichText::new(self.profile_notice.clone()).color(GOOD));
+        }
+        ui.label(RichText::new("Carpeta de los perfiles: profiles, dentro de la carpeta del juego.").color(MUTED).size(13.5));
+    }
+
     pub fn settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(12.0);
+            self.profile_ui(ui);
+            divider(ui);
             ui.label(RichText::new("AJUSTES GLOBALES").font(title_font(22.0)).color(GOLD));
             divider(ui);
             self.balance_ui(ui);

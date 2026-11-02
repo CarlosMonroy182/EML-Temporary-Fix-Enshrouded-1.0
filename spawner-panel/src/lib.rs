@@ -121,6 +121,10 @@ enum Status {
 }
 
 pub struct App {
+    profiles: Vec<String>,
+    profile: String,
+    profile_new: String,
+    profile_notice: String,
     dir: PathBuf,
     tab: Tab,
     creatures: Catalog,
@@ -569,6 +573,10 @@ impl App {
             spawner_notice: String::new(),
             remote_cfg: remote_cfg.clone(),
             remote_notice: String::new(),
+            profiles: profile::list(&dir),
+            profile: profile::active(&dir),
+            profile_new: String::new(),
+            profile_notice: String::new(),
             dir,
         };
         #[cfg(feature = "linux-preview")]
@@ -583,6 +591,23 @@ impl App {
         }
         app.cleanup_stale_request();
         app
+    }
+
+    fn change_profile(&mut self, name: &str) {
+        match profile::switch(&self.dir, name) {
+            Ok(active) => {
+                remote::reload_sent();
+                self.social = social::SocialState::load(&self.dir);
+                self.spawners = spawners::load(&self.dir);
+                self.places = load_places(&self.dir);
+                self.ev = events::EventState::default();
+                self.place_index = 0;
+                self.profile = active.clone();
+                self.profiles = profile::list(&self.dir);
+                self.profile_notice = format!("Perfil activo: {active}");
+            }
+            Err(e) => self.profile_notice = format!("No se pudo cambiar de perfil: {e}"),
+        }
     }
 
     fn cleanup_stale_request(&self) {
@@ -1411,6 +1436,10 @@ mod tests {
 
     fn app_in(dir: &Path, entries: Vec<Entry>) -> App {
         App {
+            profiles: Vec::new(),
+            profile: String::new(),
+            profile_new: String::new(),
+            profile_notice: String::new(),
             dir: dir.to_path_buf(),
             tab: Tab::Creatures,
             creatures: Catalog { entries, selected: Some(0), ..Default::default() },

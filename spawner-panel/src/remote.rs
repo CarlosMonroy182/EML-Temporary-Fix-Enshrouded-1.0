@@ -299,6 +299,11 @@ pub fn forget_one(file: &str) {
     }
 }
 
+/// Drops the in-memory record so it is read again from disk (used when the profile changes).
+pub fn reload_sent() {
+    *SENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Forgets what the server is known to have, so the next submit of every file is sent again.
 pub fn forget_sent() {
     sent_map(|m| m.clear());
