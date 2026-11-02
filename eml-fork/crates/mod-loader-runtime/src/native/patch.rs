@@ -544,6 +544,98 @@ fn add_everywhere_area(world: usize) {
     }
 }
 
+static QUERY_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
+static QUERY_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+extern "win64" fn note_query_world(world: usize) {
+    let calls = QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+    if !LIVE.client_build_anywhere() || world == 0 {
+        return;
+    }
+    if calls % 45 == 0 {
+        if QUERY_LOGGED.fetch_add(1, Ordering::Relaxed) < 2 {
+            let head = super::spawn_probe::read_bytes(world + signatures::BUILD_ZONES_AT, 24).unwrap_or_default();
+            if head.len() == 24 {
+                super::spawner::log(&format!(
+                    "build anywhere: world {world:#x} has {} building areas (capacity {})",
+                    super::spawn_probe::u64_at(&head, 8),
+                    super::spawn_probe::u64_at(&head, 16)
+                ));
+            }
+        }
+        add_everywhere_area(world);
+    }
+}
+
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_query() {
+    core::arch::naked_asm!(
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "sub rsp, 0x88",
+        "movups [rsp + 0x20], xmm0",
+        "movups [rsp + 0x30], xmm1",
+        "movups [rsp + 0x40], xmm2",
+        "movups [rsp + 0x50], xmm3",
+        "movups [rsp + 0x60], xmm4",
+        "movups [rsp + 0x70], xmm5",
+        "mov rcx, rdx",
+        "call {f}",
+        "movups xmm0, [rsp + 0x20]",
+        "movups xmm1, [rsp + 0x30]",
+        "movups xmm2, [rsp + 0x40]",
+        "movups xmm3, [rsp + 0x50]",
+        "movups xmm4, [rsp + 0x60]",
+        "movups xmm5, [rsp + 0x70]",
+        "add rsp, 0x88",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
+        "jmp qword ptr [rip + {t}]",
+        f = sym note_query_world,
+        t = sym QUERY_TRAMPOLINE,
+    );
+}
+
+fn install_build_zones_query(sections: &[&'static [u8]]) {
+    let target = match find_unique(sections, &signatures::BUILD_ZONES_QUERY) {
+        Ok(addr) => addr,
+        Err(count) => {
+            super::spawner::log(&format!("build anywhere: building-area query matched {count} times"));
+            return;
+        }
+    };
+    let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+    if page.is_null() {
+        return;
+    }
+    let displaced = signatures::BUILD_ZONES_QUERY_DISPLACED;
+    unsafe {
+        std::ptr::copy_nonoverlapping(target, page, displaced);
+        let tail = page.add(displaced);
+        tail.write(0xFF);
+        tail.add(1).write(0x25);
+        tail.add(2).cast::<u32>().write_unaligned(0);
+        tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+    }
+    QUERY_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
+    match unsafe { write_jump(target, stub_query as usize) } {
+        Ok(()) => super::spawner::log("build anywhere: area query watched"),
+        Err(code) => {
+            QUERY_TRAMPOLINE.store(0, Ordering::SeqCst);
+            super::spawner::log(&format!("build anywhere: area query VirtualProtect failed ({code})"));
+        }
+    }
+}
+
 extern "win64" fn hook_build_zones_set(world: usize, zones: usize) {
     let original = ZONES_TRAMPOLINE.load(Ordering::SeqCst);
     if original == 0 {
@@ -551,6 +643,9 @@ extern "win64" fn hook_build_zones_set(world: usize, zones: usize) {
     }
     let call: extern "win64" fn(usize, usize) = unsafe { std::mem::transmute(original) };
     call(world, zones);
+    if ZONES_LOGGED.load(Ordering::Relaxed) < 4 {
+        super::spawner::log(&format!("build anywhere: area setter called for world {world:#x}"));
+    }
     if LIVE.client_build_anywhere() {
         add_everywhere_area(world);
     }
@@ -582,6 +677,7 @@ fn install_build_zones(sections: &[&'static [u8]]) {
         tail.add(2).cast::<u32>().write_unaligned(0);
         tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
     }
+    install_build_zones_query(sections);
     ZONES_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
     match unsafe { write_jump(target, hook_build_zones_set as usize) } {
         Ok(()) => super::spawner::log("build anywhere ready: the hammer works away from altars"),
