@@ -1285,6 +1285,16 @@ fn component_data(entries: &[u8], count: usize, hash: u32, size: usize) -> Optio
     None
 }
 
+pub fn tick() {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let manager = SERVER_MGR.load(Ordering::Relaxed);
+    if manager != 0 {
+        before(manager, 1);
+    }
+}
+
 pub fn before(manager: usize, edx: u32) {
     if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() {
         return;

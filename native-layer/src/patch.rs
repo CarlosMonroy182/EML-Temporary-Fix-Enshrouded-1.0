@@ -395,6 +395,7 @@ unsafe extern "win64" fn stub_pump() {
 }
 
 extern "win64" fn hook_pump() {
+    super::spawner::tick();
     super::vfx::server_tick();
     super::veil_beam::tick();
 }
@@ -515,6 +516,7 @@ fn install_pay_costs(sections: &[&'static [u8]]) {
 
 pub(super) static ZONES_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static ZONES_LOGGED: AtomicU64 = AtomicU64::new(0);
+static SETTER_LOGGED: AtomicU64 = AtomicU64::new(0);
 static ZONES_AT: AtomicUsize = AtomicUsize::new(0);
 
 fn zones_offset_from_setter(code: &[u8]) -> Option<usize> {
@@ -660,7 +662,7 @@ extern "win64" fn hook_build_zones_set(world: usize, zones: usize) {
     }
     let call: extern "win64" fn(usize, usize) = unsafe { std::mem::transmute(original) };
     call(world, zones);
-    if ZONES_LOGGED.load(Ordering::Relaxed) < 4 {
+    if SETTER_LOGGED.fetch_add(1, Ordering::Relaxed) < 2 {
         super::spawner::log(&format!("build anywhere: area setter called for world {world:#x}"));
     }
     if LIVE.client_build_anywhere() {
