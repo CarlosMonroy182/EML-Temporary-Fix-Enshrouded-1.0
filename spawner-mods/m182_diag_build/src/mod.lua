@@ -120,7 +120,47 @@ local function patch_doors()
     print(string.format("%s player doors that need the building permission: %d, crafting stations: %d", TAG, locked, stations))
 end
 
+local function patch_dismantle()
+    local placed = placed_entities()
+    local templates = try(function() return game.assets.get_resources_by_type("keen::ecs::TemplateResource") end)
+    if type(templates) ~= "table" then return end
+    local donor
+    local changed, added = 0, 0
+    for _, resource in ipairs(templates) do
+        pcall(function()
+            for _, c in ipairs(resource.data.components) do
+                if tostring(c.type) == "keen::ecs::DismantleOverride" then
+                    local d = c.value or c.data or c
+                    if donor == nil and d.overrideMethod == false then donor = c end
+                    if d.ignoreBuildZoneChecks ~= true then
+                        d.ignoreBuildZoneChecks = true
+                        changed = changed + 1
+                    end
+                end
+            end
+        end)
+    end
+    if donor == nil then
+        print(TAG .. " dismantle source not found")
+        return
+    end
+    for _, resource in ipairs(templates) do
+        pcall(function()
+            if not placed[tostring(resource.guid):lower()] then return end
+            for _, c in ipairs(resource.data.components) do
+                if tostring(c.type) == "keen::ecs::DismantleOverride" then return end
+            end
+            table.insert(resource.data.components, donor)
+            added = added + 1
+        end)
+    end
+    print(string.format("%s dismantling outside building areas: %d pieces changed, %d added", TAG, changed, added))
+end
+
 patch_items()
 if config.doors_need_permission ~= false then
     patch_doors()
+end
+if config.dismantle_anywhere ~= false then
+    patch_dismantle()
 end
