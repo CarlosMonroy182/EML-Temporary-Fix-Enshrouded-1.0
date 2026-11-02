@@ -77,6 +77,9 @@ pub fn start(dir: PathBuf) -> i32 {
     }
     let host = Host::new(Arc::new(Os));
     if let Ok(text) = std::fs::read_to_string(dir.join(remote::SETTINGS_FILE)) {
+        if let Some(name) = crate::profile::apply(&dir, &text) {
+            remote::note(&format!("profile: {name}"));
+        }
         crate::host::apply_panel_key(&text);
     }
     let pace = std::fs::read_to_string(dir.join(remote::SETTINGS_FILE)).map(|t| crate::host::Pace::from_settings(&t)).unwrap_or_default();

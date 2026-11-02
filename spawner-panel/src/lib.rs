@@ -7,6 +7,7 @@ mod events;
 mod icons;
 mod items;
 mod powers;
+pub mod profile;
 pub mod remote;
 mod server;
 pub mod remote_proto;
