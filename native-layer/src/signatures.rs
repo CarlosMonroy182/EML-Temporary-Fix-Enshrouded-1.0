@@ -112,7 +112,6 @@ pub static BUILD_ZONES_SET: [u8; 36] = [
 ];
 
 pub const BUILD_ZONES_SET_DISPLACED: usize = 15;
-pub const BUILD_ZONES_AT: usize = 0x1CF6E68;
 
 /// The client's building-area query (`rdx` is the world); the game calls it every frame.
 pub static BUILD_ZONES_QUERY: [u8; 23] = [

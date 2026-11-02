@@ -515,9 +515,26 @@ fn install_pay_costs(sections: &[&'static [u8]]) {
 
 pub(super) static ZONES_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static ZONES_LOGGED: AtomicU64 = AtomicU64::new(0);
+static ZONES_AT: AtomicUsize = AtomicUsize::new(0);
+
+fn zones_offset_from_setter(code: &[u8]) -> Option<usize> {
+    let end = code.len().checked_sub(14)?;
+    (0..=end).find_map(|i| {
+        if code[i..i + 3] != [0x48, 0x8B, 0x87] || code[i + 7..i + 10] != [0x48, 0x8D, 0xB7] {
+            return None;
+        }
+        let first = u32::from_le_bytes(code[i + 3..i + 7].try_into().ok()?) as usize;
+        let second = u32::from_le_bytes(code[i + 10..i + 14].try_into().ok()?) as usize;
+        (second >= 0x1000 && first == second + 0x10).then_some(second)
+    })
+}
 
 fn add_everywhere_area(world: usize) {
-    let array = world + signatures::BUILD_ZONES_AT;
+    let at = ZONES_AT.load(Ordering::Relaxed);
+    if at == 0 {
+        return;
+    }
+    let array = world + at;
     let Some(head) = super::spawn_probe::read_bytes(array, 24) else { return };
     let (data, count, capacity) = (super::spawn_probe::u64_at(&head, 0) as usize, super::spawn_probe::u64_at(&head, 8), super::spawn_probe::u64_at(&head, 16));
     if data == 0 || count >= capacity || count > 4096 {
@@ -555,7 +572,7 @@ extern "win64" fn note_query_world(world: usize) {
     }
     if calls % 45 == 0 {
         if QUERY_LOGGED.fetch_add(1, Ordering::Relaxed) < 2 {
-            let head = super::spawn_probe::read_bytes(world + signatures::BUILD_ZONES_AT, 24).unwrap_or_default();
+            let head = super::spawn_probe::read_bytes(world + ZONES_AT.load(Ordering::Relaxed), 24).unwrap_or_default();
             if head.len() == 24 {
                 super::spawner::log(&format!(
                     "build anywhere: world {world:#x} has {} building areas (capacity {})",
@@ -663,6 +680,12 @@ fn install_build_zones(sections: &[&'static [u8]]) {
             return;
         }
     };
+    let code = unsafe { std::slice::from_raw_parts(target as *const u8, 0x120) };
+    let Some(at) = zones_offset_from_setter(code) else {
+        super::spawner::log("build anywhere off: this game version keeps its building areas somewhere unknown");
+        return;
+    };
+    ZONES_AT.store(at, Ordering::SeqCst);
     let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
     if page.is_null() {
         super::spawner::log("build anywhere off: trampoline allocation failed");
@@ -882,5 +905,19 @@ fn executable_sections() -> Option<Vec<&'static [u8]>> {
             }
         }
         if sections.is_empty() { None } else { Some(sections) }
+    }
+}
+
+#[cfg(test)]
+mod zones_offset_tests {
+    use super::zones_offset_from_setter;
+
+    #[test]
+    fn offset_is_read_from_the_setter_code() {
+        let mut code = vec![0x90u8; 20];
+        code.extend_from_slice(&[0x48, 0x8B, 0x87, 0x78, 0x8A, 0x5F, 0x01, 0x48, 0x8D, 0xB7, 0x68, 0x8A, 0x5F, 0x01]);
+        code.extend_from_slice(&[0x90; 8]);
+        assert_eq!(zones_offset_from_setter(&code), Some(0x15F8A68));
+        assert_eq!(zones_offset_from_setter(&[0x90; 64]), None);
     }
 }
