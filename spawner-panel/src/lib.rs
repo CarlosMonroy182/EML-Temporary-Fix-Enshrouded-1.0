@@ -155,6 +155,7 @@ pub struct App {
     player_checked: Instant,
     here: Option<(social::Here, Instant)>,
     synced: bool,
+    confirmed: bool,
     icons: HashMap<String, Option<TextureHandle>>,
     status: Status,
     notice: String,
@@ -565,6 +566,7 @@ impl App {
             creature_drops: Vec::new(),
             here: None,
             synced: false,
+            confirmed: false,
             places,
             new_place: String::new(),
             icons: HashMap::new(),
@@ -593,9 +595,34 @@ impl App {
         app
     }
 
+    fn profile_gate(&mut self, ui: &mut egui::Ui) {
+        if !remote::active() || self.confirmed {
+            return;
+        }
+        let mut chosen: Option<String> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("PERFIL").color(BAD).size(14.5));
+            ui.label(RichText::new("Nada se envía al servidor hasta que confirmes el perfil de este servidor:").color(GOLD_DIM).size(14.5));
+            egui::ComboBox::from_id_salt("profile_gate").width(200.0).selected_text(self.profile.clone()).show_ui(ui, |ui| {
+                for name in &self.profiles {
+                    if ui.selectable_label(*name == self.profile, name).clicked() {
+                        chosen = Some(name.clone());
+                    }
+                }
+            });
+            if button(ui, "CONFIRMAR", Vec2::new(120.0, 24.0), true, true) {
+                self.confirmed = true;
+            }
+        });
+        if let Some(name) = chosen {
+            self.change_profile(&name);
+        }
+    }
+
     fn change_profile(&mut self, name: &str) {
         match profile::switch(&self.dir, name) {
             Ok(active) => {
+                remote::clear_queue();
                 remote::reload_sent();
                 self.social = social::SocialState::load(&self.dir);
                 self.spawners = spawners::load(&self.dir);
@@ -852,6 +879,7 @@ impl App {
                 self.social.request_roster(&dir);
             } else if !connected {
                 self.synced = false;
+                self.confirmed = false;
             }
         }
         ctx.request_repaint_after(Duration::from_millis(700));
@@ -893,6 +921,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.label(RichText::new("M182  ADMIN  PANEL").font(title_font(26.0)).color(GOLD));
                 self.server_strip(ui);
+                self.profile_gate(ui);
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !DONATE_URL.is_empty() && button(ui, "Paypal Donations Support", Vec2::new(250.0, 34.0), true, false) {
@@ -1363,6 +1392,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.tick(ctx);
+        remote::hold(remote::active() && !self.confirmed);
 
         egui::TopBottomPanel::top("header")
             .frame(egui::Frame::none().fill(LEATHER).inner_margin(egui::Margin::symmetric(20.0, 12.0)).stroke(Stroke::new(1.0_f32, BRONZE)))
@@ -1471,6 +1501,7 @@ mod tests {
             creature_drops: Vec::new(),
             here: None,
             synced: false,
+            confirmed: false,
             icons: HashMap::new(),
             status: Status::Idle,
             notice: String::new(),

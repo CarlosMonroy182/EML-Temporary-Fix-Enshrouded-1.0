@@ -73,6 +73,17 @@ struct State {
     status: Status,
 }
 
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(!cfg!(test));
+
+/// While held, nothing queued is typed into the server.
+pub fn hold(on: bool) {
+    HELD.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn held() -> bool {
+    HELD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn forced() -> bool {
@@ -389,6 +400,9 @@ const RETRY_PAUSE: Duration = Duration::from_millis(1500);
 fn worker() {
     loop {
         std::thread::sleep(Duration::from_millis(150));
+        if held() {
+            continue;
+        }
         let (job, typist) = {
             let mut s = state();
             if s.queue.is_empty() || s.typist.is_none() {
@@ -458,6 +472,7 @@ pub fn reset_for_tests() {
     s.hosting = None;
     s.settings = Settings { enabled: false, key: String::new(), limit: DEFAULT_LIMIT };
     s.status = Status::default();
+    HELD.store(false, std::sync::atomic::Ordering::Relaxed);
     *SENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Default::default());
 }
 
