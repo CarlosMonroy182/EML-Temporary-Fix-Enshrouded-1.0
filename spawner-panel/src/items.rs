@@ -67,6 +67,8 @@ pub const BALANCE_INTEGER: &[&str] = &[
     "playerLevelCap",
     "hookShotCostBase",
     "maximumAnimalsInWorld",
+    "stackFactor",
+    "altarFactor",
 ];
 
 pub fn balance_is_integer(key: &str) -> bool {
@@ -105,6 +107,8 @@ pub const BALANCE_LABELS: &[(&str, &str)] = &[
     ("powerCreepWeapon", "Escalado de poder del arma"),
     ("itemLevelCap", "Nivel máximo de objeto"),
     ("playerLevelCap", "Nivel máximo del jugador"),
+    ("stackFactor", "Pilas de objetos: multiplicador (1 = normal)"),
+    ("altarFactor", "Altares de llama permitidos: multiplicador (1 = normal)"),
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -374,6 +378,8 @@ pub fn load_generic_pickup(dir: &Path) -> String {
 /// whatever a patched game file contained, so the exported values cannot be trusted for these two.
 pub const FREE_SKILLS_KEY: &str = "freeSkills";
 
+pub const MULTIPLIER_KEYS: [&str; 2] = ["stackFactor", "altarFactor"];
+
 pub const VANILLA_CAPS: [(&str, f64); 2] = [("itemLevelCap", 55.0), ("playerLevelCap", 50.0)];
 
 pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
@@ -389,6 +395,9 @@ pub fn load_balance(dir: &Path) -> BTreeMap<String, f64> {
     }
     for (key, value) in VANILLA_CAPS {
         out.insert(key.to_string(), value);
+    }
+    for key in MULTIPLIER_KEYS {
+        out.insert(key.to_string(), 1.0);
     }
     out
 }
@@ -608,9 +617,16 @@ for _, o in pairs(OVERRIDES) do
 end
 local FREE_SKILLS = BALANCE["freeSkills"] == 1
 BALANCE["freeSkills"] = nil
+local STACK = tonumber(BALANCE["stackFactor"]) or 1
+local ALTAR = tonumber(BALANCE["altarFactor"]) or 1
+BALANCE["stackFactor"] = nil
+BALANCE["altarFactor"] = nil
+if STACK < 1 then STACK = 1 end
+if ALTAR < 1 then ALTAR = 1 end
 local WIDEN = tonumber(BALANCE["itemLevelCap"]) or 0
 if WIDEN <= 55 then WIDEN = 0 end
-if next(OVERRIDES) == nil and next(LEVELS) == nil and next(BALANCE) == nil and not FREE_SKILLS and WIDEN == 0 then
+print(string.format("[m182-item-stats] data: itemLevelCap=%s playerLevelCap=%s stackFactor=%s altarFactor=%s", tostring(BALANCE["itemLevelCap"]), tostring(BALANCE["playerLevelCap"]), tostring(STACK), tostring(ALTAR)))
+if next(OVERRIDES) == nil and next(LEVELS) == nil and next(BALANCE) == nil and not FREE_SKILLS and WIDEN == 0 and STACK == 1 and ALTAR == 1 then
     print("[m182-item-stats] no item settings saved, nothing to apply")
     do return end
 end
@@ -649,6 +665,12 @@ end
 
 local applied, failed = 0, 0
 print("[m182-item-stats] start")
+
+local function join(t, n)
+    local out = {}
+    for i = 1, n do out[i] = tostring(t[i]) end
+    return table.concat(out, ",")
+end
 
 local function unsigned(id)
     if type(id) ~= "number" then return nil end
@@ -692,6 +714,7 @@ end
 local found = {}
 local levelsDone = {}
 local widened = 0
+local stacked = 0
 local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
 if items ~= nil then
     pcall(function()
@@ -700,6 +723,13 @@ if items ~= nil then
                 local data = resource.data
                 local id = unsigned(hash_of(data.itemId))
                 local range = id and LEVELS[id]
+                if STACK > 1 then
+                    local ms = try(function() return data.maxStackSize end)
+                    if type(ms) == "number" and ms > 1 then
+                        local want = math.min(65535, math.floor(ms * STACK + 0.5))
+                        if want > ms and put(data, "maxStackSize", want) then stacked = stacked + 1 end
+                    end
+                end
                 if WIDEN > 0 then
                     local wspan = try(function() return data.itemLevelRange end)
                     local wlo = try(function() return wspan.minLevel end)
@@ -744,7 +774,7 @@ for id in pairs(LEVELS) do
     if levelsDone[id] == nil then print(string.format("[m182-item-stats] item %d (level range) not found in the game data", id)) end
 end
 
-print(string.format("[m182-item-stats] items done applied=%d failed=%d widened=%d", applied, failed, widened))
+print(string.format("[m182-item-stats] items done applied=%d failed=%d widened=%d stacked=%d", applied, failed, widened, stacked))
 
 if FREE_SKILLS then
     local nodes, freed = 0, 0
@@ -765,6 +795,24 @@ end
 local tables = try(function() return game.assets.get_resources_by_type("keen::BalancingTable") end)
 if type(tables) == "table" and #tables > 0 then
     local d = tables[1].data
+    if ALTAR > 1 then
+        local list = try(function() return d.altarsPerFlameLevel end)
+        local before, after = {}, {}
+        if list ~= nil then
+            local count = 0
+            for i, v in ipairs(list) do
+                count = count + 1
+                before[i] = v
+                if type(v) == "number" and v > 0 then
+                    put(list, i, math.min(255, math.floor(v * ALTAR + 0.5)))
+                end
+                after[i] = try(function() return list[i] end)
+            end
+            print(string.format("[m182-item-stats] altars per flame level: %d entries, before {%s} after {%s}", count, join(before, count), join(after, count)))
+        else
+            print("[m182-item-stats] altars per flame level: field not found")
+        end
+    end
     for key, value in pairs(BALANCE) do
         local rarity = string.match(key, "^rarityDurabilityMod%.(%a+)$")
         local ok
@@ -1359,6 +1407,20 @@ mod tests {
         let lua = lua_data(&BTreeMap::new(), &o, &Levels::new());
         assert!(lua.contains("[\"itemLevelCap\"]=86,"));
         assert!(lua_code().contains("INTEGER_KEYS"));
+    }
+
+    #[test]
+    fn stack_and_altar_multipliers_travel_with_the_data_and_are_off_by_default() {
+        let mut st = ItemsState::default();
+        st.balance_base = load_balance(std::path::Path::new("/nonexistent"));
+        st.balance = st.balance_base.clone();
+        let quiet = st.balance_overrides();
+        assert!(!quiet.contains_key("stackFactor") && !quiet.contains_key("altarFactor"));
+        st.balance.insert("stackFactor".into(), 5.0);
+        st.balance.insert("altarFactor".into(), 5.0);
+        let lua = lua_data(&BTreeMap::new(), &st.balance_overrides(), &Levels::new());
+        assert!(lua.contains("[\"stackFactor\"]=5,") && lua.contains("[\"altarFactor\"]=5,"), "{lua}");
+        assert!(lua_code().contains("maxStackSize") && lua_code().contains("altarsPerFlameLevel"));
     }
 
     #[test]
