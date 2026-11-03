@@ -94,11 +94,16 @@ local function patch_doors()
         return
     end
     local locked, stations = 0, 0
+    local extra, untoggled = {}, {}
     for _, resource in ipairs(templates) do
         pcall(function()
             local name = tostring(resource.data.name)
-            local door = name:find("Door") and name:find("Crafted") and not name:find("DEPRECATED")
-            local station = config.stations_need_permission ~= false and placed[tostring(resource.guid):lower()] and not name:find("FlameAltar")
+            local lower = name:lower()
+            local buildable = placed[tostring(resource.guid):lower()]
+            local crafted = name:find("Door") and name:find("Crafted")
+            local doorlike = buildable and (lower:find("door") or lower:find("gate") or lower:find("portcullis")) and not lower:find("frame")
+            local door = (crafted or doorlike) and not name:find("DEPRECATED")
+            local station = config.stations_need_permission ~= false and buildable and not door and not name:find("FlameAltar")
             if not door and not station then return end
             local toggle, lock, craft = false, false, false
             for _, c in ipairs(resource.data.components) do
@@ -111,6 +116,9 @@ local function patch_doors()
             if door and toggle then
                 table.insert(resource.data.components, donor)
                 locked = locked + 1
+                if not crafted then table.insert(extra, name) end
+            elseif door then
+                table.insert(untoggled, name)
             elseif station and craft then
                 table.insert(resource.data.components, donor)
                 stations = stations + 1
@@ -118,6 +126,8 @@ local function patch_doors()
         end)
     end
     print(string.format("%s player doors that need the building permission: %d, crafting stations: %d", TAG, locked, stations))
+    if #extra > 0 then print(TAG .. " doors added from the building menu: " .. table.concat(extra, ", ")) end
+    if #untoggled > 0 then print(TAG .. " door pieces without an open/close interaction (unchanged): " .. table.concat(untoggled, ", ")) end
 end
 
 local function patch_dismantle()
