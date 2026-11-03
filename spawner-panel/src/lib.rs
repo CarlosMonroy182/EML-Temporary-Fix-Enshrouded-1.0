@@ -904,7 +904,8 @@ impl App {
                 }
             }
         }
-        for op in spawners::op_replace_all(&self.spawners, 4) {
+        let standing: Vec<_> = self.spawners.iter().filter(|s| !s.once).cloned().collect();
+        for op in spawners::op_replace_all(&standing, 4) {
             if remote::submit(spawners::OP_FILE, &op).is_ok() {
                 sent += 1;
             }
