@@ -1802,7 +1802,7 @@ fn spawn_now(manager: usize) {
         let angle = std::f64::consts::TAU * k as f64 / settings.count as f64;
         let dx = (radius * angle.cos() * METERS) as i64;
         let dz = (radius * angle.sin() * METERS) as i64;
-        let dy = (0.5 * METERS) as i64;
+        let dy = if delivery { 0 } else { (0.5 * METERS) as i64 };
 
         let mut transform = [0u8; TRANSFORM_SIZE];
         write_u64(&mut transform, 0, base.0.wrapping_add(dx) as u64);
