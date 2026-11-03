@@ -1802,7 +1802,7 @@ fn spawn_now(manager: usize) {
         let angle = std::f64::consts::TAU * k as f64 / settings.count as f64;
         let dx = (radius * angle.cos() * METERS) as i64;
         let dz = (radius * angle.sin() * METERS) as i64;
-        let dy = if delivery { 0 } else { (0.5 * METERS) as i64 };
+        let dy = (0.5 * METERS) as i64;
 
         let mut transform = [0u8; TRANSFORM_SIZE];
         write_u64(&mut transform, 0, base.0.wrapping_add(dx) as u64);
@@ -3357,6 +3357,136 @@ fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
         }
     }
     log(&format!("delivery: item {} requested; the pickup entity {id} was created", g.item));
+}
+
+pub fn start_data_patch() {
+    let Ok(dir) = std::env::current_dir() else { return };
+    if let Err(e) = std::thread::Builder::new().name("m182-datapatch".into()).spawn(move || data_patch_worker(dir)) {
+        log(&format!("data patch: could not start the worker: {e}"));
+    }
+}
+
+fn data_patch_worker(dir: std::path::PathBuf) {
+    use super::datapatch as dp;
+    let csv_path = dir.join("export").join("m182_items.csv");
+    let mut waited = 0u32;
+    let csv = loop {
+        if let Ok(t) = std::fs::read_to_string(&csv_path) {
+            if t.lines().count() > 100 {
+                break t;
+            }
+        }
+        waited += 1;
+        if waited > 120 {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    };
+    let json = std::fs::read_to_string(dir.join("m182_item_stats.json")).ok();
+    let lua = std::fs::read_to_string(dir.join("mods").join("zz_m182_item_stats").join("src").join("m182_data.lua")).ok();
+    let (stack_factor, altar_factor) = dp::factors(json.as_deref(), lua.as_deref());
+    if stack_factor <= 1.0 && altar_factor <= 1.0 {
+        return;
+    }
+    let items = dp::parse_items(&csv);
+    if items.is_empty() {
+        log("data patch: the item list has no stackable items");
+        return;
+    }
+    let index = dp::GuidIndex::new(&items);
+    let own = (items.as_ptr() as usize, items.as_ptr() as usize + items.len() * std::mem::size_of::<dp::ItemRef>());
+    let scaled = dp::scaled_altars(altar_factor);
+    log(&format!("data patch: {} stackable items, stack factor {stack_factor}, altar factor {altar_factor}", items.len()));
+
+    let delays = [15u64, 30, 45, 60, 90, 120, 180];
+    let mut pass = 0usize;
+    loop {
+        let wait = delays.get(pass).copied().unwrap_or(600);
+        std::thread::sleep(Duration::from_secs(wait));
+        pass += 1;
+        let started = Instant::now();
+        let mut found: Vec<dp::Found> = Vec::new();
+        let (mut altars_vanilla, mut altars_scaled): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        for (start, end) in readable_regions() {
+            let mut at = start;
+            while at < end {
+                let len = (end - at).min(4 << 20);
+                let take = (len + 32).min(end - at);
+                if let Some(buf) = read_bytes(at, take) {
+                    if stack_factor > 1.0 {
+                        index.scan(&buf, at, &items, &mut found);
+                    }
+                    if altar_factor > 1.0 {
+                        dp::altar_runs(&buf, at, &dp::VANILLA_ALTARS, &scaled, &mut altars_vanilla, &mut altars_scaled);
+                    }
+                }
+                at += len;
+            }
+        }
+        found.retain(|f| f.addr < own.0 || f.addr >= own.1);
+        found.sort_by_key(|f| (f.addr, f.item));
+        found.dedup();
+        altars_vanilla.sort_unstable();
+        altars_vanilla.dedup();
+        altars_scaled.sort_unstable();
+        altars_scaled.dedup();
+
+        if altar_factor > 1.0 {
+            let mut patched = 0usize;
+            for addr in &altars_vanilla {
+                if write_bytes(*addr, &scaled) {
+                    patched += 1;
+                }
+            }
+            log(&format!(
+                "data patch: pass {pass}: altar tables in memory: {} vanilla (patched {patched}), {} already scaled",
+                altars_vanilla.len(),
+                altars_scaled.len()
+            ));
+        }
+
+        if stack_factor > 1.0 {
+            if found.is_empty() {
+                log(&format!("data patch: pass {pass}: no item record found in memory ({} ms)", started.elapsed().as_millis()));
+            } else {
+                let reader = |a: usize, n: usize| read_bytes(a, n);
+                match dp::vote_offset(&found, &items, &reader) {
+                    None => {
+                        log(&format!("data patch: pass {pass}: {} guid copies, no common stack field", found.len()));
+                        for f in found.iter().take(3) {
+                            if let Some(w) = read_bytes(f.addr.saturating_sub(dp::WINDOW_BEFORE), dp::WINDOW_LEN) {
+                                log(&format!("data patch: sample item {} stack {} at {:#x}: {}", items[f.item].id, items[f.item].stack, f.addr, hex(&w)));
+                            }
+                        }
+                    }
+                    Some((offset, votes, sampled)) => {
+                        let (mut vanilla, mut already, mut other, mut patched) = (0usize, 0usize, 0usize, 0usize);
+                        for f in &found {
+                            let at = (f.addr as isize + offset) as usize;
+                            let Some(b) = read_bytes(at, 2) else { continue };
+                            let value = u16::from_le_bytes([b[0], b[1]]);
+                            let item = &items[f.item];
+                            match dp::classify(value, item.stack, stack_factor) {
+                                0 => {
+                                    vanilla += 1;
+                                    if write_bytes(at, &dp::scaled_stack(item.stack, stack_factor).to_le_bytes()) {
+                                        patched += 1;
+                                    }
+                                }
+                                1 => already += 1,
+                                _ => other += 1,
+                            }
+                        }
+                        log(&format!(
+                            "data patch: pass {pass}: stack field at {offset:+} ({votes} of {sampled} sampled); {} copies: {vanilla} vanilla (patched {patched}), {already} already scaled, {other} other ({} ms)",
+                            found.len(),
+                            started.elapsed().as_millis()
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn data_regions() -> Vec<(usize, usize)> {
