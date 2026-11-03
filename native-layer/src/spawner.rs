@@ -3321,7 +3321,21 @@ pub fn new_power_state() -> PowerState {
 }
 
 
+fn watch_collection(manager: usize, id: u32, item: u32) {
+    let _ = std::thread::Builder::new().name("m182-pickup-watch".into()).spawn(move || {
+        for second in 1..=6u32 {
+            std::thread::sleep(Duration::from_secs(1));
+            if find_record(manager, id).is_none() {
+                log(&format!("delivery: item {item} was collected after {second} s (the pickup entity {id} is gone)"));
+                return;
+            }
+        }
+        log(&format!("delivery: item {item} is still on the ground after 6 s (the pickup entity {id} was not collected)"));
+    });
+}
+
 fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
+    watch_collection(manager, id, g.item);
     let Some((_, _, slots)) = entity_layout(manager, id) else {
         log(&format!("delivery: entity {id} not readable"));
         return;

@@ -811,7 +811,7 @@ impl App {
                 request["damage"] = json!(self.damage);
             } else {
                 request["count"] = json!(1);
-                request["template"] = json!(self.items.generic_pickup.clone());
+                request["template"] = json!(if self.items.direct { items::DIRECT_PICKUP.to_string() } else { self.items.generic_pickup.clone() });
                 if let Some(item) = index_item(&self.items.rows, index) {
                     request["item"] = json!(item.id);
                     request["item_guid"] = json!(item.guid);
@@ -1748,6 +1748,29 @@ mod tests {
         assert!(req.get("object").is_none());
         assert!(req.get("forward").is_none());
         assert!(req.get("at").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn direct_delivery_uses_the_touch_pickup_template() {
+        let dir = temp_dir("direct_delivery");
+        let csv = "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut,pierce,blunt,fire,ice,fog,lightning,healing,poison,wood,stone,metal,explosion,dmg_set,ar_physical,ar_blunt,ar_pierce,ar_cut,ar_magical,ar_fire,ar_ice,ar_fog,ar_lightning,ar_set\n\
+            55,res-2,Old_Thing,Old Thing,Materials,Common,50,,1,1,,pick-guid,LootPickup_Old,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n";
+        std::fs::create_dir_all(dir.join("export")).unwrap();
+        std::fs::write(dir.join("export").join("m182_items.csv"), csv).unwrap();
+        let (cat, rows) = load_item_catalog(&dir);
+        let mut app = app_in(&dir, Vec::new());
+        app.item_cat = cat;
+        app.items.rows = rows;
+        app.item_cat.selected = Some(0);
+        app.items.level = 1;
+        app.items.amount = 5;
+        app.items.direct = true;
+        app.target = Target::Place;
+        app.spawn(Mode::Items);
+        let req = read_request(&dir);
+        assert_eq!(req["template"], items::DIRECT_PICKUP);
+        assert_eq!(req["item_amount"], 5);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -141,6 +141,8 @@ EN = {
 "NIVEL DEL ÍTEM": "ITEM LEVEL",
 "RAREZA": "RARITY",
 "CANTIDAD": "AMOUNT",
+"Entregar directo al inventario": "Deliver straight to the inventory",
+"El objeto se recoge solo al aparecer junto a ti. Si no está marcado, cae al suelo.": "The item is picked up by itself when it appears next to you. When unchecked it drops on the ground.",
 "MODIFICADORES DE STATS": "STAT MODIFIERS",
 "Daño del arma": "Weapon damage",
 "Resistencias de la armadura": "Armor resistances",

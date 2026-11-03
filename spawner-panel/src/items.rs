@@ -359,6 +359,7 @@ pub fn load_items(dir: &Path) -> Result<Vec<Item>, String> {
 }
 
 pub const GENERIC_PICKUP: &str = "c15a5c9d-4956-49ff-9d72-9f522229cf1c";
+pub const DIRECT_PICKUP: &str = "45cc62a2-e527-4e09-ab94-567d683dc680";
 
 pub fn load_generic_pickup(dir: &Path) -> String {
     if let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_items_diag.txt")) {
@@ -454,6 +455,7 @@ pub struct ItemsState {
     pub notice: String,
     pub outbox: VecDeque<(Instant, Value)>,
     pub generic_pickup: String,
+    pub direct: bool,
     pub names_applied: bool,
     pub sent: BTreeMap<u32, Edit>,
     pub dirty: BTreeMap<u32, Instant>,
@@ -1133,6 +1135,7 @@ impl App {
         } else {
             self.items.amount = 1;
         }
+        ui.checkbox(&mut self.items.direct, "Entregar directo al inventario").on_hover_text("El objeto se recoge solo al aparecer junto a ti. Si no está marcado, cae al suelo.");
         divider(ui);
         self.item_stats_ui(ui, index);
         if !self.items.notice.is_empty() {
