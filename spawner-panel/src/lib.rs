@@ -509,6 +509,7 @@ impl App {
             rarity: 0,
             amount: 1,
             generic_pickup: items::load_generic_pickup(&dir),
+            direct: true,
             ..Default::default()
         };
         if let Ok(log) = std::fs::read_to_string(dir.join("m182_spawner.log")) {
@@ -1735,6 +1736,7 @@ mod tests {
         app.items.rarity = 4;
         app.items.amount = 3;
         app.items.generic_pickup = "c15a5c9d-4956-49ff-9d72-9f522229cf1c".into();
+        app.items.direct = false;
         app.target = Target::Place;
         app.spawn(Mode::Items);
         let req = read_request(&dir);
