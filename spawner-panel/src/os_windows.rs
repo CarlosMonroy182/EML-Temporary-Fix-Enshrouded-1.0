@@ -10,6 +10,7 @@ use crate::WINDOW_TITLE;
 #[link(name = "user32")]
 extern "system" {
     fn GetAsyncKeyState(vk: i32) -> i16;
+    fn GetKeyState(vk: i32) -> i16;
     fn GetForegroundWindow() -> usize;
     fn GetWindowThreadProcessId(hwnd: usize, pid: *mut u32) -> u32;
     fn FindWindowW(class: *const u16, title: *const u16) -> usize;
@@ -91,11 +92,20 @@ fn send(inputs: &[Input]) {
     }
 }
 
-fn keys_for(unit: u16, out: &mut Vec<Input>) {
+const VK_CAPITAL: i32 = 0x14;
+
+fn caps_lock_on() -> bool {
+    unsafe { GetKeyState(VK_CAPITAL) & 1 == 1 }
+}
+
+fn keys_for(unit: u16, caps: bool, out: &mut Vec<Input>) {
     if unit < 0x80 {
         let found = unsafe { VkKeyScanW(unit) };
         if found != -1 {
-            let (vk, state) = ((found & 0xFF) as u32, ((found >> 8) & 0xFF) as u8);
+            let (vk, mut state) = ((found & 0xFF) as u32, ((found >> 8) & 0xFF) as u8);
+            if caps && (unit as u8).is_ascii_alphabetic() {
+                state ^= 1;
+            }
             let scan = unsafe { MapVirtualKeyW(vk, 0) } as u16;
             if scan != 0 && state & !1 == 0 {
                 if state & 1 == 1 {
@@ -185,15 +195,16 @@ impl Sys for Os {
 
     fn units(&self, units: &[u16]) {
         let mut batch: Vec<Input> = Vec::with_capacity(units.len() * 4);
+        let caps = caps_lock_on();
         for unit in units {
-            keys_for(*unit, &mut batch);
+            keys_for(*unit, caps, &mut batch);
         }
         send(&batch);
     }
 
     fn unit(&self, unit: u16) {
         let mut batch = Vec::with_capacity(4);
-        keys_for(unit, &mut batch);
+        keys_for(unit, caps_lock_on(), &mut batch);
         send(&batch);
     }
 

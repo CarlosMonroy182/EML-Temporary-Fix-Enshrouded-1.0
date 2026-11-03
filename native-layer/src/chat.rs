@@ -133,11 +133,30 @@ fn same(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Caps Lock on the sender's PC flips the case of every letter it types (digits and symbols stay).
+fn swap_case(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else if c.is_ascii_uppercase() { c.to_ascii_lowercase() } else { c })
+        .collect()
+}
+
 pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, client: u32, dir: &Path) -> Verdict {
     if !valid_key(key) || !has_prefix(text) {
         return Verdict::Pass;
     }
     let t = text.trim_start();
+    let (_, rest) = next_token(t);
+    let (given, _) = next_token(rest);
+    if !same(given, key) && key.chars().any(|c| c.is_ascii_alphabetic()) && same(given, &swap_case(key)) {
+        return match handle_checked(session, now, &swap_case(t), key, client, dir) {
+            Verdict::Swallowed(line) => Verdict::Swallowed(format!("{line} [typed with Caps Lock on: letters flipped back]")),
+            other => other,
+        };
+    }
+    handle_checked(session, now, t, key, client, dir)
+}
+
+fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, client: u32, dir: &Path) -> Verdict {
     let (_, rest) = next_token(t);
     let (given, rest) = next_token(rest);
 
@@ -147,7 +166,13 @@ pub fn handle_with(session: &mut Session, now: Instant, text: &str, key: &str, c
     }
     if !same(given, key) {
         session.failures.push(now);
-        return Verdict::Swallowed(format!("chat: client {client} used a wrong key"));
+        return Verdict::Swallowed(format!(
+            "chat: client {client} used a wrong key ({} characters, the server key has {}; the first {} match; same letters ignoring case: {})",
+            given.chars().count(),
+            key.chars().count(),
+            given.chars().zip(key.chars()).take_while(|(a, b)| a == b).count(),
+            given.eq_ignore_ascii_case(key)
+        ));
     }
 
     session.buffers.retain(|_, (_, at)| now.duration_since(*at) < BUFFER_LIFE);
@@ -698,6 +723,21 @@ mod tests {
         let mut s = Session::default();
         assert_eq!(handle_with(&mut s, Instant::now(), "/m182 x ping", "", 1, &dir), Verdict::Pass);
         assert_eq!(handle_with(&mut s, Instant::now(), "/m182 abc ping", "abc", 1, &dir), Verdict::Pass);
+    }
+
+    #[test]
+    fn lines_typed_with_caps_lock_on_are_flipped_back() {
+        let dir = scratch("capslock");
+        let mut s = Session::default();
+        let body = r#"{"zones":[{"name":"Spawn Base","x":1,"z":2,"r":30}]}"#;
+        let typed = swap_case(&format!("!m182 secret-key set m182_zones.json {body}"));
+        let Verdict::Swallowed(line) = run(&mut s, &dir, &typed) else { panic!() };
+        assert!(line.contains("Caps Lock"), "{line}");
+        assert_eq!(std::fs::read_to_string(dir.join("m182_zones.json")).unwrap(), body);
+        assert!(s.failures.is_empty());
+        assert_eq!(run(&mut s, &dir, &swap_case("!m182 secret-key players 41")), Verdict::Roster(41));
+        let Verdict::Swallowed(line) = run(&mut s, &dir, "!m182 SECRET-kEY ping") else { panic!() };
+        assert!(line.contains("wrong key") && !line.contains("secret"), "{line}");
     }
 
     #[test]

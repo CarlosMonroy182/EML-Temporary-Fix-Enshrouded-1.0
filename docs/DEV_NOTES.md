@@ -57,3 +57,8 @@ The server's player-list answer now ends with ` ^<entity>@x,y,z`: the entity of 
 - the EML 0.2.0 loader fixes (commit e36ae2f: no crash/errors on close; markers "KFCWriter is no longer available", "Failed to apply resource")
 - the M182 VFX module.
 The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 VFX" fails the build if a marker is missing.
+
+## Caps Lock on the panel user's PC (GPortal client report, Nov 3)
+- Symptom: after some minutes every panel line is rejected with `chat: client N used a wrong key`, then `ignored (too many wrong keys)`; nothing works (items, teams, chests), though zones already applied keep working. Keys in both m182_native.json files were identical and the server config was not reloaded in between.
+- Cause: the panel types real scan codes with Shift taken from `VkKeyScanW`; with Caps Lock on, every letter arrives with its case flipped. The prefix (`!M182`) and command names are compared ignoring case, the key is not, so only the key fails.
+- Fix: the panel inverts Shift for letters when Caps Lock is on (`caps_lock_on()` in os_windows.rs); the server also accepts a line whose key matches with all letters flipped and flips the whole line back (log suffix `[typed with Caps Lock on: letters flipped back]`). The wrong-key log line now gives the received length and matching prefix length without revealing the key.
