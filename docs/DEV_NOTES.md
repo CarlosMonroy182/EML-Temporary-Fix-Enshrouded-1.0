@@ -58,7 +58,24 @@ The server's player-list answer now ends with ` ^<entity>@x,y,z`: the entity of 
 - the M182 VFX module.
 The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 VFX" fails the build if a marker is missing.
 
-## Caps Lock on the panel user's PC (GPortal client report, Nov 3)
+## Caps Lock on the panel user's PC (GPortal client report, Nov 3, confirmed fixed in the game)
 - Symptom: after some minutes every panel line is rejected with `chat: client N used a wrong key`, then `ignored (too many wrong keys)`; nothing works (items, teams, chests), though zones already applied keep working. Keys in both m182_native.json files were identical and the server config was not reloaded in between.
 - Cause: the panel types real scan codes with Shift taken from `VkKeyScanW`; with Caps Lock on, every letter arrives with its case flipped. The prefix (`!M182`) and command names are compared ignoring case, the key is not, so only the key fails.
 - Fix: the panel inverts Shift for letters when Caps Lock is on (`caps_lock_on()` in os_windows.rs); the server also accepts a line whose key matches with all letters flipped and flips the whole line back (log suffix `[typed with Caps Lock on: letters flipped back]`). The wrong-key log line now gives the received length and matching prefix length without revealing the key.
+
+## Panel thinks the server has a file it rejected (Nov 3, confirmed)
+- `m182_sent.json` records a file as delivered once the game confirms the chat lines left, even if the server rejected them (wrong key, lockout). The panel then skips that file ("skipped ...: the server already has this exact content") and the server keeps the old copy.
+- Symptom seen: zone saved before its team existed (`0 owned bases`, `visitors=[]` for everyone) although the panel shows the zone with an owner team and "Base protegida".
+- Fix for the user: "Reenviar todo" / "Resend all" (forgets the record and sends powers, zones, teams, spawners, item data). Check `zones: N active (.., 1 owned bases)` and `is a visitor now` in the server log.
+- Not changed in code: zones/teams are not resent automatically on join (the server is the source of truth for teams changed by chat while the admin is away, and the same key is used on more than one server).
+
+## M182 Building (mods/m182_diag_build): doors and stations (Nov 3, confirmed)
+- Doors and crafting stations get an `InteractionLock` copied from `WaterDrain_ground_base_PLAYER`. That donor requires `CanEditBase`, so server groups with `canEditBase: false` (GPortal client group "Miembro") lost doors and stations everywhere, not only in protected bases.
+- Now every inserted lock is retargeted to `requiredPermission = {"CanAccessInventories"}` (config key `door_lock_permission`), the same permission chests use. Visitors of a protected base lose it through the permission hook (bits 2|4|8|0x10), team members and other groups keep it.
+- PlayerPermissions bits (from the game's types.json): CanKickBan 1, CanAccessInventories 2, CanEditBase 4, CanEditWorld 8, CanExtendBase 0x10, CanReceiveEXP 0x20.
+- Doors covered: the 23 `*Door*Crafted*` templates plus every template placed from the building menu whose name has door/gate/portcullis (not frames). World doors are not touched.
+- EML log lines: `door and station lock needs CanAccessInventories (lock source had {CanEditBase}, now {CanEditBase}; N locks changed ...)`, `doors added from the building menu: ...`, `door pieces without an open/close interaction (unchanged): ...`. If the source ever reads "now {CanAccessInventories}", the lock is shared and the water drain changed too.
+- Delivery for customers that already have the mod: only `mods/m182_diag_build/src/mod.lua` (never the config file), then restart the server.
+
+## GPortal hosting
+- GPortal runs the server natively on Windows (`D:\home\sid_...\enshrouded`), unlike Dathost (Wine). Same files and install steps; server groups and passwords live in `enshrouded_server.json` (`userGroups` with canKickBan/canAccessInventories/canEditWorld/canEditBase/canExtendBase).
