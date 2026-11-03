@@ -12,6 +12,8 @@ EN = {
 "{} × {} nv.{}": "{} × {} lv.{}",
 "Cada raid elige una plantilla al azar y la pone en un punto al azar dentro del radio de la zona, si hay un jugador a menos de 150 m. «Lanzar ahora» (en cada plantilla) la envía enseguida a las zonas elegidas. Borrar o desmarcar una plantilla no detiene los raids que ya están activos: pulsa «Aplicar los cambios» o «Detener todos los raids».": "Each raid picks a random template and puts it at a random point inside the zone radius, if a player is within 150 m. 'Launch now' (on each template) sends it right away to the chosen zones. Deleting or unticking a template does not stop the raids that are already active: press 'Apply the changes' or 'Stop all raids'.",
 "DETENER TODOS LOS RAIDS": "STOP ALL RAIDS",
+"{} raid(s) detenidos y borrados del servidor.": "{} raid(s) stopped and removed from the server.",
+"No quedan plantillas automáticas: {} raid(s) automáticos detenidos.": "No automatic templates left: {} automatic raid(s) stopped.",
 "No hay raids que detener.": "There are no raids to stop.",
 "Aplicar los cambios a los raids activos": "Apply the changes to the active raids",
 "APLICAR LOS CAMBIOS A LOS RAIDS ACTIVOS (hay cambios sin aplicar)": "APPLY THE CHANGES TO THE ACTIVE RAIDS (there are unapplied changes)",
