@@ -3443,7 +3443,8 @@ fn data_patch_worker(dir: std::path::PathBuf) {
     };
     let json = std::fs::read_to_string(dir.join("m182_item_stats.json")).ok();
     let lua = std::fs::read_to_string(dir.join("mods").join("zz_m182_item_stats").join("src").join("m182_data.lua")).ok();
-    let (stack_factor, altar_factor) = dp::factors(json.as_deref(), lua.as_deref());
+    let (stack_factor, _) = dp::factors(json.as_deref(), lua.as_deref());
+    let altar_factor = 1.0f64;
     if stack_factor <= 1.0 && altar_factor <= 1.0 {
         return;
     }

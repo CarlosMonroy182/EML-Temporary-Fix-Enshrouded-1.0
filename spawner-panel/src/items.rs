@@ -108,7 +108,6 @@ pub const BALANCE_LABELS: &[(&str, &str)] = &[
     ("itemLevelCap", "Nivel máximo de objeto"),
     ("playerLevelCap", "Nivel máximo del jugador"),
     ("stackFactor", "Pilas de objetos: multiplicador (1 = normal)"),
-    ("altarFactor", "Altares de llama permitidos: multiplicador (1 = normal)"),
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -379,7 +378,7 @@ pub fn load_generic_pickup(dir: &Path) -> String {
 /// whatever a patched game file contained, so the exported values cannot be trusted for these two.
 pub const FREE_SKILLS_KEY: &str = "freeSkills";
 
-pub const MULTIPLIER_KEYS: [&str; 2] = ["stackFactor", "altarFactor"];
+pub const MULTIPLIER_KEYS: [&str; 1] = ["stackFactor"];
 
 pub const VANILLA_CAPS: [(&str, f64); 2] = [("itemLevelCap", 55.0), ("playerLevelCap", 50.0)];
 
@@ -817,8 +816,15 @@ if type(tables) == "table" and #tables > 0 then
     end
     for key, value in pairs(BALANCE) do
         local rarity = string.match(key, "^rarityDurabilityMod%.(%a+)$")
-        local ok
-        if rarity then
+        local ok = false
+        print(string.format("[m182-item-stats] balance %s: checking", tostring(key)))
+        local current = try(function()
+            if rarity then return d.rarityDurabilityMod[rarity] end
+            return d[key]
+        end)
+        if type(current) ~= "number" then
+            print(string.format("[m182-item-stats] balance %s skipped: not a plain number field in this game version", tostring(key)))
+        elseif rarity then
             ok = put(d.rarityDurabilityMod, rarity, value)
         else
             ok = put(d, key, value)
@@ -1054,6 +1060,7 @@ impl ItemsState {
             .map(|(k, v)| (k.clone(), balance_normalize(k, *v)))
             .filter(|(k, v)| self.balance_base.get(k).map(|b| (b - *v).abs() > 1e-9).unwrap_or(false))
             .collect();
+        out.remove("altarFactor");
         for (key, vanilla) in VANILLA_CAPS {
             let value = self.balance.get(key).copied().unwrap_or(vanilla);
             out.insert(key.to_string(), balance_normalize(key, value));
@@ -1422,7 +1429,7 @@ mod tests {
         st.balance.insert("stackFactor".into(), 5.0);
         st.balance.insert("altarFactor".into(), 5.0);
         let lua = lua_data(&BTreeMap::new(), &st.balance_overrides(), &Levels::new());
-        assert!(lua.contains("[\"stackFactor\"]=5,") && lua.contains("[\"altarFactor\"]=5,"), "{lua}");
+        assert!(lua.contains("[\"stackFactor\"]=5,") && !lua.contains("altarFactor"), "{lua}");
         assert!(lua_code().contains("maxStackSize") && lua_code().contains("altarsPerFlameLevel"));
     }
 
