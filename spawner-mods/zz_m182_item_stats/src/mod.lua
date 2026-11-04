@@ -220,8 +220,15 @@ if type(tables) == "table" and #tables > 0 then
     end
     for key, value in pairs(BALANCE) do
         local rarity = string.match(key, "^rarityDurabilityMod%.(%a+)$")
-        local ok
-        if rarity then
+        local ok = false
+        print(string.format("[m182-item-stats] balance %s: checking", tostring(key)))
+        local current = try(function()
+            if rarity then return d.rarityDurabilityMod[rarity] end
+            return d[key]
+        end)
+        if type(current) ~= "number" then
+            print(string.format("[m182-item-stats] balance %s skipped: not a plain number field in this game version", tostring(key)))
+        elseif rarity then
             ok = put(d.rarityDurabilityMod, rarity, value)
         else
             ok = put(d, key, value)
