@@ -153,7 +153,6 @@ EN = {
 "PERFIL DEL SERVIDOR": "SERVER PROFILE",
 "PERFIL": "PROFILE",
 "Pilas de objetos: multiplicador (1 = normal)": "Item stacks: multiplier (1 = normal)",
-"Altares de llama permitidos: multiplicador (1 = normal)": "Allowed flame altars: multiplier (1 = normal)",
 "Nada se envía al servidor hasta que confirmes el perfil de este servidor:": "Nothing is sent to the server until you confirm the profile for this server:",
 "CONFIRMAR": "CONFIRM",
 "Cada perfil guarda sus propias zonas, apariciones, equipos, lugares y plantillas. Se carga siempre el último que usaste.": "Each profile keeps its own zones, spawns, teams, places and templates. The last one you used is always loaded.",
