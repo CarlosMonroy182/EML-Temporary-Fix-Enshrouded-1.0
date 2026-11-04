@@ -8,16 +8,18 @@ pub const VANILLA_ALTARS: [u8; 21] = [1, 2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16,
 pub struct ItemRef {
     pub id: u32,
     pub guid: [u8; 16],
-    pub stack: u16,
+    pub vanilla: u16,
+    pub target: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Found {
     pub addr: usize,
     pub item: usize,
+    pub adj: bool,
 }
 
-pub fn parse_items(csv: &str) -> Vec<ItemRef> {
+pub fn parse_items(csv: &str, factor: f64, csv_scaled: bool) -> Vec<ItemRef> {
     let mut out = Vec::new();
     for line in csv.lines().skip(1) {
         let parts: Vec<&str> = line.split(',').collect();
@@ -25,11 +27,42 @@ pub fn parse_items(csv: &str) -> Vec<ItemRef> {
             continue;
         }
         let (Ok(id), Some(guid), Ok(stack)) = (parts[0].trim().parse::<u32>(), parse_guid(parts[1]), parts[6].trim().parse::<u32>()) else { continue };
-        if stack > 1 && stack <= 65535 {
-            out.push(ItemRef { id, guid, stack: stack as u16 });
+        if stack <= 1 || stack > 65535 {
+            continue;
+        }
+        let stack = stack as u16;
+        let (vanilla, target) = if csv_scaled {
+            (((stack as f64 / factor).round().clamp(1.0, 65535.0)) as u16, stack)
+        } else {
+            (stack, scaled_stack(stack, factor))
+        };
+        if vanilla != target {
+            out.push(ItemRef { id, guid, vanilla, target });
         }
     }
     out
+}
+
+pub fn csv_values(csv: &str) -> Vec<u32> {
+    csv.lines().skip(1).filter_map(|l| l.split(',').nth(6)?.trim().parse::<u32>().ok()).filter(|v| *v > 1).collect()
+}
+
+pub fn csv_is_scaled(values: &[u32], factor: f64, eml_log: Option<&str>) -> bool {
+    if factor <= 1.0 {
+        return false;
+    }
+    if let Some(log) = eml_log {
+        if let Some(at) = log.rfind("stacked=") {
+            let digits: String = log[at + 8..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u64>() {
+                return n > 0;
+            }
+        }
+    }
+    match values.iter().min() {
+        Some(min) => (*min as f64) >= 2.0 * factor,
+        None => false,
+    }
 }
 
 fn number_after(text: &str, key: &str) -> Option<f64> {
@@ -108,7 +141,8 @@ impl GuidIndex {
                 if let Some(list) = self.map.get(&key) {
                     for &item in list {
                         if buf[i + 8..i + 16] == items[item].guid[8..] {
-                            out.push(Found { addr: base + i, item });
+                            let adj = i >= 4 && buf[i - 4..i] == items[item].id.to_le_bytes();
+                            out.push(Found { addr: base + i, item, adj });
                         }
                     }
                 }
@@ -131,10 +165,10 @@ pub fn vote_offset(found: &[Found], items: &[ItemRef], read: &dyn Fn(usize, usiz
             continue;
         }
         sampled += 1;
-        let want = items[f.item].stack.to_le_bytes();
+        let (a, b) = (items[f.item].vanilla.to_le_bytes(), items[f.item].target.to_le_bytes());
         let mut p = 0usize;
         while p + 2 <= w.len() {
-            if w[p..p + 2] == want {
+            if w[p..p + 2] == a || w[p..p + 2] == b {
                 *votes.entry(p as isize - WINDOW_BEFORE as isize).or_default() += 1;
             }
             p += 2;
@@ -154,6 +188,10 @@ pub fn vote_offset(found: &[Found], items: &[ItemRef], read: &dyn Fn(usize, usiz
     Some((offset, count, sampled))
 }
 
+pub fn id_before(buf: &[u8], item: &ItemRef) -> bool {
+    buf.len() >= 4 && buf[..4] == item.id.to_le_bytes()
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StackReport {
     pub total: usize,
@@ -162,10 +200,10 @@ pub struct StackReport {
     pub other: usize,
 }
 
-pub fn classify(value: u16, stack: u16, factor: f64) -> u8 {
-    if value == stack {
+pub fn classify(value: u16, item: &ItemRef) -> u8 {
+    if value == item.vanilla {
         0
-    } else if value == scaled_stack(stack, factor) {
+    } else if value == item.target {
         1
     } else {
         2
@@ -196,15 +234,28 @@ mod tests {
 
     fn items() -> Vec<ItemRef> {
         let csv = "item_id,guid,debug_name,name,category,rarity,max_stack\n1,11111111-2222-3333-4444-555555555555,Wood,Wood,Materials,Common,250\n2,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,Sword,Sword,Weapons,Rare,1\n3,01234567-89ab-cdef-0123-456789abcdef,Stone,Stone,Materials,Common,1000\n";
-        parse_items(csv)
+        parse_items(csv, 10.0, false)
     }
 
     #[test]
-    fn items_with_a_stack_are_listed() {
+    fn items_with_a_stack_are_listed_with_both_values() {
         let list = items();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].stack, 250);
+        assert_eq!((list[0].vanilla, list[0].target), (250, 2500));
         assert_eq!(list[1].id, 3);
+        let csv = "h\n1,11111111-2222-3333-4444-555555555555,a,a,c,r,2500\n";
+        let scaled = parse_items(csv, 10.0, true);
+        assert_eq!((scaled[0].vanilla, scaled[0].target), (250, 2500));
+    }
+
+    #[test]
+    fn the_csv_state_comes_from_the_log_or_the_smallest_stack() {
+        assert!(csv_is_scaled(&[250, 500], 10.0, Some("x items done applied=1 failed=0 widened=2 stacked=2266\n")));
+        assert!(!csv_is_scaled(&[250, 500], 10.0, Some("items done stacked=0")));
+        assert!(csv_is_scaled(&[20, 2500], 10.0, None));
+        assert!(!csv_is_scaled(&[5, 250], 10.0, None));
+        assert!(!csv_is_scaled(&[250], 1.0, None));
+        assert_eq!(csv_values("h\n1,g,a,a,c,r,250\n2,g,a,a,c,r,1\n"), vec![250]);
     }
 
     #[test]
@@ -223,14 +274,12 @@ mod tests {
         assert_eq!(scaled_altars(100.0)[20], 255);
     }
 
-    fn record(item: &ItemRef, id_first: bool) -> Vec<u8> {
+    fn record(item: &ItemRef, value: u16) -> Vec<u8> {
         let mut r = vec![0u8; 64];
         let g = 8usize;
-        if id_first {
-            r[g - 4..g].copy_from_slice(&item.id.to_le_bytes());
-        }
+        r[g - 4..g].copy_from_slice(&item.id.to_le_bytes());
         r[g..g + 16].copy_from_slice(&item.guid);
-        r[g + 16..g + 18].copy_from_slice(&item.stack.to_le_bytes());
+        r[g + 16..g + 18].copy_from_slice(&value.to_le_bytes());
         r
     }
 
@@ -239,14 +288,17 @@ mod tests {
         let list = items();
         let index = GuidIndex::new(&list);
         let mut mem = vec![0u8; 128];
-        mem.extend(record(&list[0], true));
+        mem.extend(record(&list[0], list[0].vanilla));
         mem.extend(vec![7u8; 40]);
-        mem.extend(record(&list[1], true));
+        mem.extend(record(&list[1], list[1].target));
         mem.extend(vec![0u8; 100]);
         let mut found = Vec::new();
         index.scan(&mem, 0x1000, &list, &mut found);
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].addr, 0x1000 + 128 + 8);
+        assert!(found[0].adj && found[1].adj);
+        assert!(id_before(&mem[found[0].addr - 0x1000 - 4..], &list[0]));
+        assert!(!id_before(&mem[found[0].addr - 0x1000 - 4..], &list[1]));
         let read = |addr: usize, len: usize| -> Option<Vec<u8>> {
             let start = addr.checked_sub(0x1000)?;
             let mut v = vec![0u8; len];
@@ -262,9 +314,10 @@ mod tests {
 
     #[test]
     fn classification_tells_vanilla_from_scaled() {
-        assert_eq!(classify(250, 250, 10.0), 0);
-        assert_eq!(classify(2500, 250, 10.0), 1);
-        assert_eq!(classify(77, 250, 10.0), 2);
+        let item = &items()[0];
+        assert_eq!(classify(250, item), 0);
+        assert_eq!(classify(2500, item), 1);
+        assert_eq!(classify(77, item), 2);
     }
 
     #[test]

@@ -3366,6 +3366,65 @@ pub fn start_data_patch() {
     }
 }
 
+fn region_of(addr: usize) -> Option<(usize, usize, u32, u32)> {
+    let mut info = MemInfo::default();
+    let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
+    if n == 0 || info.state != 0x1000 {
+        return None;
+    }
+    Some((info.base, info.alloc_base, info.protect, info.kind))
+}
+
+fn own_image() -> (usize, usize) {
+    let Some((_, alloc, _, _)) = region_of(data_patch_worker as usize) else { return (0, 0) };
+    let mut end = alloc;
+    let mut addr = alloc;
+    for _ in 0..4096 {
+        let mut info = MemInfo::default();
+        let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
+        if n == 0 || info.alloc_base != alloc || info.size == 0 {
+            break;
+        }
+        end = info.base + info.size;
+        addr = end;
+    }
+    (alloc, end)
+}
+
+fn write_forced(addr: usize, data: &[u8]) -> bool {
+    let verify = |d: &[u8]| read_bytes(addr, d.len()).map(|b| b == d).unwrap_or(false);
+    if write_bytes(addr, data) && verify(data) {
+        return true;
+    }
+    let mut old = 0u32;
+    let changed = unsafe { VirtualProtect(addr as *mut c_void, data.len(), 0x40, &mut old) } != 0;
+    let wrote = write_bytes(addr, data) && verify(data);
+    if changed {
+        let mut ignore = 0u32;
+        unsafe { VirtualProtect(addr as *mut c_void, data.len(), old, &mut ignore) };
+    }
+    wrote
+}
+
+fn kind_name(kind: u32) -> &'static str {
+    match kind {
+        0x20000 => "private",
+        0x40000 => "mapped",
+        0x100_0000 => "image",
+        _ => "other",
+    }
+}
+
+fn latest_eml_log(dir: &std::path::Path) -> Option<String> {
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("logs"))
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "log").unwrap_or(false))
+        .collect();
+    names.sort();
+    names.pop().and_then(|p| std::fs::read_to_string(p).ok())
+}
+
 fn data_patch_worker(dir: std::path::PathBuf) {
     use super::datapatch as dp;
     let csv_path = dir.join("export").join("m182_items.csv");
@@ -3388,15 +3447,21 @@ fn data_patch_worker(dir: std::path::PathBuf) {
     if stack_factor <= 1.0 && altar_factor <= 1.0 {
         return;
     }
-    let items = dp::parse_items(&csv);
+    let log_text = latest_eml_log(&dir);
+    let csv_scaled = dp::csv_is_scaled(&dp::csv_values(&csv), stack_factor, log_text.as_deref());
+    let items = dp::parse_items(&csv, stack_factor, csv_scaled);
     if items.is_empty() {
         log("data patch: the item list has no stackable items");
         return;
     }
     let index = dp::GuidIndex::new(&items);
     let own = (items.as_ptr() as usize, items.as_ptr() as usize + items.len() * std::mem::size_of::<dp::ItemRef>());
+    let image = own_image();
     let scaled = dp::scaled_altars(altar_factor);
-    log(&format!("data patch: {} stackable items, stack factor {stack_factor}, altar factor {altar_factor}", items.len()));
+    log(&format!(
+        "data patch: {} stackable items (list already multiplied: {csv_scaled}), stack factor {stack_factor}, altar factor {altar_factor}",
+        items.len()
+    ));
 
     let delays = [15u64, 30, 45, 60, 90, 120, 180];
     let mut pass = 0usize;
@@ -3426,63 +3491,104 @@ fn data_patch_worker(dir: std::path::PathBuf) {
         found.retain(|f| f.addr < own.0 || f.addr >= own.1);
         found.sort_by_key(|f| (f.addr, f.item));
         found.dedup();
+        let outside = |a: &usize| *a < image.0 || *a >= image.1;
         altars_vanilla.sort_unstable();
         altars_vanilla.dedup();
+        altars_vanilla.retain(outside);
         altars_scaled.sort_unstable();
         altars_scaled.dedup();
+        altars_scaled.retain(outside);
 
         if altar_factor > 1.0 {
             let mut patched = 0usize;
+            let mut detail = Vec::new();
             for addr in &altars_vanilla {
-                if write_bytes(*addr, &scaled) {
+                let ok = write_forced(*addr, &scaled);
+                if ok {
                     patched += 1;
                 }
+                let (protect, kind) = region_of(*addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
+                detail.push(format!("{:#x} {} prot {:#x} {}", addr, kind_name(kind), protect, if ok { "patched" } else { "write refused" }));
             }
             log(&format!(
                 "data patch: pass {pass}: altar tables in memory: {} vanilla (patched {patched}), {} already scaled",
                 altars_vanilla.len(),
                 altars_scaled.len()
             ));
+            for line in detail.iter().take(12) {
+                log(&format!("data patch: altar vanilla copy {line}"));
+            }
+            for addr in altars_scaled.iter().take(12) {
+                let (protect, kind) = region_of(*addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
+                log(&format!("data patch: altar scaled copy {:#x} {} prot {:#x}", addr, kind_name(kind), protect));
+            }
         }
 
         if stack_factor > 1.0 {
             if found.is_empty() {
                 log(&format!("data patch: pass {pass}: no item record found in memory ({} ms)", started.elapsed().as_millis()));
-            } else {
-                let reader = |a: usize, n: usize| read_bytes(a, n);
-                match dp::vote_offset(&found, &items, &reader) {
-                    None => {
-                        log(&format!("data patch: pass {pass}: {} guid copies, no common stack field", found.len()));
-                        for f in found.iter().take(3) {
-                            if let Some(w) = read_bytes(f.addr.saturating_sub(dp::WINDOW_BEFORE), dp::WINDOW_LEN) {
-                                log(&format!("data patch: sample item {} stack {} at {:#x}: {}", items[f.item].id, items[f.item].stack, f.addr, hex(&w)));
-                            }
+                continue;
+            }
+            let adjacent: Vec<dp::Found> = found.iter().copied().filter(|f| f.adj).collect();
+            let use_adjacent = adjacent.len() >= 30;
+            let pool: &[dp::Found] = if use_adjacent { &adjacent } else { &found };
+            let reader = |a: usize, n: usize| read_bytes(a, n);
+            match dp::vote_offset(pool, &items, &reader) {
+                None => {
+                    log(&format!(
+                        "data patch: pass {pass}: {} guid copies, {} with the item id right before, no common stack field",
+                        found.len(),
+                        adjacent.len()
+                    ));
+                    let mut shown = std::collections::HashSet::new();
+                    let mut count = 0;
+                    for f in pool.iter() {
+                        if count >= 8 {
+                            break;
+                        }
+                        if !shown.insert(f.item) {
+                            continue;
+                        }
+                        if let Some(w) = read_bytes(f.addr.saturating_sub(16), 128) {
+                            let (protect, kind) = region_of(f.addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
+                            log(&format!(
+                                "data patch: sample item {} vanilla {} target {} at {:#x} ({} prot {:#x}), 16 bytes before the guid then 112: {}",
+                                items[f.item].id,
+                                items[f.item].vanilla,
+                                items[f.item].target,
+                                f.addr,
+                                kind_name(kind),
+                                protect,
+                                hex(&w)
+                            ));
+                            count += 1;
                         }
                     }
-                    Some((offset, votes, sampled)) => {
-                        let (mut vanilla, mut already, mut other, mut patched) = (0usize, 0usize, 0usize, 0usize);
-                        for f in &found {
-                            let at = (f.addr as isize + offset) as usize;
-                            let Some(b) = read_bytes(at, 2) else { continue };
-                            let value = u16::from_le_bytes([b[0], b[1]]);
-                            let item = &items[f.item];
-                            match dp::classify(value, item.stack, stack_factor) {
-                                0 => {
-                                    vanilla += 1;
-                                    if write_bytes(at, &dp::scaled_stack(item.stack, stack_factor).to_le_bytes()) {
-                                        patched += 1;
-                                    }
+                }
+                Some((offset, votes, sampled)) => {
+                    let (mut vanilla, mut already, mut other, mut patched) = (0usize, 0usize, 0usize, 0usize);
+                    for f in pool {
+                        let at = (f.addr as isize + offset) as usize;
+                        let Some(b) = read_bytes(at, 2) else { continue };
+                        let value = u16::from_le_bytes([b[0], b[1]]);
+                        let item = &items[f.item];
+                        match dp::classify(value, item) {
+                            0 => {
+                                vanilla += 1;
+                                if write_forced(at, &item.target.to_le_bytes()) {
+                                    patched += 1;
                                 }
-                                1 => already += 1,
-                                _ => other += 1,
                             }
+                            1 => already += 1,
+                            _ => other += 1,
                         }
-                        log(&format!(
-                            "data patch: pass {pass}: stack field at {offset:+} ({votes} of {sampled} sampled); {} copies: {vanilla} vanilla (patched {patched}), {already} already scaled, {other} other ({} ms)",
-                            found.len(),
-                            started.elapsed().as_millis()
-                        ));
                     }
+                    log(&format!(
+                        "data patch: pass {pass}: stack field at {offset:+} ({votes} of {sampled} sampled{}); {} copies: {vanilla} vanilla (patched {patched}), {already} already scaled, {other} other ({} ms)",
+                        if use_adjacent { ", records with the item id before the guid" } else { "" },
+                        pool.len(),
+                        started.elapsed().as_millis()
+                    ));
                 }
             }
         }
