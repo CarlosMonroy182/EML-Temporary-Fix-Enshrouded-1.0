@@ -12,5 +12,6 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 miniz_oxide = "0.8"
+zstd = "0.13.3"
 
 # libloading = "0.9.0"

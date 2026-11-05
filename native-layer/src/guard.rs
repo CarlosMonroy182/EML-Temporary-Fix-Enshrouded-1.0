@@ -6,6 +6,7 @@
 
 use std::ffi::c_void;
 use std::io::Write;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
@@ -74,6 +75,182 @@ fn log(msg: &str) {
     }
 }
 
+struct Joined {
+    player: u32,
+    level: u32,
+    xp: u32,
+    extra: u32,
+    at: std::time::Instant,
+}
+
+struct Watch {
+    player: u32,
+    addr: usize,
+    last: Vec<u8>,
+}
+
+static JOINED: Mutex<Vec<Joined>> = Mutex::new(Vec::new());
+static WATCHES: Mutex<Vec<Watch>> = Mutex::new(Vec::new());
+
+const MAX_WATCHES: usize = 96;
+const SCAN_DELAY_SECS: u64 = 15;
+const WATCH_BYTES: usize = 16;
+
+fn unpack(blob: &[u8]) -> Option<Vec<u8>> {
+    if blob.len() < 8 || blob[0] != 1 || blob[1..5] != [0x28, 0xb5, 0x2f, 0xfd] {
+        return None;
+    }
+    zstd::stream::decode_all(&blob[1..]).ok()
+}
+
+fn stats(raw: &[u8]) -> Option<(u32, u32, u32)> {
+    let one = [0x00u8, 0x00, 0x80, 0x3f];
+    let limit = raw.len().min(1024);
+    let mut i = 0usize;
+    while i + 32 <= limit {
+        if (0..3).all(|k| raw[i + k * 4..i + k * 4 + 4] == one) {
+            let mut j = i + 12;
+            while j + 4 <= limit && raw[j..j + 4] == one {
+                j += 4;
+            }
+            if j + 12 > raw.len() {
+                return None;
+            }
+            let u = |o: usize| u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+            return Some((u(j), u(j + 4), u(j + 8)));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn context_dump(file: &mut std::fs::File, addr: usize) {
+    let from = addr.saturating_sub(0x100) & !0xf;
+    let Some(bytes) = read_mem(from, 0x300) else {
+        let _ = writeln!(file, "  {addr:#x}: context not readable");
+        return;
+    };
+    let _ = writeln!(file, "  hit {addr:#x} (context from {from:#x})");
+    for (row, chunk) in bytes.chunks(16).enumerate() {
+        let _ = writeln!(file, "    {:#x}: {}", from + row * 16, hex(chunk));
+    }
+}
+
+fn scan(job: &Joined) {
+    let started = std::time::Instant::now();
+    let regions = super::spawner::readable_regions();
+    let total: usize = regions.iter().map(|(a, b)| b - a).sum();
+    let mut pair = job.level.to_le_bytes().to_vec();
+    pair.extend_from_slice(&job.xp.to_le_bytes());
+    let mut tail = job.xp.to_le_bytes().to_vec();
+    tail.extend_from_slice(&job.extra.to_le_bytes());
+    let by_pair = super::spawner::scan_regions(&regions, &pair, 64);
+    let by_tail = super::spawner::scan_regions(&regions, &tail, 64);
+    log(&format!(
+        "scan: player id {}, level {} xp {}: {} hits for level+xp, {} hits for xp+next, {} regions {} MB, {} ms",
+        job.player,
+        job.level,
+        job.xp,
+        by_pair.len(),
+        by_tail.len(),
+        regions.len(),
+        total >> 20,
+        started.elapsed().as_millis()
+    ));
+    let Ok(dir) = std::env::current_dir() else { return };
+    let dir = dir.join("m182_guard");
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::File::create(dir.join(format!("scan_{secs}_p{}.txt", job.player))) {
+        let _ = writeln!(f, "player id {} level {} xp {} next {}", job.player, job.level, job.xp, job.extra);
+        let _ = writeln!(f, "level+xp hits:");
+        for &a in by_pair.iter().take(24) {
+            context_dump(&mut f, a);
+        }
+        let _ = writeln!(f, "xp+next hits:");
+        for &a in by_tail.iter().take(24) {
+            context_dump(&mut f, a);
+        }
+    }
+    let Ok(mut watches) = WATCHES.lock() else { return };
+    for &a in by_pair.iter().chain(by_tail.iter()) {
+        if watches.len() >= MAX_WATCHES {
+            break;
+        }
+        if watches.iter().any(|w| w.addr == a) {
+            continue;
+        }
+        if let Some(last) = read_mem(a, WATCH_BYTES) {
+            watches.push(Watch { player: job.player, addr: a, last });
+        }
+    }
+}
+
+fn watch_tick() {
+    let Ok(mut watches) = WATCHES.lock() else { return };
+    let mut lines = Vec::new();
+    watches.retain_mut(|w| match read_mem(w.addr, WATCH_BYTES) {
+        Some(now) => {
+            if now != w.last {
+                let u = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+                lines.push(format!(
+                    "watch: player id {} at {:#x}: {} {} {} {} (was {} {} {} {})",
+                    w.player,
+                    w.addr,
+                    u(&now, 0),
+                    u(&now, 4),
+                    u(&now, 8),
+                    u(&now, 12),
+                    u(&w.last, 0),
+                    u(&w.last, 4),
+                    u(&w.last, 8),
+                    u(&w.last, 12)
+                ));
+                w.last = now;
+            }
+            true
+        }
+        None => {
+            lines.push(format!("watch: player id {} at {:#x}: memory released", w.player, w.addr));
+            false
+        }
+    });
+    drop(watches);
+    for l in lines {
+        log(&l);
+    }
+}
+
+fn start_worker() {
+    std::thread::spawn(|| {
+        let mut ticks = 0u64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            ticks += 1;
+            let due: Vec<Joined> = match JOINED.lock() {
+                Ok(mut q) => {
+                    let mut ready = Vec::new();
+                    let mut i = 0;
+                    while i < q.len() {
+                        if q[i].at.elapsed().as_secs() >= SCAN_DELAY_SECS {
+                            ready.push(q.remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    ready
+                }
+                Err(_) => Vec::new(),
+            };
+            for job in &due {
+                scan(job);
+            }
+            if ticks % 5 == 0 {
+                watch_tick();
+            }
+        }
+    });
+}
+
 fn list_saves() {
     let Ok(dir) = std::env::current_dir() else { return };
     let mut lines = Vec::new();
@@ -133,6 +310,23 @@ extern "win64" fn probe(_out: usize, obj: usize) {
         }
     }
     log(&format!("upload: player id {player}, {size} bytes, magic {magic:#x}, character {uuid}, fnv1a {hash:08x}, file {saved}"));
+    match unpack(&blob) {
+        Some(raw) => {
+            if let Ok(dir) = std::env::current_dir() {
+                let _ = std::fs::write(dir.join("m182_guard").join(format!("{secs}_p{player}_{hash:08x}.raw")), &raw);
+            }
+            match stats(&raw) {
+                Some((level, xp, extra)) => {
+                    log(&format!("join: player id {player}, level {level}, xp {xp}, next {extra}, {} bytes unpacked", raw.len()));
+                    if let Ok(mut q) = JOINED.lock() {
+                        q.push(Joined { player, level, xp, extra, at: std::time::Instant::now() });
+                    }
+                }
+                None => log(&format!("join: player id {player}, level and xp not found ({} bytes unpacked)", raw.len())),
+            }
+        }
+        None => log(&format!("join: player id {player}, blob is not 0x01 + zstd")),
+    }
     list_saves();
 }
 
@@ -189,7 +383,10 @@ pub(super) fn install(sections: &[&'static [u8]]) {
     }
     TRAMPOLINE.store(page as usize, Ordering::SeqCst);
     match unsafe { patch::write_jump(target, stub_probe as usize) } {
-        Ok(()) => log("guard: observe mode ready (nothing is blocked)"),
+        Ok(()) => {
+            start_worker();
+            log("guard: observe mode ready (nothing is blocked; memory watch on)");
+        }
         Err(code) => {
             TRAMPOLINE.store(0, Ordering::SeqCst);
             log(&format!("guard off: VirtualProtect failed ({code})"));
