@@ -79,3 +79,9 @@ The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 V
 
 ## GPortal hosting
 - GPortal runs the server natively on Windows (`D:\home\sid_...\enshrouded`), unlike Dathost (Wine). Same files and install steps; server groups and passwords live in `enshrouded_server.json` (`userGroups` with canKickBan/canAccessInventories/canEditWorld/canEditBase/canExtendBase).
+
+## Character guard (server, Midnight Rain lock) - findings Nov 5
+- Stage 1 (`guard.rs`, `m182_guard.json` {"mode":"observe"}) works on the current server build: `SAVE_DESERIALIZE` is unique in enshrouded_server.exe (absent from the client exe); upload object still `+0x110` blob ptr, `+0x118` length.
+- The uploaded blob is `0x01` + a zstd frame. Decompressed it starts `00 <u32> "S2BH" 02 00 00 00 ...`. The `character` id printed by stage 1 (bytes 0xC..0x1C of the compressed blob) is not a real id.
+- After five 1.0f floats (around offset 0x4D of the decompressed data): u32 level, u32 XP, u32 unknown (stays equal between sessions). Seen: level 22 with XP 3946 -> 4496 -> 4741 over three joins of the same character.
+- Inventory items appear as plain u32 item ids (same ids as `vfx_items.csv`); spells are 11 bytes apart, weapons 24, so records are variable length.
