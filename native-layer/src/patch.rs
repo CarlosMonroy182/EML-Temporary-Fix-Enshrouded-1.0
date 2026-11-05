@@ -452,6 +452,26 @@ fn install_permissions(sections: &[&'static [u8]]) {
 pub(super) static PAY_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static PAY_LOGGED: AtomicU64 = AtomicU64::new(0);
 
+fn cost_entries(costs: usize) -> Vec<(u32, i32)> {
+    let Some(head) = super::spawn_probe::read_bytes(costs, 16) else { return Vec::new() };
+    let data = super::spawn_probe::u64_at(&head, 0) as usize;
+    let count = (super::spawn_probe::u64_at(&head, 8) as usize).min(64);
+    if data == 0 || count == 0 {
+        return Vec::new();
+    }
+    let Some(raw) = super::spawn_probe::read_bytes(data, count * 24) else { return Vec::new() };
+    (0..raw.len() / 24)
+        .map(|i| {
+            let e = &raw[i * 24..i * 24 + 24];
+            (u32::from_le_bytes(e[16..20].try_into().unwrap()), i32::from_le_bytes(e[20..24].try_into().unwrap()))
+        })
+        .collect()
+}
+
+pub(super) fn gives_items(entries: &[(u32, i32)]) -> bool {
+    entries.iter().any(|(_, amount)| *amount < 0)
+}
+
 extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8) -> u8 {
     if LIVE.free_building() {
         if let Some(head) = super::spawn_probe::read_bytes(context, 16) {
@@ -460,14 +480,23 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8) -> u8 {
                 if let Some(raw) = super::spawn_probe::read_bytes(transaction + 0xe0, 4) {
                     let owner = super::spawn_probe::u32_at(&raw, 0);
                     let admin = super::table::entries().iter().any(|e| e.entity() == owner && super::roster::is_admin(e.permissions));
-                    if PAY_LOGGED.fetch_add(1, Ordering::Relaxed) < 16 {
+                    let entries = if admin { cost_entries(costs) } else { Vec::new() };
+                    let gives = gives_items(&entries);
+                    if PAY_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
                         let known: Vec<u32> = super::table::entries().iter().map(|e| e.entity()).collect();
                         super::spawner::log(&format!(
-                            "free building: payment by owner {owner} (pay={pay}) -> {} (players online {known:?})",
-                            if admin { "free, administrator" } else { "charged" }
+                            "free building: payment by owner {owner} (pay={pay}) -> {} (players online {known:?}, entries {:?})",
+                            if !admin {
+                                "charged"
+                            } else if gives {
+                                "passed to the game, it hands items over"
+                            } else {
+                                "free, administrator"
+                            },
+                            &entries[..entries.len().min(6)]
                         ));
                     }
-                    if admin {
+                    if admin && !gives {
                         return 1;
                     }
                 }
