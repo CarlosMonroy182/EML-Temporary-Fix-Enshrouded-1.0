@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -165,6 +165,18 @@ fn destination(name: &str, client: u32) -> String {
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
+static OPEN_REPLY: AtomicBool = AtomicBool::new(false);
+
+/// True when the request just handled ended with `open`: the asker could not receive private answers, so this
+/// one is sent the way every answer used to be sent (to the whole chat).
+pub fn take_open() -> bool {
+    OPEN_REPLY.swap(false, Ordering::SeqCst)
+}
+
+fn note_open(rest: &str) {
+    OPEN_REPLY.store(rest.split_whitespace().last() == Some("open"), Ordering::SeqCst);
+}
+
 static OTHER_SEEN: AtomicU32 = AtomicU32::new(0);
 
 /// Logs the first few ordinary messages (their first characters only) so a silent
@@ -284,18 +296,22 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
     };
     let rest = rest.as_str();
     if command == "players" {
+        note_open(rest);
         let (seq, _) = next_token(rest);
         return Verdict::Roster(seq.parse().unwrap_or(0));
     }
     if command == "teams" {
+        note_open(rest);
         let (seq, _) = next_token(rest);
         return Verdict::Teams(seq.parse().unwrap_or(0));
     }
     if command == "rev" {
+        note_open(rest);
         let (seq, _) = next_token(rest);
         return Verdict::Lines(vec![super::shared::rev_line(dir, seq.parse().unwrap_or(0))]);
     }
     if command == "pull" {
+        note_open(rest);
         let (seq, more) = next_token(rest);
         let (topic, _) = next_token(more);
         let Some(topic) = super::shared::Topic::from_name(topic) else {
@@ -758,6 +774,21 @@ mod tests {
 
     fn run(session: &mut Session, dir: &Path, text: &str) -> Verdict {
         handle_with(session, Instant::now(), text, "secret-key", 7, dir)
+    }
+
+    #[test]
+    fn a_request_ending_with_open_asks_for_the_answer_in_the_open_chat() {
+        let dir = scratch("open");
+        let mut s = Session::default();
+        assert_eq!(run(&mut s, &dir, "!m182 secret-key players 5"), Verdict::Roster(5));
+        assert!(!take_open());
+        assert_eq!(run(&mut s, &dir, "!m182 secret-key players 6 open"), Verdict::Roster(6));
+        assert!(take_open());
+        assert!(!take_open());
+        assert!(matches!(run(&mut s, &dir, "!m182 secret-key pull 7 zones open"), Verdict::Lines(_)));
+        assert!(take_open());
+        assert_eq!(run(&mut s, &dir, "!m182 secret-key teams 8"), Verdict::Teams(8));
+        assert!(!take_open());
     }
 
     #[test]

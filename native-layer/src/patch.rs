@@ -291,6 +291,14 @@ pub fn take_server_reply(text: usize) -> bool {
 
 /// Same, for a line this process produced itself (an asker living in the game that hosts the world).
 pub fn accept_reply(message: &str) -> bool {
+    let taken = accept_reply_line(message);
+    if taken {
+        super::outbox::note_answer();
+    }
+    taken
+}
+
+fn accept_reply_line(message: &str) -> bool {
     let Ok(dir) = std::env::current_dir() else { return false };
     let number = |from: usize| -> Option<u32> {
         let rest = &message[from..];
@@ -342,11 +350,11 @@ type EnqueueFn = extern "win64" fn(*mut u8, usize, usize, usize, u32, u32, u32, 
 /// player except the one who asked, so the answer to a panel request is not shown to the whole server.
 /// Returns false when it could not be done and the caller should let the game broadcast it as before.
 fn send_to_asker_only(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize) -> bool {
-    send_to_peers(out, queue, kind, text, &[client], frame)
+    send_to_peers(out, queue, kind, text, &[client], frame, true)
 }
 
 /// Same, for several players at once (the panels that must hear about a change).
-fn send_to_peers(out: usize, queue: usize, kind: usize, text: usize, clients: &[usize], frame: usize) -> bool {
+fn send_to_peers(out: usize, queue: usize, kind: usize, text: usize, clients: &[usize], frame: usize, narrow: bool) -> bool {
     let original = CHAT_TRAMPOLINE.load(Ordering::SeqCst);
     if original == 0 || queue == 0 {
         return false;
@@ -360,6 +368,9 @@ fn send_to_peers(out: usize, queue: usize, kind: usize, text: usize, clients: &[
     let _ = answer;
     let status = super::spawn_probe::read_bytes(out, 1).map(|b| b[0]).unwrap_or(0xff);
     if status != 0 {
+        return true;
+    }
+    if !narrow {
         return true;
     }
     let peers: Vec<usize> = clients.iter().map(|c| c & 0x3f).collect();
@@ -395,6 +406,11 @@ pub fn narrow_last_entry_to(queue: usize, targets: &[usize], line: &[u8]) -> boo
     } as u32;
     let Some(peers) = read_bytes(queue + 0x0c, 32 * 12) else { return false };
     let mut mask = u32_at(&entry, 0x20);
+    static REPORTED: AtomicU32 = AtomicU32::new(0);
+    if REPORTED.fetch_add(1, Ordering::Relaxed) < 3 {
+        let active: Vec<usize> = (0..32).filter(|p| peers[p * 12] != 0).collect();
+        super::spawner::log(&format!("chat: private answer for peer(s) {targets:?}: active peers {active:?}, delivered mask {mask:#x}, entry header {}", super::spawn_probe::hex(&entry[..0x30])));
+    }
     for peer in 0..32usize {
         if targets.contains(&peer) || mask >> peer & 1 != 0 {
             continue;
@@ -412,10 +428,10 @@ pub fn narrow_last_entry_to(queue: usize, targets: &[usize], line: &[u8]) -> boo
 }
 
 /// Several lines for the player who asked, each queued separately and shown to nobody else.
-fn send_lines_to_asker(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize, lines: &[String]) -> usize {
+fn send_lines_to_asker(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize, lines: &[String], open: bool) -> usize {
     let mut sent = 0;
     for line in lines {
-        if !replace_text(text, line) || !send_to_asker_only(out, queue, kind, text, client, frame) {
+        if !replace_text(text, line) || !send_to_peers(out, queue, kind, text, &[client], frame, !open) {
             break;
         }
         sent += 1;
@@ -453,7 +469,7 @@ fn tell_other_panels(out: usize, queue: usize, kind: usize, text: usize, author:
     if !replace_text(text, &super::shared::rev_line(&dir, 0)) {
         return false;
     }
-    let sent = send_to_peers(out, queue, kind, text, &targets, frame);
+    let sent = send_to_peers(out, queue, kind, text, &targets, frame, true);
     super::spawner::log(&format!("shared state: {} panel(s) told that something changed ({})", targets.len(), if sent { "sent" } else { "not sent" }));
     sent
 }
@@ -541,7 +557,8 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
             1
         }
         super::chat::Verdict::Lines(lines) => {
-            let sent = send_lines_to_asker(out, context, kind, text, client, frame, &lines);
+            let open = super::chat::take_open();
+            let sent = send_lines_to_asker(out, context, kind, text, client, frame, &lines, open);
             if sent != lines.len() {
                 super::spawner::log(&format!("chat: client {} asked for shared state but only {sent} of {} line(s) could be sent", client as u32, lines.len()));
             }
@@ -553,9 +570,10 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
                 accept_reply(&line);
                 return 1;
             }
+            let open = super::chat::take_open();
             let sent = replace_text(text, &line);
-            super::spawner::log(&format!("chat: client {} asked for the teams ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
-            if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
+            super::spawner::log(&format!("chat: client {} asked for the teams ({}{}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }, if open { ", to everybody: the asker could not receive it privately" } else { "" }));
+            if sent && !open && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
         }
         super::chat::Verdict::Roster(seq) => {
             let line = super::spawner::roster_line(seq, client as u32);
@@ -563,9 +581,10 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
                 accept_reply(&line);
                 return 1;
             }
+            let open = super::chat::take_open();
             let sent = replace_text(text, &line);
-            super::spawner::log(&format!("chat: client {} asked for the player list ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
-            if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
+            super::spawner::log(&format!("chat: client {} asked for the player list ({}{}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }, if open { ", to everybody: the asker could not receive it privately" } else { "" }));
+            if sent && !open && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
         }
     }
 }

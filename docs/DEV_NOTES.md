@@ -177,3 +177,12 @@ by asking, and stays current without polling.
 `patch::is_local_panel` (answers read in-process instead of queued to the chat) requires an empty chat key. A dedicated server always has
 a chat key, and its first connected player (client 64, peer 0) is a remote panel; treating that player as local made the server consume its
 own answers and nothing reached the client.
+
+## Private answers fall back to the open chat
+
+The per-peer narrowing of an answer (`narrow_last_entry_to`) was never confirmed to reach the asker on a real dedicated server: the server
+logged "sent" and the client received nothing. `outbox` now remembers the requests (`rev`, `pull`, `players`, `teams`) it sends; if no
+answer arrives within 8 s (`ANSWERED` is set by `accept_reply`, `store_roster`, `store_teams` and the memory search) it sends them again with
+a trailing `open`, and every later request carries it. The server (`chat::take_open`) then answers the way it did before the narrowing:
+to the whole chat for the player list and teams, unnarrowed lines for shared state. The server logs the first three narrowing attempts
+(`chat: private answer for peer(s) ...`) with the active peers and the entry header, to find out why the private path fails.

@@ -27,6 +27,11 @@ static PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_SENT: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
 static SENT: AtomicU64 = AtomicU64::new(0);
+static ANSWERED: AtomicBool = AtomicBool::new(false);
+static OPEN: AtomicBool = AtomicBool::new(false);
+static ASKED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+const OPEN_AFTER: Duration = Duration::from_secs(8);
+const MAX_ASKED: usize = 16;
 /// 0 = nothing written yet, 1 = ready file says connected, 2 = ready file says not connected.
 static REPORTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -80,6 +85,7 @@ pub fn poll(dir: &Path) {
         return;
     }
     report_ready(dir);
+    ask_openly_if_unanswered();
     let path = dir.join(OUT_FILE);
     if !path.exists() {
         return;
@@ -123,15 +129,57 @@ fn warn_rarely(message: &str) {
     }
 }
 
+fn command_of(line: &str) -> Option<&str> {
+    line.split_whitespace().nth(2)
+}
+
 /// The number of a `rev <n>` / `pull <n> <topic>` request in a line the panel sent.
 fn asked_seq(line: &str) -> Option<u32> {
-    let mut words = line.split_whitespace();
-    while let Some(word) = words.next() {
-        if word == "rev" || word == "pull" {
-            return words.next()?.parse().ok();
+    match command_of(line)? {
+        "rev" | "pull" => line.split_whitespace().nth(3)?.parse().ok(),
+        _ => None,
+    }
+}
+
+fn is_request(line: &str) -> bool {
+    matches!(command_of(line), Some("rev" | "pull" | "players" | "teams"))
+}
+
+/// An answer from the server reached this game: private answers work here.
+pub fn note_answer() {
+    ANSWERED.store(true, Ordering::SeqCst);
+    if let Ok(mut asked) = ASKED.lock() {
+        asked.clear();
+    }
+}
+
+/// The server answers a request privately (only to the asker). When nothing came back a few seconds after the
+/// first request, the requests are sent again asking for the answer in the open chat, as it used to be done.
+fn ask_openly_if_unanswered() {
+    if ANSWERED.load(Ordering::Relaxed) || OPEN.load(Ordering::Relaxed) {
+        return;
+    }
+    let again: Vec<String> = {
+        let Ok(mut asked) = ASKED.lock() else { return };
+        if !asked.first().is_some_and(|(_, at)| at.elapsed() >= OPEN_AFTER) {
+            return;
+        }
+        asked.drain(..).map(|(line, _)| line).collect()
+    };
+    OPEN.store(true, Ordering::SeqCst);
+    let mut queued = 0usize;
+    if let Ok(mut lines) = LINES.lock() {
+        for line in again {
+            if lines.len() < MAX_WAITING {
+                lines.push_back(format!("{line} open"));
+                queued += 1;
+            }
         }
     }
-    None
+    if queued > 0 {
+        PENDING.store(true, Ordering::SeqCst);
+    }
+    super::spawner::log(&format!("chat out: no private answer from the server after {} s; {queued} request(s) sent again asking for the answer in the open chat", OPEN_AFTER.as_secs()));
 }
 
 type SendFn = extern "win64" fn(*mut u8, usize, usize, *const [u64; 2], u32, u32) -> usize;
@@ -167,7 +215,17 @@ pub fn pump() {
         }
         line
     };
-    let Some(line) = line else { return };
+    let Some(mut line) = line else { return };
+    if OPEN.load(Ordering::Relaxed) && is_request(&line) && !line.ends_with(" open") {
+        line.push_str(" open");
+    }
+    if !ANSWERED.load(Ordering::Relaxed) && !OPEN.load(Ordering::Relaxed) && is_request(&line) {
+        if let Ok(mut asked) = ASKED.lock() {
+            if asked.len() < MAX_ASKED {
+                asked.push((line.clone(), Instant::now()));
+            }
+        }
+    }
     if let Ok(mut t) = LAST_SENT.lock() {
         *t = Some(Instant::now());
     }
@@ -199,5 +257,6 @@ mod asked_tests {
         assert_eq!(asked_seq("!m182 key rev 77"), Some(77));
         assert_eq!(asked_seq("!m182 key players 5"), None);
         assert_eq!(asked_seq("!m182 key rev"), None);
+        assert_eq!(asked_seq("!m182 key set m182_zones.json {\"a\":\"rev 5\"}"), None);
     }
 }

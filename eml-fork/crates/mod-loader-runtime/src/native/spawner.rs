@@ -3835,7 +3835,11 @@ fn scan_shared_replies(dir: std::path::PathBuf) {
                 if !note.is_empty() {
                     log(&note);
                 }
-                note.contains("received from the server")
+                let received = note.contains("received from the server");
+                if received {
+                    super::outbox::note_answer();
+                }
+                received
             };
             if done {
                 taken += 1;
@@ -3889,6 +3893,7 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
 
 /// Writes the server's answer to a player-list request where the panel reads it.
 pub fn store_roster(dir: &std::path::Path, seq: u32, list: &[(u32, String)], own: Option<(u32, [f64; 3])>) {
+    super::outbox::note_answer();
     let players: Vec<String> = list
         .iter()
         .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
@@ -3906,6 +3911,7 @@ pub fn store_roster(dir: &std::path::Path, seq: u32, list: &[(u32, String)], own
 
 /// Writes the server's answer to a teams request where the panel reads it.
 pub fn store_teams(dir: &std::path::Path, live: &[groups::LiveTeam], complete: bool) {
+    super::outbox::note_answer();
     let tmp = dir.join("m182_teams_live.json.tmp");
     if std::fs::write(&tmp, groups::live_json(live, complete)).is_ok() {
         let _ = std::fs::rename(&tmp, dir.join(groups::LIVE_FILE));
