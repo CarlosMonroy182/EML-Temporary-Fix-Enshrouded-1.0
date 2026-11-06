@@ -12,7 +12,10 @@ use super::spawner;
 const LIGHT_GUID: &str = "1c3281da-e7d4-4b41-9033-c85daec7f72a";
 const RECORD_FILE: &str = "m182_divine_lights.json";
 const MOVE_METERS: f64 = 2.5;
-const CHECK_EVERY: Duration = Duration::from_millis(400);
+const STEP_METERS: f64 = 0.25;
+const HELD_METERS: f64 = 1.0;
+const RECORD_MOVE_METERS: f64 = 3.0;
+const CHECK_EVERY: Duration = Duration::from_millis(100);
 const ORDER_RETRY: Duration = Duration::from_secs(3);
 const STRAY_METERS: f64 = 3.0;
 const SWEEP_EVERY: Duration = Duration::from_secs(8);
@@ -28,6 +31,9 @@ struct Owner {
     asked: Option<Instant>,
     checked: Option<Instant>,
     old: Vec<u32>,
+    wrote: Option<[f64; 3]>,
+    fails: u8,
+    rigid: bool,
 }
 
 static OWNERS: Mutex<Option<HashMap<u32, Owner>>> = Mutex::new(None);
@@ -119,10 +125,38 @@ pub fn follow(manager: usize, key: u32, position: [i64; 3]) {
     }
     let here = meters(position);
     if let Some(id) = owner.id {
-        if spawner::find_record(manager, id).is_none() {
-            owner.id = None;
-            forget(owner.spot);
-        } else if flat(owner.spot, here) <= MOVE_METERS && (owner.spot[1] - here[1]).abs() <= MOVE_METERS {
+        let Some(current) = spawner::entity_position(manager, id) else {
+            if spawner::find_record(manager, id).is_none() {
+                owner.id = None;
+                forget(owner.spot);
+            }
+            return;
+        };
+        let apart = flat(current, here).max((current[1] - here[1]).abs());
+        if apart <= STEP_METERS {
+            owner.fails = 0;
+            return;
+        }
+        if !owner.rigid {
+            if owner.wrote.is_some_and(|w| flat(current, w) > HELD_METERS) {
+                owner.fails += 1;
+            } else {
+                owner.fails = 0;
+            }
+            if owner.fails >= 3 {
+                owner.rigid = true;
+                spawner::log("divine aura: the glow does not follow by moving it; it is placed again when you walk away");
+            } else if spawner::move_entity(manager, id, position) {
+                owner.wrote = Some(here);
+                if flat(owner.spot, here) > RECORD_MOVE_METERS {
+                    forget(owner.spot);
+                    owner.spot = here;
+                    record(here);
+                }
+                return;
+            }
+        }
+        if apart <= MOVE_METERS {
             return;
         }
     }
@@ -176,6 +210,8 @@ pub fn run_orders(manager: usize) {
                     forget(owner.spot);
                 }
                 owner.spot = meters(at);
+                owner.wrote = None;
+                owner.fails = 0;
                 record(owner.spot);
             }
             None => {

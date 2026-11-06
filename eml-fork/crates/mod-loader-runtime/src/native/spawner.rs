@@ -263,6 +263,25 @@ pub(super) fn retire_entity(manager: usize, id: u32) -> bool {
     false
 }
 
+/// Moves an entity that carries a transform component to a world position (raw units).
+pub(super) fn move_entity(manager: usize, id: u32, at: [i64; 3]) -> bool {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    for slot in &slots {
+        if slot.stride != TRANSFORM_SIZE {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, TRANSFORM_SIZE) else { return false };
+        if plausible_position(&b) {
+            let mut bytes = [0u8; 24];
+            for (i, v) in at.iter().enumerate() {
+                bytes[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+            }
+            return write_bytes(slot.addr, &bytes);
+        }
+    }
+    false
+}
+
 /// Position in meters of an entity that carries a transform component.
 pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;
