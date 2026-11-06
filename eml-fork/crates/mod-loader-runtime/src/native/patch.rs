@@ -481,6 +481,8 @@ unsafe extern "win64" fn stub_pay_costs() {
     );
 }
 
+const GATHER_CALLER: usize = 0x3edf35;
+
 static PAY_CALLERS: std::sync::Mutex<Vec<(usize, u8)>> = std::sync::Mutex::new(Vec::new());
 
 fn pay_caller_is_new(caller: usize, pay: u8) -> bool {
@@ -518,7 +520,7 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usi
                             &entries[..entries.len().min(6)]
                         ));
                     }
-                    if admin {
+                    if admin && caller.wrapping_sub(base) != GATHER_CALLER {
                         return 1;
                     }
                 }
