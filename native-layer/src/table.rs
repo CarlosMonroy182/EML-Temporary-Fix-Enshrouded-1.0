@@ -36,7 +36,6 @@ fn object() -> Option<usize> {
     if o < 0x10000 { None } else { Some(o) }
 }
 
-static REPORTED: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 
 type Identity = (Option<(String, String)>, Option<String>);
 type Known = HashMap<(usize, u32), (Instant, Identity)>;
@@ -81,29 +80,6 @@ pub fn entries() -> Vec<Entry> {
         }
         let deref = |p: usize| read_bytes(p, 96).or_else(|| read_bytes(p, 48)).or_else(|| read_bytes(p, 16)).or_else(|| read_bytes(p, 8));
         let (guess, platform_id) = identity(index, client, slot, &deref);
-        if let Ok(mut seen) = REPORTED.lock() {
-            if !seen.contains(&(index, client)) {
-                seen.push((index, client));
-                log(&format!(
-                    "player table: slot {index} client {client} state {state} permissions {:#04x} name {} id {} bytes {}",
-                    slot[roster::SLOT_PERMISSIONS],
-                    match &guess {
-                        Some((n, how)) => format!("\"{n}\" ({how})"),
-                        None => "unreadable".to_string(),
-                    },
-                    platform_id.as_deref().unwrap_or("unreadable"),
-                    hex(slot)
-                ));
-                for off in (0..slot.len().saturating_sub(7)).step_by(8) {
-                    let p = u64::from_le_bytes(slot[off..off + 8].try_into().unwrap_or([0; 8]));
-                    if (0x1_0000..0x7ff0_0000_0000).contains(&p) {
-                        if let Some(b) = deref(p as usize) {
-                            log(&format!("player table: slot {index} +{off:#x} points to {}", hex(&b[..b.len().min(48)])));
-                        }
-                    }
-                }
-            }
-        }
         out.push(Entry { index, client, state, permissions: slot[roster::SLOT_PERMISSIONS], name: guess.map(|g| g.0), id: platform_id });
     }
     out

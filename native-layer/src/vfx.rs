@@ -30,6 +30,7 @@ const CATALOG: &[(&str, &str)] = &[
     ("VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion", "bf944b00-58cc-45a1-a8da-c30a59d8c146"),
     ("VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Lightning", "f8afd903-8a98-4bfe-bab5-0decbc0da0c6"),
     ("VFX_Skill_MassDestruction_Impact", "b24e0244-7e12-44d6-8be2-6db92ac3ab8e"),
+    ("VFX_Preview_Enemy_Mage_Teleport", "b8b7de83-427a-4077-a4b7-13d9d0e385d4"),
     ("VFX_Skill_BloodMagic_Trigger", "dca5c97a-dfa5-4a9b-aa68-ac653f690e00"),
     ("VFX_Skill_ChainHit_Impact", "fbdb3570-e74f-4673-8ea1-aa0e2b6fdf41"),
     ("VFX_Spell_ChainLightning_SourceTarget_NoTarget", "9c9932c9-2317-4260-8bb9-6e505456e9c3"),

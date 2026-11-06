@@ -13,6 +13,7 @@ pub const COMMAND_FILE: &str = "m182_command.request";
 pub struct PowersState {
     pub god: bool,
     pub stamina: bool,
+    pub aura: bool,
     pub fly: bool,
     pub fly_speed: f32,
     pub notice: String,
@@ -20,7 +21,7 @@ pub struct PowersState {
 
 impl Default for PowersState {
     fn default() -> Self {
-        Self { god: false, stamina: false, fly: false, fly_speed: 14.0, notice: String::new() }
+        Self { god: false, stamina: false, aura: false, fly: false, fly_speed: 14.0, notice: String::new() }
     }
 }
 
@@ -30,6 +31,7 @@ impl PowersState {
         if let Some(v) = std::fs::read_to_string(dir.join(POWERS_FILE)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
             s.god = v.get("god").and_then(|x| x.as_bool()).unwrap_or(false);
             s.stamina = v.get("stamina").and_then(|x| x.as_bool()).unwrap_or(false);
+            s.aura = v.get("aura").and_then(|x| x.as_bool()).unwrap_or(false);
         }
         s
     }
@@ -38,6 +40,7 @@ impl PowersState {
         json!({
             "god": self.god,
             "stamina": self.stamina,
+            "aura": self.aura,
             "fly": false,
             "fly_speed": self.fly_speed,
         })
@@ -67,6 +70,7 @@ impl App {
         let mut changed = false;
         changed |= ui.checkbox(&mut self.powers.god, "Modo dios: la vida se mantiene llena").changed();
         changed |= ui.checkbox(&mut self.powers.stamina, "Stamina y maná infinitos").changed();
+        changed |= ui.checkbox(&mut self.powers.aura, "Aura divina: efecto de teletransporte a tu alrededor, lo ve todo el mundo").changed();
         if changed {
             self.save_powers();
         }
@@ -81,7 +85,8 @@ impl App {
 
         if !self.powers.notice.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new(&self.powers.notice).color(GOOD));
+            let color = if self.powers.notice.starts_with("Error") { BAD } else { GOOD };
+            ui.label(RichText::new(&self.powers.notice).color(color));
         }
     }
 }

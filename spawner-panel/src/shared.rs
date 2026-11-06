@@ -302,7 +302,10 @@ pub fn line() -> (String, bool) {
         match c.synced_at {
             None if c.begun.is_some_and(|t| t.elapsed() > NO_ANSWER) => ("Sin respuesta del servidor todavía. Pulsa «Sincronizar».".to_string(), true),
             None => ("Sincronizando con el servidor…".to_string(), false),
-            Some(at) => (format!("Datos compartidos al día (hace {} s)", at.elapsed().as_secs()), false),
+            Some(at) => match at.elapsed().as_secs() / 60 {
+                0 => ("Datos compartidos al día".to_string(), false),
+                minutes => (format!("Datos compartidos al día (hace {} min)", minutes), false),
+            },
         }
     })
 }

@@ -391,9 +391,6 @@ fn try_apply(manager: usize, id: u32, health: u32, damage: f32, orig: &mut Optio
             let current = u32_at(&b, 8);
             if current == 0 {
                 // dead (or not initialised yet): never bring it back
-                if u32_at(&b, 36) > 0 {
-                    open_loot_watch(id);
-                }
                 health_done = true;
                 continue;
             }
@@ -1452,98 +1449,8 @@ fn guid_text(b: &[u8]) -> String {
     )
 }
 
-static LOOT_WATCH_UNTIL: AtomicU64 = AtomicU64::new(0);
-
 fn now_ms() -> u64 {
     CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
-static LOOT_WATCHED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-fn open_loot_watch(id: u32) {
-    if let Ok(mut seen) = LOOT_WATCHED.lock() {
-        if seen.contains(&id) {
-            return;
-        }
-        seen.push(id);
-        if seen.len() > 64 {
-            seen.remove(0);
-        }
-    }
-    LOOT_WATCH_UNTIL.store(now_ms() + 20_000, Ordering::Relaxed);
-    log(&format!("loot: spawned creature {id} died"));
-}
-
-static LOOT_GUIDS: OnceLock<Vec<([u8; 16], String)>> = OnceLock::new();
-static LOOT_REPORTS: AtomicU32 = AtomicU32::new(0);
-static LOOT_WORLD_REPORTS: AtomicU32 = AtomicU32::new(0);
-
-fn loot_guids() -> &'static Vec<([u8; 16], String)> {
-    LOOT_GUIDS.get_or_init(|| {
-        let mut out = Vec::new();
-        let Ok(dir) = std::env::current_dir() else { return out };
-        let Ok(text) = std::fs::read_to_string(dir.join("export").join("m182_objects.csv")) else { return out };
-        for line in text.lines().skip(1) {
-            let mut parts = line.split(',');
-            let (Some(name), Some(guid)) = (parts.next(), parts.next()) else { continue };
-            if name.starts_with("LootContainer") {
-                if let Some(g) = super::config::parse_guid(guid) {
-                    out.push((g, name.to_string()));
-                }
-            }
-        }
-        out
-    })
-}
-
-fn container_report(label: &str, manager: usize, id: u32) {
-    let Some((_, _, slots)) = entity_layout(manager, id) else {
-        log(&format!("loot: {label}: entity {id} is gone"));
-        return;
-    };
-    let mut loot = Vec::new();
-    let mut inventory = String::new();
-    for slot in &slots {
-        let Some(b) = read_bytes(slot.addr, slot.stride) else { continue };
-        if slot.stride == 12 {
-            loot.push(format!("{}:{}", slot.index, hex(&b)));
-        } else if slot.stride == 96 && inventory.is_empty() {
-            inventory = hex(&b);
-        }
-    }
-    log(&format!("loot: {label}: entity {id} 12-byte components [{}] inventory {inventory}", loot.join(" ")));
-}
-
-/// Writes down the loot container the game builds when a creature dies, now and a little later,
-/// so what a player finds when opening it can be compared with a creature from the world.
-fn loot_container_check(manager: usize, desc: usize, ret: u32) {
-    let ours = LOOT_WATCH_UNTIL.load(Ordering::Relaxed) > now_ms();
-    if !ours && (LOOT_WORLD_REPORTS.load(Ordering::Relaxed) >= 2 || now_ms() < 60_000) {
-        return;
-    }
-    if LOOT_REPORTS.load(Ordering::Relaxed) >= 8 {
-        return;
-    }
-    let Some(head) = read_bytes(desc + 4, 16) else { return };
-    let Some((_, name)) = loot_guids().iter().find(|(g, _)| head.len() >= 16 && g[..] == head[..16]) else { return };
-    if !ours {
-        LOOT_WORLD_REPORTS.fetch_add(1, Ordering::Relaxed);
-    }
-    if LOOT_REPORTS.fetch_add(1, Ordering::Relaxed) >= 8 {
-        return;
-    }
-    let label = format!("{name} ({})", if ours { "creature from the panel" } else { "creature from the world" });
-    let _ = std::thread::Builder::new().name("m182-loot-report".into()).spawn(move || {
-        let mut waited = 0u64;
-        for (k, at) in [1_500u64, 30_000, 90_000].into_iter().enumerate() {
-            std::thread::sleep(Duration::from_millis(at - waited));
-            waited = at;
-            container_report(&format!("{label} after {} s", at / 1000), manager, ret);
-            if !ours && k == 0 {
-                break;
-            }
-        }
-    });
 }
 
 const HASH_RANDOM_LOOT_CONTAINER: u32 = 0x061d_da01;
@@ -1713,7 +1620,6 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
         return;
     }
     if LIVE.spawner() {
-        loot_container_check(manager, desc, ret);
         harvest_loot_node(manager, edx, desc);
     }
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
@@ -1932,16 +1838,12 @@ fn spawn_now(manager: usize) {
         if !object && !delivery {
             let (px, pz) = ((base.0.wrapping_add(dx)) as f64 / METERS, (base.2.wrapping_add(dz)) as f64 / METERS);
             match loot_node_for(&template, px, pz) {
-                Some((node, same_kind, meters)) => {
+                Some((node, _, _)) => {
                     loot_node[4..8].copy_from_slice(&node.to_le_bytes());
                     write_u32(&mut entries.0, 48, HASH_RANDOM_LOOT_CONTAINER);
                     write_u64(&mut entries.0, 56, loot_node.as_ptr() as u64);
                     write_u64(&mut entries.0, 64, RANDOM_LOOT_CONTAINER_SIZE as u64);
                     entry_count = 3;
-                    log(&format!(
-                        "loot: creature rolls from loot node {node:08x} of a creature of the world ({}, {meters:.0} m away)",
-                        if same_kind { "same kind" } else { "other kind" }
-                    ));
                 }
                 None => log("loot: no loot node known yet; it is taken from the first creatures the game spawns, walk around and try again"),
             }
@@ -2044,6 +1946,7 @@ fn spawn_effect(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u
 struct Powers {
     god: bool,
     stamina: bool,
+    aura: bool,
     fly: bool,
     fly_speed: Option<f32>,
 }
@@ -2094,6 +1997,7 @@ struct PowerState {
     client_powers: HashMap<u32, ClientPowers>,
     client_scan: Option<Instant>,
     shield_at: Option<Instant>,
+    aura_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -2105,6 +2009,7 @@ struct ClientPowers {
     seen: Vec<u32>,
     heal: bool,
     absent_since: Option<Instant>,
+    aura_at: Option<Instant>,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -2537,7 +2442,7 @@ fn refresh_powers(st: &mut PowerState, dir: &std::path::Path) {
                 st.protect_until = Some(Instant::now() + Duration::from_secs(8));
                 st.hover = None;
             }
-            log(&format!("powers: god={} stamina={} fly={}", p.god, p.stamina, p.fly));
+            log(&format!("powers: god={} stamina={} aura={} fly={}", p.god, p.stamina, p.aura, p.fly));
             st.powers = p;
         }
         Err(e) => log(&format!("powers: invalid file ({e})")),
@@ -3215,7 +3120,7 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
         match serde_json::from_str::<Powers>(&text) {
             Ok(p) => {
-                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} fly={}", (client & 0x3f) + 1, p.god, p.stamina, p.fly));
+                log(&format!("powers (chat client {client}, entity {}): god={} stamina={} aura={} fly={}", (client & 0x3f) + 1, p.god, p.stamina, p.aura, p.fly));
                 let slot = st.client_powers.entry(client).or_default();
                 slot.powers = p;
                 slot.mtime = mtime;
@@ -3304,6 +3209,9 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
             refill_stamina(manager, id, &mut c.stamina_peak);
             refill_mana(manager, id, &mut c.mana_peak);
         }
+        if c.powers.aura {
+            divine_aura(manager, id, &mut c.aura_at);
+        }
         if c.powers.stamina {
             if tick % 2 == 0 {
                 cleanse_debuffs(manager, id, &mut c.seen);
@@ -3316,6 +3224,25 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
     }
 }
 
+const DIVINE_EFFECT: &str = "VFX_Preview_Enemy_Mage_Teleport";
+const DIVINE_EVERY: Duration = Duration::from_millis(1200);
+const DIVINE_LIFE_MS: u64 = 1500;
+
+/// The teleport effect around an administrator who switched the divine aura on, renewed while it is
+/// on and every copy removes itself. Nothing runs for anybody else, nor when it is off.
+fn divine_aura(manager: usize, id: u32, last: &mut Option<Instant>) {
+    if last.is_some_and(|t| t.elapsed() < DIVINE_EVERY) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let Some(t) = transform_of(manager, id) else { return };
+    if t.len() < 24 {
+        return;
+    }
+    let Some(template) = super::vfx::template_guid(DIVINE_EFFECT) else { return };
+    super::vfx::queue_effect(template, (u64_at(&t, 0) as i64, u64_at(&t, 8) as i64, u64_at(&t, 16) as i64), 1.6, DIVINE_LIFE_MS);
+}
+
 fn spawn_busy() -> bool {
     PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true)
 }
@@ -3326,8 +3253,7 @@ fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
     while super::chat::queued() > 0 {
         let busy = spawn_busy();
         let Some(item) = super::chat::take_request(|file| !(busy && file == super::chat::SPAWN_REQUEST)) else { break };
-        super::perf::add(super::perf::ORDER_WAIT, item.at.elapsed().as_nanos() as u64);
-        let written = super::perf::time(super::perf::ORDERS, || {
+        let written = (|| {
             let temp = dir.join(format!("{}.run.tmp", item.file));
             let target = dir.join(item.file);
             if std::fs::write(&temp, &item.body).is_err() || std::fs::rename(&temp, &target).is_err() {
@@ -3341,72 +3267,38 @@ fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
                 run_command(st, dir);
             }
             true
-        });
+        })();
         if !written {
             log(&format!("order from client {} could not be carried out: its file could not be written", item.client));
         }
     }
 }
 
-static SLOW_TICKS: AtomicU64 = AtomicU64::new(0);
-const TICK_PARTS: usize = 13;
-
-/// A power tick that took long: says which part of it did, so a hitch can be traced to its cause.
-fn report_slow_tick(total: Duration, marks: &[u64; TICK_PARTS]) {
-    const NAMES: [&str; TICK_PARTS] = [
-        "orders", "chat file", "powers file", "client powers file", "command file", "scan file", "world", "resource lock", "shield", "client powers", "heal", "stamina", "fly",
-    ];
-    let n = SLOW_TICKS.fetch_add(1, Ordering::Relaxed);
-    if n >= 30 && n % 20 != 0 {
-        return;
-    }
-    let parts: Vec<String> = marks.iter().enumerate().filter(|(_, us)| **us >= 5_000).map(|(i, us)| format!("{} {} ms", NAMES[i], us / 1000)).collect();
-    log(&format!("slow power tick: {} ms ({})", total.as_millis(), if parts.is_empty() { "spread over several parts".to_string() } else { parts.join(", ") }));
-}
-
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
-    let started = Instant::now();
-    let mut marks = [0u64; TICK_PARTS];
-    let mut last = started;
-    macro_rules! mark {
-        ($i:expr) => {{
-            let now = Instant::now();
-            marks[$i] = now.duration_since(last).as_micros() as u64;
-            last = now;
-        }};
-    }
     drain_requests(st, dir);
-    mark!(0);
     if poll {
-        mark!(1);
-        super::perf::time(super::perf::POLL, || {
+        {
             refresh_powers(st, dir);
-            mark!(2);
             if SERVER_MGR.load(Ordering::SeqCst) != 0 {
                 refresh_client_powers(st, dir);
             }
-            mark!(3);
             run_command(st, dir);
-            mark!(4);
             scan_request(st, dir);
-            mark!(5);
-        });
+        }
     }
     let Some((manager, id)) = world_pair() else { return };
     let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
     if hosting && tick % 8 == 0 {
-        super::perf::time(super::perf::DELIVERIES, deliveries_tick);
+        deliveries_tick();
     }
     if hosting && tick % 4 == 0 {
-        super::perf::time(super::perf::GROUPS, || groups_tick(st, dir));
+        groups_tick(st, dir);
     }
     if hosting && tick % 16 == 0 {
-        super::perf::time(super::perf::SPAWNERS, || spawners_tick(&mut st.spawners, dir));
+        spawners_tick(&mut st.spawners, dir);
     }
-    mark!(6);
     let client = client_pair();
     refresh_resource_lock(st, manager, id, client, hosting);
-    mark!(7);
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
@@ -3434,12 +3326,10 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
-    super::perf::time(super::perf::SHIELD, || shield_tick(st, &want));
-    mark!(8);
+    shield_tick(st, &want);
     if hosting {
         apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick, poll);
     }
-    mark!(9);
     if st.heal_once {
         refill_health(manager, id);
         if let Some((m, c)) = client {
@@ -3453,7 +3343,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             refill_mana(m, c, &mut st.mana_peak_c);
         }
     }
-    mark!(10);
     if st.powers.stamina {
         if tick % 2 == 0 {
             cleanse_debuffs(manager, id, &mut st.buffs_seen);
@@ -3467,7 +3356,9 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
-    mark!(11);
+    if hosting && st.powers.aura {
+        divine_aura(manager, id, &mut st.aura_at);
+    }
     if st.powers.fly {
         if !st.gravity_off {
             st.gravity_off = true;
@@ -3486,11 +3377,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         set_gravity(st, true);
         st.last_written = None;
         log("fly: gravity restored");
-    }
-    mark!(12);
-    let total = started.elapsed();
-    if total >= Duration::from_millis(250) {
-        report_slow_tick(total, &marks);
     }
 }
 
@@ -3569,25 +3455,12 @@ pub fn new_power_state() -> PowerState {
         client_powers: HashMap::new(),
         client_scan: None,
         shield_at: None,
+        aura_at: None,
     }
 }
 
 
-fn watch_collection(manager: usize, id: u32, item: u32) {
-    let _ = std::thread::Builder::new().name("m182-pickup-watch".into()).spawn(move || {
-        for second in 1..=6u32 {
-            std::thread::sleep(Duration::from_secs(1));
-            if find_record(manager, id).is_none() {
-                log(&format!("delivery: item {item} was collected after {second} s (the pickup entity {id} is gone)"));
-                return;
-            }
-        }
-        log(&format!("delivery: item {item} is still on the ground after 6 s (the pickup entity {id} was not collected)"));
-    });
-}
-
 fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
-    watch_collection(manager, id, g.item);
     let Some((_, _, slots)) = entity_layout(manager, id) else {
         log(&format!("delivery: entity {id} not readable"));
         return;
@@ -4103,13 +3976,6 @@ fn resembles_host(p: &Placement, id: u32) -> bool {
     if let Ok(mut guard) = DEF_SIMILAR.lock() {
         guard.get_or_insert_with(HashMap::new).insert((p.def, host.def), verdict);
     }
-    log(&format!(
-        "players: entity {id} ({} components) shares {:.0}% of the host player's {} components: {}",
-        b.len(),
-        score * 100.0,
-        a.len(),
-        if verdict { "accepted" } else { "ignored" }
-    ));
     verdict
 }
 
@@ -4152,10 +4018,7 @@ fn def_is_player(manager: usize, id: u32, p: &Placement) -> bool {
     if let Ok(mut guard) = DEF_CLASS.lock() {
         guard.get_or_insert_with(HashMap::new).insert(p.def, verdict);
     }
-    if verdict {
-        log(&format!("players: entity definition {:#x} (first seen on entity {id}) looks like a player", p.def));
-    }
-    let _ = manager;
+    let _ = (manager, id);
     verdict
 }
 
@@ -5035,7 +4898,6 @@ fn powers_loop() {
     clear_client_power_files(&dir);
     let mut tick = 0u32;
     let mut polled = Instant::now();
-    let mut reported = Instant::now();
     loop {
         let urgent = st.powers.god
             || st.powers.fly
@@ -5068,13 +4930,7 @@ fn powers_loop() {
         if poll {
             polled = Instant::now();
         }
-        super::perf::time(super::perf::POWER, || power_tick(&mut st, &dir, tick, poll));
-        if reported.elapsed() >= Duration::from_secs(60) {
-            reported = Instant::now();
-            if let Some(line) = super::perf::report() {
-                log(&line);
-            }
-        }
+        power_tick(&mut st, &dir, tick, poll);
     }
 }
 

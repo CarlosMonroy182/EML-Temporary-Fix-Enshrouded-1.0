@@ -406,11 +406,6 @@ pub fn narrow_last_entry_to(queue: usize, targets: &[usize], line: &[u8]) -> boo
     } as u32;
     let Some(peers) = read_bytes(queue + 0x0c, 32 * 12) else { return false };
     let mut mask = u32_at(&entry, 0x20);
-    static REPORTED: AtomicU32 = AtomicU32::new(0);
-    if REPORTED.fetch_add(1, Ordering::Relaxed) < 3 {
-        let active: Vec<usize> = (0..32).filter(|p| peers[p * 12] != 0).collect();
-        super::spawner::log(&format!("chat: private answer for peer(s) {targets:?}: active peers {active:?}, delivered mask {mask:#x}, entry header {}", super::spawn_probe::hex(&entry[..0x30])));
-    }
     for peer in 0..32usize {
         if targets.contains(&peer) || mask >> peer & 1 != 0 {
             continue;
@@ -474,7 +469,6 @@ fn tell_other_panels(out: usize, queue: usize, kind: usize, text: usize, author:
     sent
 }
 
-static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
 
 extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize, frame: usize) -> u8 {
     if REPLY_HOOK.load(Ordering::Relaxed) && super::spawner::is_remote_client() && take_server_reply(text) {
@@ -501,12 +495,6 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
     }
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
-    if CHAT_SEEN.fetch_add(1, Ordering::Relaxed) < 20 {
-        super::spawner::log(&format!(
-            "chat seen: out {out:#x} context {context:#x} kind {kind:#x} client {client:#x} length {length} ours {}",
-            super::chat::has_prefix(&message)
-        ));
-    }
     if super::invites::is_command(&message) {
         let verdict = team_command(text, &message, client as u32);
         if verdict == 0 && super::shared::peek_change() {
@@ -543,7 +531,7 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
             super::shared::remember_panel(client as u32, &who_is(entry), std::time::Instant::now());
         }
     }
-    match super::perf::time(super::perf::CHAT, || super::chat::handle(&message, &key, client as u32, &dir)) {
+    match super::chat::handle(&message, &key, client as u32, &dir) {
         super::chat::Verdict::Pass => 0,
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
@@ -773,7 +761,32 @@ unsafe extern "win64" fn stub_pay_costs() {
     );
 }
 
-const GATHER_CALLER: usize = 0x3edf35;
+const GATHER_BEFORE: [u8; 13] = [0x4c, 0x89, 0x65, 0xb0, 0x48, 0x8d, 0x4d, 0x80, 0x44, 0x89, 0x65, 0xb8, 0xe8];
+const GATHER_AFTER: [u8; 17] = [0x84, 0xc0, 0x0f, 0x84, 0xce, 0x00, 0x00, 0x00, 0x45, 0x84, 0xed, 0x0f, 0x84, 0xd1, 0x00, 0x00, 0x00];
+
+static GATHER_SITES: std::sync::Mutex<Vec<(usize, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// True when the payment was asked by the code that hands a mined resource over (the same instructions in the
+/// game and in the dedicated server, at different addresses): those payments must reach the game untouched.
+fn is_gather_site(caller: usize) -> bool {
+    if let Ok(seen) = GATHER_SITES.try_lock() {
+        if let Some((_, known)) = seen.iter().find(|(at, _)| *at == caller) {
+            return *known;
+        }
+    }
+    let matches = (|| {
+        let before = super::spawn_probe::read_bytes(caller.checked_sub(GATHER_BEFORE.len() + 4)?, GATHER_BEFORE.len())?;
+        let after = super::spawn_probe::read_bytes(caller, GATHER_AFTER.len())?;
+        Some(before == GATHER_BEFORE && after == GATHER_AFTER)
+    })()
+    .unwrap_or(false);
+    if let Ok(mut seen) = GATHER_SITES.try_lock() {
+        if seen.len() < 64 {
+            seen.push((caller, matches));
+        }
+    }
+    matches
+}
 
 static PAY_CALLERS: std::sync::Mutex<Vec<(usize, u8)>> = std::sync::Mutex::new(Vec::new());
 
@@ -813,7 +826,7 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usi
                             &entries[..entries.len().min(6)]
                         ));
                     }
-                    if admin && caller.wrapping_sub(base) != GATHER_CALLER {
+                    if admin && !is_gather_site(caller) {
                         return 1;
                     }
                 }
@@ -1568,5 +1581,24 @@ mod zones_offset_tests {
         code.extend_from_slice(&[0x90; 8]);
         assert_eq!(zones_offset_from_setter(&code), Some(0x15F8A68));
         assert_eq!(zones_offset_from_setter(&[0x90; 64]), None);
+    }
+}
+
+#[cfg(test)]
+mod gather_site_tests {
+    use super::*;
+
+    #[test]
+    fn the_code_that_hands_over_mined_resources_is_recognised_wherever_it_sits() {
+        let mut code = Vec::new();
+        code.extend_from_slice(&GATHER_BEFORE);
+        code.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        code.extend_from_slice(&GATHER_AFTER);
+        let caller = code.as_ptr() as usize + GATHER_BEFORE.len() + 4;
+        assert!(is_gather_site(caller));
+        let mut other = code.clone();
+        other[0] = 0x4d;
+        let caller = other.as_ptr() as usize + GATHER_BEFORE.len() + 4;
+        assert!(!is_gather_site(caller));
     }
 }

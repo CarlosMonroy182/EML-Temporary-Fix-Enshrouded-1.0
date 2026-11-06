@@ -1715,7 +1715,7 @@ mod tests {
         st.fly_speed = 20.0;
         powers::save(&dir, &st).unwrap();
         let back = powers::PowersState::load(&dir);
-        assert!(back.god && !back.fly && !back.stamina);
+        assert!(back.god && !back.fly && !back.stamina && !back.aura);
         let _ = std::fs::remove_dir_all(dir);
     }
 

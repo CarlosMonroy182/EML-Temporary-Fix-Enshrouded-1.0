@@ -186,3 +186,12 @@ answer arrives within 8 s (`ANSWERED` is set by `accept_reply`, `store_roster`, 
 a trailing `open`, and every later request carries it. The server (`chat::take_open`) then answers the way it did before the narrowing:
 to the whole chat for the player list and teams, unnarrowed lines for shared state. The server logs the first three narrowing attempts
 (`chat: private answer for peer(s) ...`) with the active peers and the entry header, to find out why the private path fails.
+
+## Gather call site on the dedicated server (Nov 6)
+`hook_pay_costs` lets administrators build for free but the mining/gather call must reach the game untouched. The old check compared the caller with a client-only offset, so on `enshrouded_server.exe` mining paid nothing out. `is_gather_site` now recognises the call by the bytes around it (`GATHER_BEFORE` / `GATHER_AFTER`, unique in both executables) and caches the verdict per caller address.
+
+## Cleanup of diagnostics (Nov 6)
+Removed: `perf.rs` and the per-minute performance line, the slow-tick marks, the loot container reports and `m182-loot-report` thread, the pickup watch thread, the "chat seen", "player table", "entity definition looks like a player / shares x%" and narrowing diagnostics. Failure logs stay.
+
+## Divine aura (Nov 6)
+`aura` in the powers file (panel: Admin del jugador) makes the server create `VFX_Preview_Enemy_Mage_Teleport` (has LifeTime, so every copy removes itself) at the administrator's feet every 1.2 s through `vfx::queue_effect`. Only runs while the flag is on; per-client flags use the same `m182_powers_<client>` files as god/stamina. The effect is a game template known to every client. Not confirmed visually in game yet.
