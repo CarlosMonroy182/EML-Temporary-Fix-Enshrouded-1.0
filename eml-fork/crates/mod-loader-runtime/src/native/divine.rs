@@ -1,6 +1,6 @@
 //! Divine aura: the glow of the towers' teleport platforms (`Prop_Ancient_Teleporter_Effect_On`)
-//! follows an administrator who switched the aura on and is taken out of the world when it is
-//! switched off. Nothing here runs for anybody else, nor while no aura is on.
+//! appears under an administrator who switched the aura on once he has stood still for ten seconds,
+//! and is taken out of the world as soon as he moves or switches the aura off. Nothing here runs for anybody else, nor while no aura is on.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -11,11 +11,9 @@ use super::spawner;
 
 const LIGHT_GUID: &str = "1c3281da-e7d4-4b41-9033-c85daec7f72a";
 const RECORD_FILE: &str = "m182_divine_lights.json";
-const MOVE_METERS: f64 = 2.5;
-const STEP_METERS: f64 = 0.25;
-const HELD_METERS: f64 = 1.0;
-const RECORD_MOVE_METERS: f64 = 3.0;
-const CHECK_EVERY: Duration = Duration::from_millis(100);
+const CHECK_EVERY: Duration = Duration::from_millis(500);
+const STILL_AFTER: Duration = Duration::from_secs(10);
+const STILL_METERS: f64 = 1.0;
 const ORDER_RETRY: Duration = Duration::from_secs(3);
 const STRAY_METERS: f64 = 3.0;
 const SWEEP_EVERY: Duration = Duration::from_secs(8);
@@ -31,9 +29,8 @@ struct Owner {
     asked: Option<Instant>,
     checked: Option<Instant>,
     old: Vec<u32>,
-    wrote: Option<[f64; 3]>,
-    fails: u8,
-    rigid: bool,
+    anchor: Option<[f64; 3]>,
+    still_since: Option<Instant>,
 }
 
 static OWNERS: Mutex<Option<HashMap<u32, Owner>>> = Mutex::new(None);
@@ -124,41 +121,34 @@ pub fn follow(manager: usize, key: u32, position: [i64; 3]) {
         spawner::retire_entity(manager, id);
     }
     let here = meters(position);
+    let moved = owner.anchor.is_none_or(|a| flat(a, here) > STILL_METERS || (a[1] - here[1]).abs() > STILL_METERS);
+    if moved {
+        owner.anchor = Some(here);
+        owner.still_since = Some(Instant::now());
+        if let Ok(mut orders) = ORDERS.lock() {
+            orders.retain(|(k, _)| *k != key);
+        }
+        if let Some(id) = owner.id.take() {
+            spawner::retire_entity(manager, id);
+            forget(owner.spot);
+        }
+        return;
+    }
     if let Some(id) = owner.id {
-        let Some(current) = spawner::entity_position(manager, id) else {
-            if spawner::find_record(manager, id).is_none() {
-                owner.id = None;
-                forget(owner.spot);
-            }
-            return;
-        };
-        let apart = flat(current, here).max((current[1] - here[1]).abs());
-        if apart <= STEP_METERS {
-            owner.fails = 0;
-            return;
+        if spawner::find_record(manager, id).is_none() {
+            owner.id = None;
+            forget(owner.spot);
+        } else if flat(owner.spot, here) > 2.0 {
+            spawner::retire_entity(manager, id);
+            forget(owner.spot);
+            owner.id = None;
+            owner.anchor = Some(here);
+            owner.still_since = Some(Instant::now());
         }
-        if !owner.rigid {
-            if owner.wrote.is_some_and(|w| flat(current, w) > HELD_METERS) {
-                owner.fails += 1;
-            } else {
-                owner.fails = 0;
-            }
-            if owner.fails >= 3 {
-                owner.rigid = true;
-                spawner::log("divine aura: the glow does not follow by moving it; it is placed again when you walk away");
-            } else if spawner::move_entity(manager, id, position) {
-                owner.wrote = Some(here);
-                if flat(owner.spot, here) > RECORD_MOVE_METERS {
-                    forget(owner.spot);
-                    owner.spot = here;
-                    record(here);
-                }
-                return;
-            }
-        }
-        if apart <= MOVE_METERS {
-            return;
-        }
+        return;
+    }
+    if !owner.still_since.is_some_and(|t| t.elapsed() >= STILL_AFTER) {
+        return;
     }
     if owner.asked.is_some_and(|t| t.elapsed() < ORDER_RETRY) {
         return;
@@ -210,8 +200,6 @@ pub fn run_orders(manager: usize) {
                     forget(owner.spot);
                 }
                 owner.spot = meters(at);
-                owner.wrote = None;
-                owner.fails = 0;
                 record(owner.spot);
             }
             None => {
