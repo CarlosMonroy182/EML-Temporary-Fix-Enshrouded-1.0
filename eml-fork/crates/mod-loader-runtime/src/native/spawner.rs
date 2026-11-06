@@ -1135,6 +1135,39 @@ struct Resolved {
 
 static RESOLVED: Mutex<Option<HashMap<(usize, u32), Resolved>>> = Mutex::new(None);
 static SHAPES: Mutex<Option<HashMap<(usize, usize), (Instant, Option<(usize, usize)>)>>> = Mutex::new(None);
+/// Lookups that found nothing: (manager, entity, which record) -> (when it last failed, how many times in a row).
+static MISSING: Mutex<Option<HashMap<(usize, u32, usize), (Instant, u32)>>> = Mutex::new(None);
+const MISSING_BASE_MS: u64 = 250;
+const MISSING_MAX_MS: u64 = 8000;
+
+/// True while a record that was not found a moment ago should not be searched for again yet. A failed search
+/// walks every component slot of the entity, so repeating it every few milliseconds was the main cost of the
+/// shield on a game client (where the server owns the health record). The wait doubles up to 8 s.
+fn recently_missing(key: (usize, u32, usize)) -> bool {
+    let Ok(guard) = MISSING.lock() else { return false };
+    let Some((at, fails)) = guard.as_ref().and_then(|m| m.get(&key).copied()) else { return false };
+    let wait = (MISSING_BASE_MS << fails.saturating_sub(1).min(5)).min(MISSING_MAX_MS);
+    at.elapsed() < Duration::from_millis(wait)
+}
+
+fn note_missing(key: (usize, u32, usize)) {
+    if let Ok(mut guard) = MISSING.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        if map.len() > 256 {
+            map.clear();
+        }
+        let fails = map.get(&key).map(|v| v.1).unwrap_or(0).saturating_add(1);
+        map.insert(key, (Instant::now(), fails));
+    }
+}
+
+fn note_found(key: (usize, u32, usize)) {
+    if let Ok(mut guard) = MISSING.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(&key);
+        }
+    }
+}
 
 /// Forgets what the hot paths remembered about where entities live.
 pub fn forget_layouts() {
@@ -1142,6 +1175,9 @@ pub fn forget_layouts() {
         *r = None;
     }
     if let Ok(mut r) = SHAPES.lock() {
+        *r = None;
+    }
+    if let Ok(mut r) = MISSING.lock() {
         *r = None;
     }
 }
@@ -2068,7 +2104,6 @@ static RES_INDEX: [[AtomicI32; 6]; 2] = [
     [AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1), AtomicI32::new(-1)],
 ];
 static FALL_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
-static FALL_TRIES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
 fn kind_of(manager: usize) -> usize {
     let c = CLIENT_MGR.load(Ordering::Relaxed);
@@ -2094,19 +2129,25 @@ fn resource_sized(manager: usize, id: u32, which: usize, signature: u32, size: u
             }
         }
     }
+    let key = (manager, id, which);
+    if recently_missing(key) {
+        return None;
+    }
     for index in 0..COMPONENT_SLOTS {
-        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        let Some((addr, stride)) = component_quick(&p, index) else { continue };
         if stride != size {
             continue;
         }
         if let Some(b) = read_bytes(addr, size) {
             if b.len() >= size && u32_at(&b, 0) == signature {
                 RES_INDEX[kind][which].store(index as i32, Ordering::Relaxed);
+                note_found(key);
                 log(&format!("powers: resource {which} found at component {index} ({})", if kind == 1 { "client" } else { "server" }));
                 return Some((addr, b));
             }
         }
     }
+    note_missing(key);
     None
 }
 
@@ -2240,18 +2281,20 @@ fn find_fall(manager: usize, id: u32) -> Option<usize> {
             }
         }
     }
-    if FALL_TRIES[kind].load(Ordering::Relaxed) >= 6 {
+    let key = (manager, id, 99usize);
+    if recently_missing(key) {
         return None;
     }
-    FALL_TRIES[kind].fetch_add(1, Ordering::Relaxed);
     for index in 0..COMPONENT_SLOTS {
-        let Some((addr, stride)) = component_address(&p, index) else { continue };
+        let Some((addr, stride)) = component_quick(&p, index) else { continue };
         if stride == FALL_DAMAGE_SIZE && matches(addr) {
             FALL_INDEX[kind].store(index as i32, Ordering::Relaxed);
+            note_found(key);
             log(&format!("shield: fall damage found at component {index} ({})", if kind == 1 { "client" } else { "server" }));
             return Some(addr);
         }
     }
+    note_missing(key);
     None
 }
 
@@ -2359,21 +2402,33 @@ pub fn set_shield_gap(ms: u64) {
     SHIELD_GAP_MS.store(ms, Ordering::Relaxed);
 }
 
+/// True when the last shield pass found nothing it could protect (a game client whose health the server owns):
+/// the power loop then slows down instead of polling every few milliseconds.
+static SHIELD_IDLE: AtomicBool = AtomicBool::new(false);
+
+pub fn shield_idle() -> bool {
+    SHIELD_IDLE.load(Ordering::Relaxed)
+}
+
 fn shield_tick(st: &mut PowerState, want: &[(usize, u32)]) {
     let stale = st.saved.keys().any(|k| !want.contains(k));
     let gap = Duration::from_millis(SHIELD_GAP_MS.load(Ordering::Relaxed));
     let due = st.shield_at.map(|t| t.elapsed() >= gap).unwrap_or(true);
     if !due && !stale {
+        let mut any = false;
         for &(manager, id) in want {
-            refill_health(manager, id);
+            any |= refill_health(manager, id);
         }
+        SHIELD_IDLE.store(!any && !want.is_empty(), Ordering::Relaxed);
         return;
     }
     st.shield_at = Some(Instant::now());
+    let mut any = false;
     for &(manager, id) in want {
         shield_on(st, manager, id);
-        refill_health(manager, id);
+        any |= refill_health(manager, id);
     }
+    SHIELD_IDLE.store(!any && !want.is_empty(), Ordering::Relaxed);
     let stale: Vec<(usize, u32)> = st.saved.keys().filter(|k| !want.contains(k)).cloned().collect();
     for (manager, id) in stale {
         shield_off(st, manager, id);
@@ -4760,8 +4815,17 @@ fn powers_loop() {
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
+        let only_shield = !st.powers.fly
+            && !st.heal_once
+            && st.saved.is_empty()
+            && st.zone_ids.is_empty()
+            && st.groups.zones.is_empty()
+            && !st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
         let pause = if st.powers.fly || client_powers_busy(&st) {
             1
+        } else if urgent && only_shield && shield_idle() {
+            // god mode is on but there is nothing to protect on this machine right now: look again slowly
+            50
         } else if urgent {
             4
         } else if st.powers.stamina || client_stamina_on(&st) {

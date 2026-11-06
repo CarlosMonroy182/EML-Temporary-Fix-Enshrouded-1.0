@@ -37,6 +37,9 @@ pub fn hit(id: usize, regs: *const usize) {
     }
     let r = unsafe { std::slice::from_raw_parts(regs, 8) };
     let (r8, rdx, rcx, ret) = (r[4], r[5], r[6], r[7]);
+    if id == 2 {
+        super::outbox::flush_seen(rcx);
+    }
     let base = super::spawn_probe::module_base();
     let from = ret.wrapping_sub(base);
     let desc = if id < 2 { r8.wrapping_sub(base) } else { 0 };

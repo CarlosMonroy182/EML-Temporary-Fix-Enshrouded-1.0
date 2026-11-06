@@ -46,7 +46,7 @@ pub struct NativeConfig {
     pub client_build_anywhere: bool,
     /// Diagnostic: logs which thread calls each hooked game function and how often (off by default).
     pub thread_probe: bool,
-    /// Experimental: sends the lines left in `m182_chat_out.txt` through the game's own chat function.
+    /// Sends the lines the panel leaves in `m182_chat_out.txt` through the game's own chat function (no typing).
     pub chat_inject: bool,
 }
 
@@ -57,7 +57,7 @@ impl Default for NativeConfig {
             free_building: true,
             client_build_anywhere: true,
             thread_probe: false,
-            chat_inject: false,
+            chat_inject: true,
             pvp: false,
             pvp_friend_checks: false,
             pvp_friendly_fire: false,

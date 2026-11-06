@@ -72,7 +72,7 @@ fn chat_hook_swallows_only_valid_commands() {
         std::ptr::copy_nonoverlapping(signatures::CHAT_ENQUEUE.as_ptr(), func, signatures::CHAT_ENQUEUE.len());
         std::ptr::copy_nonoverlapping(TAIL.as_ptr(), func.add(signatures::CHAT_ENQUEUE.len()), TAIL.len());
 
-        let cfg = config::NativeConfig { enabled: true, chat_key: "secret-key".into(), ..Default::default() };
+        let cfg = config::NativeConfig { enabled: true, chat_key: "secret-key".into(), chat_admin_only: false, ..Default::default() };
         config::LIVE.apply(&cfg);
         assert_eq!(patch::install(), patch::Outcome::Done);
         assert_ne!(patch::CHAT_TRAMPOLINE.load(std::sync::atomic::Ordering::SeqCst), 0);

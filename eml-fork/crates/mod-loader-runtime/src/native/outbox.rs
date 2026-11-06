@@ -5,66 +5,59 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub const OUT_FILE: &str = "m182_chat_out.txt";
+/// Tells the panel whether lines can be queued right now: holds `1` while connected to a server, `0` otherwise.
+pub const READY_FILE: &str = "m182_chat_out.ready";
 const MAX_LINE: usize = 0x400;
+const MAX_WAITING: usize = 40;
 const GAP: Duration = Duration::from_millis(300);
-const CAPTURE_LOGGED_MAX: u64 = 16;
+/// The sender function runs every frame while connected; if it has been silent longer than this the
+/// connection is gone and the queue pointer must not be used.
+const FRESH_MS: u64 = 1500;
 const SENT_LOGGED_MAX: u64 = 30;
 
-/// The extra arguments of a real chat call, copied from the game's own stack.
-#[derive(Clone, Copy, Debug)]
-struct Args {
-    a5: u32,
-    a6: u32,
-    a7: u32,
-    a8: u64,
-    optional: bool,
-}
-
+/// Chat queue the game's per-frame sender empties (address of the current connection's queue).
 static QUEUE: AtomicUsize = AtomicUsize::new(0);
-static TEMPLATE: Mutex<Option<Args>> = Mutex::new(None);
+/// Milliseconds (since `START`) of the last time the per-frame sender ran.
+static LAST_FLUSH: AtomicU64 = AtomicU64::new(0);
+static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+/// Address of the game's "queue a chat line" function (0 until found).
+static SEND_FN: AtomicUsize = AtomicUsize::new(0);
 static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_SENT: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
-static CAPTURED: AtomicU64 = AtomicU64::new(0);
 static SENT: AtomicU64 = AtomicU64::new(0);
+/// 0 = nothing written yet, 1 = ready file says connected, 2 = ready file says not connected.
+static REPORTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// The chat queue the game's own chat function last used (0 when it has not run yet).
+fn now_ms() -> u64 {
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// The chat queue the game last used (0 when the per-frame sender has not run yet).
 pub fn known_queue() -> usize {
     QUEUE.load(Ordering::Relaxed)
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
-    super::spawn_probe::u32_at(b, at)
+/// Where the game's "queue a chat line" function lives (set once at start).
+pub fn set_send_function(address: usize) {
+    SEND_FN.store(address, Ordering::SeqCst);
 }
 
-/// Called from the game thread by the hook on the chat function: remembers the chat queue and how the
-/// game itself fills in the arguments, so lines can later be queued the same way.
-pub fn capture(queue: usize, kind: usize, frame: usize, length: usize, client: usize) {
-    if queue != 0 {
-        QUEUE.store(queue, Ordering::Relaxed);
+/// Called from the game thread every time the game's per-frame chat sender starts: `this` is its object, whose
+/// field at +0xf8 is the queue lines are appended to. Two stores, nothing else.
+pub fn flush_seen(this: usize) {
+    if this == 0 {
+        return;
     }
-    let Some(stack) = super::spawn_probe::read_bytes(frame + 0x28, 0x28) else { return };
-    let extra = super::spawn_probe::u64_at(&stack, 0x20) as usize;
-    let tail = super::spawn_probe::read_bytes(extra, 16).unwrap_or_default();
-    let optional = tail.get(8).copied().unwrap_or(0) != 0;
-    let args = Args { a5: u32_at(&stack, 0), a6: u32_at(&stack, 8), a7: u32_at(&stack, 0x10), a8: super::spawn_probe::u64_at(&stack, 0x18), optional };
-    if super::probe::on() && CAPTURED.fetch_add(1, Ordering::Relaxed) < CAPTURE_LOGGED_MAX {
-        super::spawner::log(&format!(
-            "probe: chat call kind {kind:#x} length {length} client {client:#x} arguments {:#x} {:#x} {:#x} {:#x} optional {} ({})",
-            args.a5,
-            args.a6,
-            args.a7,
-            args.a8,
-            args.optional,
-            super::spawn_probe::hex(&tail)
-        ));
-    }
-    if kind == 0 {
-        if let Ok(mut t) = TEMPLATE.lock() {
-            *t = Some(args);
-        }
-    }
+    let queue = unsafe { std::ptr::read_unaligned((this + 0xf8) as *const usize) };
+    QUEUE.store(queue, Ordering::Relaxed);
+    LAST_FLUSH.store(now_ms(), Ordering::Relaxed);
+}
+
+fn connected() -> bool {
+    let last = LAST_FLUSH.load(Ordering::Relaxed);
+    last != 0 && QUEUE.load(Ordering::Relaxed) != 0 && now_ms().saturating_sub(last) <= FRESH_MS
 }
 
 /// Reads the lines the panel left in `m182_chat_out.txt` (only while chat sending is switched on).
@@ -72,6 +65,7 @@ pub fn poll(dir: &Path) {
     if !super::probe::inject_on() {
         return;
     }
+    report_ready(dir);
     let path = dir.join(OUT_FILE);
     if !path.exists() {
         return;
@@ -85,6 +79,9 @@ pub fn poll(dir: &Path) {
     let mut added = 0usize;
     if let Ok(mut lines) = LINES.lock() {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && l.len() <= MAX_LINE) {
+            if lines.len() >= MAX_WAITING {
+                break;
+            }
             lines.push_back(line.to_string());
             added += 1;
         }
@@ -92,6 +89,15 @@ pub fn poll(dir: &Path) {
     if added > 0 {
         PENDING.store(true, Ordering::SeqCst);
         super::spawner::log(&format!("chat out: {added} line(s) waiting for the game thread"));
+    }
+}
+
+/// Keeps `m182_chat_out.ready` in step with the connection (written only when it changes).
+fn report_ready(dir: &Path) {
+    let ready = SEND_FN.load(Ordering::Relaxed) != 0 && connected();
+    let state = if ready { 1 } else { 2 };
+    if REPORTED.swap(state, Ordering::Relaxed) != state {
+        let _ = std::fs::write(dir.join(READY_FILE), if ready { "1" } else { "0" });
     }
 }
 
@@ -103,6 +109,8 @@ fn warn_rarely(message: &str) {
     }
 }
 
+type SendFn = extern "win64" fn(*mut u8, usize, usize, *const [u64; 2], u32, u32) -> usize;
+
 /// Sends at most one waiting line. Runs inside a hook the game calls from its own thread, which is the
 /// thread that owns the chat queue, so the queue is never touched from two threads.
 pub fn pump() {
@@ -112,21 +120,20 @@ pub fn pump() {
     if LAST_SENT.lock().ok().and_then(|t| *t).is_some_and(|t| t.elapsed() < GAP) {
         return;
     }
-    let queue = QUEUE.load(Ordering::Relaxed);
-    let original = super::patch::CHAT_TRAMPOLINE.load(Ordering::SeqCst);
-    let template = TEMPLATE.lock().ok().and_then(|t| *t);
-    let (Some(template), true, true) = (template, queue != 0, original != 0) else {
-        warn_rarely("chat out: waiting for the game to show how it sends a chat line (write one normal message in the chat)");
-        return;
-    };
-    if template.optional {
-        warn_rarely("chat out: the game's own call carries an optional argument this build does not copy; nothing sent");
+    let function = SEND_FN.load(Ordering::SeqCst);
+    if function == 0 {
+        warn_rarely("chat out: the game's chat function was not found in this build; nothing sent");
         if let Ok(mut lines) = LINES.lock() {
             lines.clear();
         }
         PENDING.store(false, Ordering::SeqCst);
         return;
     }
+    if !connected() {
+        warn_rarely("chat out: not connected to a server right now; lines are kept until the game sends chat again");
+        return;
+    }
+    let queue = QUEUE.load(Ordering::Relaxed);
     let line = {
         let Ok(mut lines) = LINES.lock() else { return };
         let line = lines.pop_front();
@@ -141,10 +148,9 @@ pub fn pump() {
     }
     let bytes = line.as_bytes();
     let text: [u64; 2] = [bytes.as_ptr() as u64, bytes.len() as u64];
-    let none: [u64; 2] = [0, 0];
     let mut out = [0u8; 16];
-    let call: extern "win64" fn(*mut u8, usize, usize, *const [u64; 2], u32, u32, u32, u64, *const [u64; 2]) -> usize = unsafe { std::mem::transmute(original) };
-    call(out.as_mut_ptr(), queue, 0, &text, template.a5, template.a6, template.a7, template.a8, &none);
+    let call: SendFn = unsafe { std::mem::transmute(function) };
+    call(out.as_mut_ptr(), queue, 0, &text, 0, 0);
     if SENT.fetch_add(1, Ordering::Relaxed) < SENT_LOGGED_MAX {
         let status = out[0];
         super::spawner::log(&format!(

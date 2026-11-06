@@ -85,3 +85,25 @@ The CI step "Guard - dbghelp.dll must keep EML 0.2.0 loader fixes and the M182 V
 - The uploaded blob is `0x01` + a zstd frame. Decompressed it starts `00 <u32> "S2BH" 02 00 00 00 ...`. The `character` id printed by stage 1 (bytes 0xC..0x1C of the compressed blob) is not a real id.
 - After five 1.0f floats (around offset 0x4D of the decompressed data): u32 level, u32 XP, u32 unknown (stays equal between sessions). Seen: level 22 with XP 3946 -> 4496 -> 4741 over three joins of the same character.
 - Inventory items appear as plain u32 item ids (same ids as `vfx_items.csv`); spells are 11 bytes apart, weapons 24, so records are variable length.
+
+## Sending chat from code (chat_inject, build 1267041)
+
+The panel no longer has to type into the game. Findings (enshrouded.exe RVAs):
+
+- `0xeb1220` is the game's "queue a chat line to send": `(out, queue, kind, &{ptr,len<=0x400}, tag1, tag2)`. It is what the
+  typed chat box ends up calling (through the command dispatcher at `0x85c81a`). It appends to the list at `queue+0x208`.
+  `CHAT_ENQUEUE` (`0xe6e1c0`) is the *receive* side (list at `queue+0x1c0`) of the same queue object.
+- `0x871ef0` is the per-frame sender: it pops `queue+0x208` through `0xe86ce0`, encodes a `ChatMessageClientMessage`
+  (`0x11f6420`) and releases the entry with `0xea79a0`. Its object holds the queue at `+0xf8`. Everything above runs on the
+  game thread, as does the `filter_permissions` hook, so the call is made from that hook (`outbox::pump`).
+- `outbox.rs`: `flush_seen` (lean hook on the per-frame sender, two stores) keeps the queue pointer and the time of the last
+  frame; lines are only queued when that is < 1.5 s old. `m182_chat_out.ready` holds `1` while that is true. The panel's
+  `InjectTypist` writes `m182_chat_out.txt` when ready and falls back to the keyboard typist otherwise.
+- Signatures: `CHAT_SEND` (48 bytes, unique) and `WATCH_FLUSH`. Direct call, no hook on the send function itself.
+
+## Shield / god mode cost
+
+A failed record lookup walks all 640 component slots. On a game client the server owns the health record, so the
+shield did that every 4 ms. `spawner.rs` now remembers misses per (manager, entity, record) with a wait that doubles up to 8 s
+(`MISSING`), scans through the cached archetype shapes (`component_quick`), and when nothing can be protected the power loop
+polls every 50 ms instead of every 4 ms (`SHIELD_IDLE`).

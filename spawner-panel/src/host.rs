@@ -381,6 +381,124 @@ impl<S: Sys> Typist for ChatTypist<S> {
     }
 }
 
+/// File the native layer reads chat lines from, and the one it keeps up to date with "can I send right now".
+pub const CHAT_OUT_FILE: &str = "m182_chat_out.txt";
+pub const CHAT_READY_FILE: &str = "m182_chat_out.ready";
+
+/// Sends chat lines straight through the game's own chat function (via the native layer) while it says it is
+/// ready, so nothing is typed, the keyboard is never taken and the player's own chat box stays free. Whenever the
+/// native layer is not ready, or does not pick a line up, the keyboard typist underneath does the work as before.
+pub struct InjectTypist {
+    inner: Box<dyn Typist>,
+    dir: std::path::PathBuf,
+    live: bool,
+    typed: bool,
+    sent: std::collections::VecDeque<std::time::Instant>,
+    window_lines: usize,
+    window_ms: u64,
+    pick_up_ms: u64,
+}
+
+impl InjectTypist {
+    pub fn new(inner: Box<dyn Typist>, dir: impl Into<std::path::PathBuf>, pace: &Pace) -> Self {
+        Self {
+            inner,
+            dir: dir.into(),
+            live: false,
+            typed: false,
+            sent: std::collections::VecDeque::new(),
+            window_lines: pace.window_lines,
+            window_ms: pace.window_ms,
+            pick_up_ms: 3_000,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        std::fs::read_to_string(self.dir.join(CHAT_READY_FILE)).map(|t| t.trim() == "1").unwrap_or(false)
+    }
+
+    fn throttle(&mut self) {
+        let window = std::time::Duration::from_millis(self.window_ms);
+        let now = std::time::Instant::now();
+        self.sent.retain(|t| now.duration_since(*t) < window);
+        if self.sent.len() >= self.window_lines {
+            let oldest = self.sent[self.sent.len() - self.window_lines];
+            std::thread::sleep(window.saturating_sub(now.duration_since(oldest)) + std::time::Duration::from_millis(50));
+        }
+        self.sent.push_back(std::time::Instant::now());
+    }
+
+    fn wait_gone(&self, path: &std::path::Path, ms: u64) -> bool {
+        let mut waited = 0;
+        while path.exists() {
+            if waited >= ms {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            waited += 25;
+        }
+        true
+    }
+
+    /// Hands one line to the native layer. `Err` means it was not (or may not have been) taken: type it instead.
+    fn inject(&mut self, text: &str) -> Result<(), ()> {
+        use std::io::Write;
+        let line = text.replace(['\r', '\n'], " ");
+        if line.trim().is_empty() || line.len() > 0x400 || !self.ready() {
+            return Err(());
+        }
+        let path = self.dir.join(CHAT_OUT_FILE);
+        if !self.wait_gone(&path, 2_000) {
+            return Err(());
+        }
+        self.throttle();
+        let written = std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
+        if written.is_err() {
+            return Err(());
+        }
+        if self.wait_gone(&path, self.pick_up_ms) {
+            return Ok(());
+        }
+        // nobody took it: pull it back so it is not sent twice; if that fails it was taken at the last moment
+        match std::fs::remove_file(&path) {
+            Ok(()) => Err(()),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+impl Typist for InjectTypist {
+    fn begin(&mut self) -> Result<(), String> {
+        self.typed = false;
+        self.live = self.ready();
+        if self.live {
+            Ok(())
+        } else {
+            self.typed = true;
+            self.inner.begin()
+        }
+    }
+
+    fn line(&mut self, text: &str) -> Result<(), String> {
+        if self.live && self.inject(text).is_ok() {
+            return Ok(());
+        }
+        if !self.typed {
+            self.typed = true;
+            self.inner.begin()?;
+        }
+        self.inner.line(text)
+    }
+
+    fn end(&mut self) {
+        if self.typed {
+            self.inner.end();
+        }
+        self.live = false;
+        self.typed = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +748,84 @@ mod tests {
         assert_eq!(scan_of("T"), Some(0x14));
         assert_eq!(scan_of("/"), Some(0x35));
         assert_eq!(scan_of("F13"), None);
+    }
+
+    struct Recorded(Arc<Mutex<Vec<String>>>);
+    impl Typist for Recorded {
+        fn begin(&mut self) -> Result<(), String> {
+            self.0.lock().unwrap().push("begin".into());
+            Ok(())
+        }
+        fn line(&mut self, text: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("typed {text}"));
+            Ok(())
+        }
+        fn end(&mut self) {
+            self.0.lock().unwrap().push("end".into());
+        }
+    }
+
+    fn inject_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("m182_inject_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lines_go_to_the_native_layer_without_touching_the_keyboard_when_it_is_ready() {
+        let dir = inject_dir("ready");
+        std::fs::write(dir.join(CHAT_READY_FILE), "1").unwrap();
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let mut typist = InjectTypist::new(Box::new(Recorded(typed.clone())), &dir, &Pace::default());
+        let taker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut got = Vec::new();
+                for _ in 0..400 {
+                    let p = dir.join(CHAT_OUT_FILE);
+                    if let Ok(t) = std::fs::read_to_string(&p) {
+                        if std::fs::remove_file(&p).is_ok() {
+                            got.push(t.trim().to_string());
+                            if got.len() == 2 {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                got
+            })
+        };
+        typist.begin().unwrap();
+        typist.line("!m182 key players 1").unwrap();
+        typist.line("second").unwrap();
+        typist.end();
+        assert_eq!(taker.join().unwrap(), vec!["!m182 key players 1".to_string(), "second".to_string()]);
+        assert!(typed.lock().unwrap().is_empty(), "the keyboard typist was never used");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_the_native_layer_or_when_it_does_not_answer_the_keyboard_does_it_as_before() {
+        let dir = inject_dir("fallback");
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let mut typist = InjectTypist::new(Box::new(Recorded(typed.clone())), &dir, &Pace::default());
+        typist.begin().unwrap();
+        typist.line("a").unwrap();
+        typist.end();
+        assert_eq!(*typed.lock().unwrap(), vec!["begin", "typed a", "end"]);
+
+        // says ready but nobody collects the line: it is taken back and typed
+        typed.lock().unwrap().clear();
+        std::fs::write(dir.join(CHAT_READY_FILE), "1").unwrap();
+        let mut typist = InjectTypist::new(Box::new(Recorded(typed.clone())), &dir, &Pace::default());
+        typist.pick_up_ms = 150;
+        typist.begin().unwrap();
+        typist.line("b").unwrap();
+        typist.end();
+        assert_eq!(*typed.lock().unwrap(), vec!["begin", "typed b", "end"]);
+        assert!(!dir.join(CHAT_OUT_FILE).exists(), "the unclaimed line was pulled back");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
