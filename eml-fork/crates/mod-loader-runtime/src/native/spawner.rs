@@ -3735,6 +3735,130 @@ fn find_reply<T>(regions: &[(usize, usize)], marker: &str, parse: impl Fn(&str) 
     None
 }
 
+/// Every line in memory that starts with one of the markers and passes `accept`.
+fn find_lines(regions: &[(usize, usize)], markers: &[&str], accept: impl Fn(&str) -> bool) -> Vec<String> {
+    const CHUNK: usize = 4 << 20;
+    let needles: Vec<(Vec<u8>, bool)> = markers.iter().flat_map(|m| [(m.as_bytes().to_vec(), false), (utf16le(m), true)]).collect();
+    let mut out = Vec::new();
+    for &(start, end) in regions {
+        if end - start > (3usize << 30) {
+            continue;
+        }
+        let mut at = start;
+        while at < end {
+            let len = (end - at).min(CHUNK + 2048);
+            let Some(b) = read_bytes(at, len) else {
+                at += CHUNK;
+                continue;
+            };
+            for (needle, is_wide) in &needles {
+                for hit in roster::find_all(&b, needle) {
+                    let tail = &b[hit..b.len().min(hit + 2400)];
+                    let text = decode_after(tail, *is_wide);
+                    if accept(&text) && !out.contains(&text) {
+                        out.push(text);
+                    }
+                }
+            }
+            at += CHUNK;
+        }
+    }
+    out
+}
+
+static SHARED_WANTED: Mutex<Vec<(u32, Instant)>> = Mutex::new(Vec::new());
+static SHARED_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
+const SHARED_WAIT: Duration = Duration::from_secs(14);
+
+/// The number right after a `[M182R#` / `[M182S#` tag.
+fn shared_seq_of(text: &str) -> Option<u32> {
+    let rest = text.strip_prefix(super::shared::REV_TAG).or_else(|| text.strip_prefix(super::shared::SNAP_TAG))?;
+    let end = rest.find(|c: char| c == ' ' || c == ']')?;
+    rest[..end].parse().ok()
+}
+
+/// The panel just asked the server for `seq` (a `rev` or a `pull`). On a game whose chat hook has not read any answer
+/// yet, the answer lines are looked for in memory for a few seconds; nothing runs while no request is open.
+pub fn expect_shared_reply(seq: u32) {
+    if !is_remote_client() || super::patch::replies_read_by_hook() {
+        return;
+    }
+    if let Ok(mut wanted) = SHARED_WANTED.lock() {
+        wanted.push((seq, Instant::now() + SHARED_WAIT));
+        if wanted.len() > 64 {
+            wanted.remove(0);
+        }
+    }
+    start_shared_scan();
+}
+
+fn start_shared_scan() {
+    if SHARED_SCAN_BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(dir) = std::env::current_dir() else {
+        SHARED_SCAN_BUSY.store(false, Ordering::SeqCst);
+        return;
+    };
+    if std::thread::Builder::new().name("m182-replies".into()).spawn(move || scan_shared_replies(dir)).is_err() {
+        SHARED_SCAN_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+fn scan_shared_replies(dir: std::path::PathBuf) {
+    let mut fed: HashSet<String> = HashSet::new();
+    let (mut passes, mut taken) = (0u32, 0u32);
+    loop {
+        let wanted: Vec<u32> = match SHARED_WANTED.lock() {
+            Ok(mut list) => {
+                let now = Instant::now();
+                list.retain(|(_, until)| now < *until);
+                list.iter().map(|(seq, _)| *seq).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        if wanted.is_empty() || super::patch::replies_read_by_hook() {
+            break;
+        }
+        passes += 1;
+        let regions = data_regions();
+        let lines = find_lines(&regions, &[super::shared::REV_TAG, super::shared::SNAP_TAG], |text| shared_seq_of(text).is_some_and(|seq| wanted.contains(&seq)));
+        for line in lines {
+            if !fed.insert(line.clone()) {
+                continue;
+            }
+            let Some(seq) = shared_seq_of(&line) else { continue };
+            let done = if line.starts_with(super::shared::REV_TAG) {
+                super::patch::accept_reply(&line)
+            } else {
+                let note = super::shared::receive_snapshot(&dir, &line);
+                if !note.is_empty() {
+                    log(&note);
+                }
+                note.contains("received from the server")
+            };
+            if done {
+                taken += 1;
+                if let Ok(mut list) = SHARED_WANTED.lock() {
+                    list.retain(|(s, _)| *s != seq);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    if passes > 0 {
+        if taken > 0 {
+            log(&format!("shared state: {taken} answer(s) read from the game's memory in {passes} pass(es)"));
+        } else {
+            log(&format!("shared state: no answer from the server appeared in memory ({passes} pass(es)); the server may not have the new version"));
+        }
+    }
+    SHARED_SCAN_BUSY.store(false, Ordering::SeqCst);
+    if SHARED_WANTED.lock().map(|w| !w.is_empty()).unwrap_or(false) {
+        start_shared_scan();
+    }
+}
+
 fn find_roster(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<(u32, String)>, Option<(u32, [f64; 3])>)> {
     find_reply(regions, &roster::tag(seq), |text| roster::parse_reply(text, seq).map(|list| (list, roster::parse_own(text, seq))))
 }
@@ -5054,4 +5178,17 @@ mod raid_tests {
         assert_eq!(old.group()[0].count, 20);
     }
 
+}
+
+#[cfg(test)]
+mod shared_seq_tests {
+    use super::shared_seq_of;
+
+    #[test]
+    fn the_number_after_a_shared_tag_is_read() {
+        assert_eq!(shared_seq_of("[M182R#12] z=1"), Some(12));
+        assert_eq!(shared_seq_of("[M182S#345 zones 1/2 abcd] xyz"), Some(345));
+        assert_eq!(shared_seq_of("[M182#12] 1=a"), None);
+        assert_eq!(shared_seq_of("hello"), None);
+    }
 }

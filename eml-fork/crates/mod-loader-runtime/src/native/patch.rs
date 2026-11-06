@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::{config::LIVE, faction, groups, signatures};
 
@@ -250,8 +250,12 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
 /// from the incoming chat line instead of searching the game's memory for them.
 static REPLY_HOOK: AtomicBool = AtomicBool::new(false);
 
+static HOOK_TAKEN: AtomicU32 = AtomicU32::new(0);
+
+/// True once the chat hook has really read an answer on this game. Until then the answers are also searched in
+/// the game's memory, because the hook only helps if the game delivers incoming chat through the hooked function.
 pub(super) fn replies_read_by_hook() -> bool {
-    REPLY_HOOK.load(Ordering::Relaxed)
+    REPLY_HOOK.load(Ordering::Relaxed) && HOOK_TAKEN.load(Ordering::Relaxed) > 0
 }
 
 fn message_text(text: usize) -> Option<String> {
@@ -278,7 +282,11 @@ pub fn take_server_reply(text: usize) -> bool {
         return false;
     }
     let Some(message) = message_text(text) else { return false };
-    accept_reply(&message)
+    let taken = accept_reply(&message);
+    if taken && HOOK_TAKEN.fetch_add(1, Ordering::Relaxed) == 0 {
+        super::spawner::log("chat hook: the first server answer was read straight from the incoming chat");
+    }
+    taken
 }
 
 /// Same, for a line this process produced itself (an asker living in the game that hosts the world).

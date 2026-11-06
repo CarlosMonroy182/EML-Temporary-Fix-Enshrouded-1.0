@@ -162,3 +162,12 @@ by asking, and stays current without polling.
   that the server needs the new `dbghelp.dll`.
 - `outbox::poll` (reads `m182_chat_out.txt`, writes `m182_chat_out.ready`) runs on its own `m182-outbox` thread. The client log showed
   `slow power tick ... (chat file 3-7 s)` there (a slow disk operation), which delayed spawn orders; the power loop no longer waits for it.
+
+## Clients read the server's answers from memory until the chat hook proves itself
+
+- `patch::replies_read_by_hook()` is true only after `take_server_reply` has really read an answer (`HOOK_TAKEN`). Before that, a client
+  that is connected to a server keeps the old memory search for the player list and teams (`scan_request`), exactly as before the hook existed.
+- Shared state (`rev` / `pull`): `outbox::pump` tells `spawner::expect_shared_reply(seq)` which request it just sent; `scan_shared_replies`
+  (thread `m182-replies`) looks for `[M182R#seq` / `[M182S#seq` lines in memory every 400 ms for at most 14 s per request, feeds them to the
+  same receivers as the hook, and stops as soon as the answer is complete. Idle clients run nothing. The log says how many answers were
+  read, or that none appeared (server without this version).

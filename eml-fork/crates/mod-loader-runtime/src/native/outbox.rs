@@ -123,6 +123,17 @@ fn warn_rarely(message: &str) {
     }
 }
 
+/// The number of a `rev <n>` / `pull <n> <topic>` request in a line the panel sent.
+fn asked_seq(line: &str) -> Option<u32> {
+    let mut words = line.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "rev" || word == "pull" {
+            return words.next()?.parse().ok();
+        }
+    }
+    None
+}
+
 type SendFn = extern "win64" fn(*mut u8, usize, usize, *const [u64; 2], u32, u32) -> usize;
 
 /// Sends at most one waiting line. Runs inside a hook the game calls from its own thread, which is the
@@ -165,6 +176,9 @@ pub fn pump() {
     let mut out = [0u8; 16];
     let call: SendFn = unsafe { std::mem::transmute(function) };
     call(out.as_mut_ptr(), queue, 0, &text, 0, 0);
+    if let Some(seq) = asked_seq(&line) {
+        super::spawner::expect_shared_reply(seq);
+    }
     if SENT.fetch_add(1, Ordering::Relaxed) < SENT_LOGGED_MAX {
         let status = out[0];
         super::spawner::log(&format!(
@@ -172,5 +186,18 @@ pub fn pump() {
             bytes.len(),
             LINES.lock().map(|l| l.len()).unwrap_or(0)
         ));
+    }
+}
+
+#[cfg(test)]
+mod asked_tests {
+    use super::asked_seq;
+
+    #[test]
+    fn the_number_of_a_request_is_found() {
+        assert_eq!(asked_seq("!m182 key pull 4021 zones"), Some(4021));
+        assert_eq!(asked_seq("!m182 key rev 77"), Some(77));
+        assert_eq!(asked_seq("!m182 key players 5"), None);
+        assert_eq!(asked_seq("!m182 key rev"), None);
     }
 }
