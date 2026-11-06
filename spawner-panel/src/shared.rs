@@ -26,6 +26,7 @@ const MAX_TRIES: u8 = 3;
 const SAFETY_CHECK: Duration = Duration::from_secs(240);
 const STATUS_EVERY: Duration = Duration::from_secs(20);
 const NO_ANSWER: Duration = Duration::from_secs(15);
+const LEGACY_PROBE: Duration = Duration::from_secs(300);
 
 /// What the panel keeps in a file for each topic that is shared.
 pub fn topic_of_file(file: &str) -> Option<&'static str> {
@@ -163,6 +164,8 @@ struct Core {
     last_status: Option<Instant>,
     synced_at: Option<Instant>,
     begun: Option<Instant>,
+    /// The server never answers the shared-state questions (an older server): the panel works as it always did.
+    legacy: bool,
     note: String,
 }
 
@@ -243,7 +246,11 @@ pub fn local_change(file: &str, text: &str) -> Result<(), String> {
 
 /// A spawner operation was sent: ask again afterwards.
 pub fn spawners_changed() {
-    with(|c| ask_after_change(c, "spawners", Instant::now()));
+    with(|c| {
+        if !c.legacy {
+            ask_after_change(c, "spawners", Instant::now());
+        }
+    });
 }
 
 /// Forgets everything known about the server, so the next tick asks for it all again.
@@ -254,6 +261,10 @@ pub fn invalidate() {
 /// Asks again for everything now (the "Sincronizar" button).
 pub fn refresh_all() {
     with(|c| {
+        if c.legacy {
+            *c = Core::default();
+            return;
+        }
         let now = Instant::now();
         for t in TOPICS {
             c.out.remove(t);
@@ -267,7 +278,7 @@ pub fn refresh_all() {
 /// asked for on demand, not announced.
 pub fn want_status() {
     with(|c| {
-        if !c.started || c.out.contains_key(STATUS) {
+        if !c.started || c.legacy || c.out.contains_key(STATUS) {
             return;
         }
         let now = Instant::now();
@@ -375,6 +386,15 @@ fn read_if_new(dir: &Path, name: &str, seen: &mut Option<SystemTime>) -> Option<
 
 /// Runs a few times a second: reads what the game wrote, asks for what changed and returns what arrived.
 pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
+    tick_at(dir, connected, Instant::now())
+}
+
+/// True while the server does not know the shared-state commands (an older server).
+pub fn legacy() -> bool {
+    core().as_ref().is_some_and(|c| c.legacy)
+}
+
+fn tick_at(dir: &Path, connected: bool, now: Instant) -> Vec<Applied> {
     let mut applied = Vec::new();
     let mut guard = core();
     if !connected {
@@ -384,8 +404,17 @@ pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
         return applied;
     }
     let c = guard.get_or_insert_with(Core::default);
-    let now = Instant::now();
     c.dir = Some(dir.to_path_buf());
+    if c.legacy {
+        if read_if_new(dir, REV_FILE, &mut c.rev_seen).is_some() {
+            remote::note("shared: the server answers now, shared state is on again");
+            *c = Core::default();
+        } else if c.last_check.map_or(true, |t| now.duration_since(t) >= LEGACY_PROBE) {
+            c.last_check = Some(now);
+            remote::submit_rev(next_seq());
+        }
+        return applied;
+    }
     if !c.started {
         c.started = true;
         c.begun = Some(now);
@@ -462,6 +491,14 @@ pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
         if out.tries >= MAX_TRIES {
             c.out.remove(&topic);
             remote::note(&format!("shared: no answer for {topic} after {MAX_TRIES} tries"));
+            if c.synced_at.is_none() {
+                c.legacy = true;
+                c.out.clear();
+                c.last_check = Some(now);
+                c.note = "El servidor no tiene la sincronización (versión antigua): el panel funciona como antes. Actualiza su dbghelp.dll.".to_string();
+                remote::note("shared: the server does not answer, working as before");
+                break;
+            }
             c.note = format!("El servidor no respondió con «{topic}». Pulsa «Sincronizar» para intentarlo otra vez.");
             continue;
         }
@@ -538,6 +575,30 @@ mod tests {
         let err = local_change("m182_zones.json", &zone("A", 1.0)).unwrap_err();
         assert!(err.contains("Sincronizando"), "{err}");
         assert!(local_change("m182_native.json", "{}").is_ok());
+        reset_for_tests();
+    }
+
+    #[test]
+    fn a_server_that_never_answers_leaves_the_panel_working_as_before() {
+        reset_for_tests();
+        remote::reset_for_tests();
+        let dir = std::env::temp_dir().join(format!("m182_legacy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t0 = Instant::now();
+        tick_at(&dir, true, t0);
+        assert!(!legacy());
+        tick_at(&dir, true, t0 + Duration::from_secs(26));
+        tick_at(&dir, true, t0 + Duration::from_secs(52));
+        assert!(!legacy());
+        tick_at(&dir, true, t0 + Duration::from_secs(78));
+        assert!(legacy());
+        let (text, problem) = line();
+        assert!(problem && text.contains("dbghelp"), "{text}");
+        assert!(local_change("m182_zones.json", &zone("A", 1.0)).is_err() || legacy());
+        std::fs::write(dir.join(REV_FILE), r#"{"seq":1,"rev":{}}"#).unwrap();
+        tick_at(&dir, true, t0 + Duration::from_secs(90));
+        assert!(!legacy());
         reset_for_tests();
     }
 

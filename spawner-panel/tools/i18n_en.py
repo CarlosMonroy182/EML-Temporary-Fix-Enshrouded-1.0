@@ -356,4 +356,5 @@ EN = {
 "Datos compartidos al día (hace {} s)": "Shared data up to date ({} s ago)",
 "El servidor no respondió con «{topic}». Pulsa «Sincronizar» para intentarlo otra vez.": "The server did not answer for '{topic}'. Press 'Sync' to try again.",
 "Sin respuesta del servidor todavía. Pulsa «Sincronizar».": "No answer from the server yet. Press 'Sync'.",
+"El servidor no tiene la sincronización (versión antigua): el panel funciona como antes. Actualiza su dbghelp.dll.": "The server does not have shared sync (older version): the panel works as before. Update its dbghelp.dll.",
 }

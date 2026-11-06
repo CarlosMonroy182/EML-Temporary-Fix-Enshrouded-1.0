@@ -700,9 +700,9 @@ impl App {
         if self.social.checked.elapsed() >= Duration::from_millis(1000) {
             let dir = self.dir.clone();
             self.social.refresh(&dir);
-            if !crate::remote::connected() {
+            if !crate::remote::connected() || crate::shared::legacy() {
                 let queued = crate::remote::status().queued;
-                self.social.live_tick(&dir, crate::remote::active(), false, queued);
+                self.social.live_tick(&dir, crate::remote::active(), crate::remote::connected(), queued);
                 self.social.resync_teams(&dir);
             }
             self.finish_here();

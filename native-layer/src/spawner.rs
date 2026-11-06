@@ -123,6 +123,7 @@ pub fn start() {
     if let Err(e) = std::thread::Builder::new().name("m182-spawner-keys".into()).spawn(key_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start hotkey thread");
     }
+    super::outbox::start();
     if let Err(e) = std::thread::Builder::new().name("m182-powers".into()).spawn(powers_loop) {
         tracing::warn!(target: "m182::spawner", error = %e, "could not start powers thread");
     }
@@ -3377,7 +3378,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
     drain_requests(st, dir);
     mark!(0);
     if poll {
-        super::outbox::poll(dir);
         mark!(1);
         super::perf::time(super::perf::POLL, || {
             refresh_powers(st, dir);

@@ -60,6 +60,20 @@ fn connected() -> bool {
     last != 0 && QUEUE.load(Ordering::Relaxed) != 0 && now_ms().saturating_sub(last) <= FRESH_MS
 }
 
+/// The panel's lines are picked up on their own thread, so a slow disk never delays the power loop or the spawn orders.
+pub fn start() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("m182-outbox".into()).spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Ok(dir) = std::env::current_dir() {
+            poll(&dir);
+        }
+    });
+}
+
 /// Reads the lines the panel left in `m182_chat_out.txt` (only while chat sending is switched on).
 pub fn poll(dir: &Path) {
     if !super::probe::inject_on() || !super::config::LIVE.chat_key().is_empty() {

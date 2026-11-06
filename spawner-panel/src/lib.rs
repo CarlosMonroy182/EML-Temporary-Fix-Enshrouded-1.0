@@ -423,7 +423,7 @@ pub(crate) fn write_local(dir: &Path, name: &str, tmp: &str, text: &str) -> Resu
 /// Writes a file for the native layer; when the panel drives a server, the files the server
 /// understands are also (or only) typed into the game chat.
 pub fn write_atomic(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
-    if remote::connected() && shared::covers(name) {
+    if remote::connected() && !shared::legacy() && shared::covers(name) {
         return shared::local_change(name, text);
     }
     match remote::route_for(name, text) {

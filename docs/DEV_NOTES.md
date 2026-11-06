@@ -157,3 +157,8 @@ by asking, and stays current without polling.
   the panel treat its own hosted world as a remote server). The local panel also gets player-list and team answers directly (`accept_reply`).
 - The panel logs every shared-state event (`shared: ... arrived / asked again / no answer`) in `m182_panel.log`; the header line is red when
   the server has not answered for 15 s or a topic ran out of tries.
+- Compatibility: a panel whose server never answers `pull` (older `dbghelp.dll`) falls back to the classic behaviour after 3 tries
+  (`shared::legacy()`: local lists, whole-file sends, live teams through the old scan) and probes with `rev` every 5 minutes; the header says in red
+  that the server needs the new `dbghelp.dll`.
+- `outbox::poll` (reads `m182_chat_out.txt`, writes `m182_chat_out.ready`) runs on its own `m182-outbox` thread. The client log showed
+  `slow power tick ... (chat file 3-7 s)` there (a slow disk operation), which delayed spawn orders; the power loop no longer waits for it.
