@@ -1121,6 +1121,77 @@ pub(super) fn component_address(p: &Placement, index: usize) -> Option<(usize, u
     Some((p.chunk + offset + stride * p.slot, stride))
 }
 
+const QUICK_TTL: Duration = Duration::from_millis(200);
+const SHAPE_TTL: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+struct Resolved {
+    record: usize,
+    def: usize,
+    chunk: usize,
+    slot: usize,
+    at: Instant,
+}
+
+static RESOLVED: Mutex<Option<HashMap<(usize, u32), Resolved>>> = Mutex::new(None);
+static SHAPES: Mutex<Option<HashMap<(usize, usize), (Instant, Option<(usize, usize)>)>>> = Mutex::new(None);
+
+/// Forgets what the hot paths remembered about where entities live.
+pub fn forget_layouts() {
+    if let Ok(mut r) = RESOLVED.lock() {
+        *r = None;
+    }
+    if let Ok(mut r) = SHAPES.lock() {
+        *r = None;
+    }
+}
+
+/// Where an entity's components are, for loops that ask many times a second. The slow lookup (record
+/// table, placement) is repeated at most every 200 ms; in between one read of the record proves it
+/// still belongs to the same entity and has not moved.
+fn quick_placement(manager: usize, id: u32) -> Option<Placement> {
+    if manager == 0 || id == 0 {
+        return None;
+    }
+    let known = RESOLVED.lock().ok().and_then(|r| r.as_ref().and_then(|m| m.get(&(manager, id)).copied()));
+    if let Some(k) = known {
+        if k.at.elapsed() < QUICK_TTL {
+            if let Some(b) = read_bytes(k.record, 0x38) {
+                if b.len() >= 0x38
+                    && u32_at(&b, 0x10) == id
+                    && u64_at(&b, 0x18) as usize == k.def
+                    && u64_at(&b, 0x20) as usize == k.chunk
+                    && u32_at(&b, 0x30) as usize == k.slot
+                {
+                    return Some(Placement { def: k.def, chunk: k.chunk, slot: k.slot });
+                }
+            }
+        }
+    }
+    let record = find_record(manager, id)?;
+    let p = placement(record)?;
+    if let Ok(mut r) = RESOLVED.lock() {
+        r.get_or_insert_with(HashMap::new).insert((manager, id), Resolved { record, def: p.def, chunk: p.chunk, slot: p.slot, at: Instant::now() });
+    }
+    Some(p)
+}
+
+/// `component_address` with the per-archetype offset and stride tables remembered for two seconds.
+fn component_quick(p: &Placement, index: usize) -> Option<(usize, usize)> {
+    let known = SHAPES.lock().ok().and_then(|r| r.as_ref().and_then(|m| m.get(&(p.def, index)).copied()));
+    let shape = match known {
+        Some((at, shape)) if at.elapsed() < SHAPE_TTL => shape,
+        _ => {
+            let shape = component_address(&Placement { def: p.def, chunk: 0, slot: 0 }, index);
+            if let Ok(mut r) = SHAPES.lock() {
+                r.get_or_insert_with(HashMap::new).insert((p.def, index), (Instant::now(), shape));
+            }
+            shape
+        }
+    };
+    shape.map(|(base, stride)| (base + p.chunk + stride * p.slot, stride))
+}
+
 fn calibrate(manager: usize, id: u32, expected: &[u8]) -> bool {
     let Some(record) = find_record(manager, id) else {
         dump_failure(manager, id, None, "record lookup failed");
@@ -2009,12 +2080,11 @@ fn resource(manager: usize, id: u32, which: usize, signature: u32) -> Option<(us
 }
 
 fn resource_sized(manager: usize, id: u32, which: usize, signature: u32, size: usize) -> Option<(usize, Vec<u8>)> {
-    let record = find_record(manager, id)?;
-    let p = placement(record)?;
+    let p = quick_placement(manager, id)?;
     let kind = kind_of(manager);
     let cached = RES_INDEX[kind][which].load(Ordering::Relaxed);
     if cached >= 0 {
-        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+        if let Some((addr, stride)) = component_quick(&p, cached as usize) {
             if stride == size {
                 if let Some(b) = read_bytes(addr, size) {
                     if b.len() >= size && u32_at(&b, 0) == signature {
@@ -2158,14 +2228,13 @@ pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
 
 fn find_fall(manager: usize, id: u32) -> Option<usize> {
     let kind = kind_of(manager);
-    let record = find_record(manager, id)?;
-    let p = placement(record)?;
+    let p = quick_placement(manager, id)?;
     let cached = FALL_INDEX[kind].load(Ordering::Relaxed);
     let matches = |addr: usize| -> bool {
         matches!(read_bytes(addr, FALL_DAMAGE_SIZE), Some(b) if b.len() >= FALL_DAMAGE_SIZE && b[8..24] == FALL_SEQUENCE)
     };
     if cached >= 0 {
-        if let Some((addr, stride)) = component_address(&p, cached as usize) {
+        if let Some((addr, stride)) = component_quick(&p, cached as usize) {
             if stride == FALL_DAMAGE_SIZE && matches(addr) {
                 return Some(addr);
             }

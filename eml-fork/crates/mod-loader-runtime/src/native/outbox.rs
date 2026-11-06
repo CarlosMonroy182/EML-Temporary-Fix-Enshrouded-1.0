@@ -29,6 +29,11 @@ static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
 static CAPTURED: AtomicU64 = AtomicU64::new(0);
 static SENT: AtomicU64 = AtomicU64::new(0);
 
+/// The chat queue the game's own chat function last used (0 when it has not run yet).
+pub fn known_queue() -> usize {
+    QUEUE.load(Ordering::Relaxed)
+}
+
 fn u32_at(b: &[u8], at: usize) -> u32 {
     super::spawn_probe::u32_at(b, at)
 }

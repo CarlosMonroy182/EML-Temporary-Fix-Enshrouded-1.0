@@ -37,6 +37,7 @@ fn put(b: &mut [u8], off: usize, v: &[u8]) {
 
 fn world(id: u32, slot: u32, transform: &[u8; 56]) -> Box<World> {
     spawner::set_shield_gap(0);
+    spawner::forget_layouts();
     let mut w = Box::new(World {
         mem: vec![0u8; 0x400],
         chunk: vec![0u8; 0x4000],

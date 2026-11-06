@@ -103,6 +103,10 @@ pub fn install(sections: &[&'static [u8]]) {
 
 static MODULE_BASE: AtomicU64 = AtomicU64::new(0);
 
+pub(super) fn module_base() -> usize {
+    MODULE_BASE.load(Ordering::Relaxed) as usize
+}
+
 #[unsafe(naked)]
 unsafe extern "win64" fn stub_spawn() {
     core::arch::naked_asm!(

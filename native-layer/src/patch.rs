@@ -341,7 +341,7 @@ unsafe extern "win64" fn stub_chat() {
         "movups [rsp + 0x80], xmm5",
         "mov eax, dword ptr [rsp + 0x100]",
         "mov dword ptr [rsp + 0x20], eax",
-        "lea rax, [rsp + 0xd0]",
+        "lea rax, [rsp + 0xc8]",
         "mov qword ptr [rsp + 0x28], rax",
         "call {f}",
         "movzx eax, al",
@@ -922,6 +922,107 @@ fn install_chat(sections: &[&'static [u8]]) {
     }
 }
 
+
+// ---------------------------------------------------------------- watch hooks (thread_probe only)
+
+const WATCHED: usize = 4;
+static WATCH_T0: AtomicUsize = AtomicUsize::new(0);
+static WATCH_T1: AtomicUsize = AtomicUsize::new(0);
+static WATCH_T2: AtomicUsize = AtomicUsize::new(0);
+static WATCH_T3: AtomicUsize = AtomicUsize::new(0);
+
+extern "win64" fn watch_hit(id: usize, regs: *const usize) {
+    super::watch::hit(id, regs);
+}
+
+macro_rules! watch_stub {
+    ($name:ident, $id:expr, $slot:ident) => {
+        #[unsafe(naked)]
+        unsafe extern "win64" fn $name() {
+            core::arch::naked_asm!(
+                "push rcx",
+                "push rdx",
+                "push r8",
+                "push r9",
+                "push r10",
+                "push r11",
+                "push rax",
+                "sub rsp, 0x90",
+                "movups [rsp + 0x30], xmm0",
+                "movups [rsp + 0x40], xmm1",
+                "movups [rsp + 0x50], xmm2",
+                "movups [rsp + 0x60], xmm3",
+                "movups [rsp + 0x70], xmm4",
+                "movups [rsp + 0x80], xmm5",
+                "mov ecx, {id}",
+                "lea rdx, [rsp + 0x90]",
+                "call {f}",
+                "movups xmm0, [rsp + 0x30]",
+                "movups xmm1, [rsp + 0x40]",
+                "movups xmm2, [rsp + 0x50]",
+                "movups xmm3, [rsp + 0x60]",
+                "movups xmm4, [rsp + 0x70]",
+                "movups xmm5, [rsp + 0x80]",
+                "lea rsp, [rsp + 0x90]",
+                "pop rax",
+                "pop r11",
+                "pop r10",
+                "pop r9",
+                "pop r8",
+                "pop rdx",
+                "pop rcx",
+                "jmp qword ptr [rip + {t}]",
+                id = const $id,
+                f = sym watch_hit,
+                t = sym $slot,
+            );
+        }
+    };
+}
+
+watch_stub!(stub_watch_0, 0, WATCH_T0);
+watch_stub!(stub_watch_1, 1, WATCH_T1);
+watch_stub!(stub_watch_2, 2, WATCH_T2);
+watch_stub!(stub_watch_3, 3, WATCH_T3);
+
+fn install_watch(sections: &[&'static [u8]]) {
+    let wanted: [(&str, &[u8], usize, &AtomicUsize, usize); WATCHED] = [
+        ("encode", &signatures::WATCH_SERIALIZE, signatures::WATCH_SERIALIZE_DISPLACED, &WATCH_T0, stub_watch_0 as usize),
+        ("decode", &signatures::WATCH_DESERIALIZE, signatures::WATCH_DESERIALIZE_DISPLACED, &WATCH_T1, stub_watch_1 as usize),
+        ("chat flush", &signatures::WATCH_FLUSH, signatures::WATCH_FLUSH_DISPLACED, &WATCH_T2, stub_watch_2 as usize),
+        ("chat receive", &signatures::WATCH_CLIENT_IN, signatures::WATCH_CLIENT_IN_DISPLACED, &WATCH_T3, stub_watch_3 as usize),
+    ];
+    for (name, signature, displaced, slot, stub) in wanted {
+        let target = match find_unique(sections, signature) {
+            Ok(addr) => addr,
+            Err(count) => {
+                super::spawner::log(&format!("probe: {name} function matched {count} times; not watched"));
+                continue;
+            }
+        };
+        let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+        if page.is_null() {
+            continue;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(target, page, displaced);
+            let tail = page.add(displaced);
+            tail.write(0xFF);
+            tail.add(1).write(0x25);
+            tail.add(2).cast::<u32>().write_unaligned(0);
+            tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+        }
+        slot.store(page as usize, Ordering::SeqCst);
+        match unsafe { write_jump(target, stub) } {
+            Ok(()) => super::spawner::log(&format!("probe: watching {name}")),
+            Err(code) => {
+                slot.store(0, Ordering::SeqCst);
+                super::spawner::log(&format!("probe: {name}: VirtualProtect failed ({code})"));
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- patching
 
 struct Target {
@@ -950,6 +1051,9 @@ pub fn install() -> Outcome {
         install_build_zones(&sections);
     }
     install_chat(&sections);
+    if super::probe::on() {
+        install_watch(&sections);
+    }
     if super::config::LIVE.spawner() || vfx || pillar {
         install_pump(&sections);
     }

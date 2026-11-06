@@ -28,6 +28,9 @@ mod pillar;
 mod outbox;
 
 #[cfg(windows)]
+mod watch;
+
+#[cfg(windows)]
 mod patch;
 mod perf;
 mod probe;
