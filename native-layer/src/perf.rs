@@ -8,12 +8,16 @@ pub const SPAWNERS: usize = 3;
 pub const DELIVERIES: usize = 4;
 pub const REFILL: usize = 5;
 pub const SHIELD: usize = 6;
-const NAMES: [&str; 7] = ["power loop", "file polls", "teams and zones", "spawners", "deliveries", "refills", "shield"];
+pub const CHAT: usize = 7;
+pub const ORDERS: usize = 8;
+pub const ORDER_WAIT: usize = 9;
+const SLOTS: usize = 10;
+const NAMES: [&str; SLOTS] = ["power loop", "file polls", "teams and zones", "spawners", "deliveries", "refills", "shield", "chat lines", "orders run", "orders waited"];
 
 const ZERO: AtomicU64 = AtomicU64::new(0);
-static NANOS: [AtomicU64; 7] = [ZERO; 7];
-static CALLS: [AtomicU64; 7] = [ZERO; 7];
-static WORST: [AtomicU64; 7] = [ZERO; 7];
+static NANOS: [AtomicU64; SLOTS] = [ZERO; SLOTS];
+static CALLS: [AtomicU64; SLOTS] = [ZERO; SLOTS];
+static WORST: [AtomicU64; SLOTS] = [ZERO; SLOTS];
 
 pub fn time<R>(slot: usize, work: impl FnOnce() -> R) -> R {
     let start = Instant::now();
@@ -23,6 +27,13 @@ pub fn time<R>(slot: usize, work: impl FnOnce() -> R) -> R {
     CALLS[slot].fetch_add(1, Ordering::Relaxed);
     WORST[slot].fetch_max(spent, Ordering::Relaxed);
     result
+}
+
+/// Adds a duration measured elsewhere (for example how long an order waited in the queue).
+pub fn add(slot: usize, nanos: u64) {
+    NANOS[slot].fetch_add(nanos, Ordering::Relaxed);
+    CALLS[slot].fetch_add(1, Ordering::Relaxed);
+    WORST[slot].fetch_max(nanos, Ordering::Relaxed);
 }
 
 pub fn report() -> Option<String> {

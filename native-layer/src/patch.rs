@@ -282,7 +282,7 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
         }
     }
     let Ok(dir) = std::env::current_dir() else { return 0 };
-    match super::chat::handle(&message, &key, client as u32, &dir) {
+    match super::perf::time(super::perf::CHAT, || super::chat::handle(&message, &key, client as u32, &dir)) {
         super::chat::Verdict::Pass => 0,
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
@@ -551,6 +551,10 @@ pub fn set_resource_lock(records: &[usize]) {
     for (n, slot) in RESOURCE_LOCK.iter().enumerate() {
         slot.store(records.get(n).copied().unwrap_or(0), Ordering::Relaxed);
     }
+}
+
+pub fn protected_records() -> Vec<usize> {
+    RESOURCE_LOCK.iter().map(|s| s.load(Ordering::Relaxed)).filter(|a| *a != 0).collect()
 }
 
 extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usize, delta: i32, kind: u32) -> usize {

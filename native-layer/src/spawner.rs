@@ -161,14 +161,17 @@ fn key_loop() {
         if ticks % 8 == 0 {
             poll_request();
         }
+        let diagnostics = LIVE.spawn_probe();
         let keys = match SPAWN.lock() {
-            Ok(s) => [s.key, s.dump_player_key, s.dump_spawned_key, s.watch_key, 0x73],
+            Ok(s) => [s.key, if diagnostics { s.dump_player_key } else { 0 }, if diagnostics { s.dump_spawned_key } else { 0 }, if diagnostics { s.watch_key } else { 0 }, if diagnostics { 0x73 } else { 0 }],
             Err(_) => continue,
         };
-        let focus = game_has_focus();
         let mut down = [false; 5];
-        for i in 0..5 {
-            down[i] = unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0 && focus;
+        if keys.iter().any(|k| *k != 0) {
+            let focus = game_has_focus();
+            for i in 0..5 {
+                down[i] = keys[i] != 0 && focus && unsafe { GetAsyncKeyState(keys[i]) } as u16 & 0x8000 != 0;
+            }
         }
         if down[0] && !was_down[0] {
             PENDING.store(1, Ordering::SeqCst);
@@ -593,6 +596,10 @@ fn deliveries_tick() {
 
 pub fn poll_request() {
     let Ok(dir) = std::env::current_dir() else { return };
+    poll_request_in(&dir);
+}
+
+fn poll_request_in(dir: &std::path::Path) {
     let path = dir.join(REQUEST_FILE);
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let _ = std::fs::remove_file(&path);
@@ -1971,6 +1978,7 @@ struct PowerState {
     buffs_seen: Vec<u32>,
     client_powers: HashMap<u32, ClientPowers>,
     client_scan: Option<Instant>,
+    shield_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -2275,7 +2283,24 @@ fn shield_off(st: &mut PowerState, manager: usize, id: u32) {
     }
 }
 
+static SHIELD_GAP_MS: AtomicU64 = AtomicU64::new(16);
+
+/// How often the shield re-checks the protected entities (the health top-up still runs on every tick).
+pub fn set_shield_gap(ms: u64) {
+    SHIELD_GAP_MS.store(ms, Ordering::Relaxed);
+}
+
 fn shield_tick(st: &mut PowerState, want: &[(usize, u32)]) {
+    let stale = st.saved.keys().any(|k| !want.contains(k));
+    let gap = Duration::from_millis(SHIELD_GAP_MS.load(Ordering::Relaxed));
+    let due = st.shield_at.map(|t| t.elapsed() >= gap).unwrap_or(true);
+    if !due && !stale {
+        for &(manager, id) in want {
+            refill_health(manager, id);
+        }
+        return;
+    }
+    st.shield_at = Some(Instant::now());
     for &(manager, id) in want {
         shield_on(st, manager, id);
         refill_health(manager, id);
@@ -3078,8 +3103,11 @@ fn refresh_resource_lock(st: &PowerState, manager: usize, id: u32, client: Optio
     let mut records = Vec::new();
     if st.powers.stamina {
         lock_records(manager, id, &mut records);
+        let (cm, cid) = (CLIENT_MGR.load(Ordering::SeqCst), CLIENT_PLAYER_ID.load(Ordering::SeqCst));
         if let Some((m, c)) = client {
             lock_records(m, c, &mut records);
+        } else if cm != 0 && cid != 0 && cm != manager && !LIVE.force_client() {
+            lock_records(cm, cid, &mut records);
         }
     }
     if hosting {
@@ -3125,7 +3153,40 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
     }
 }
 
+fn spawn_busy() -> bool {
+    PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true)
+}
+
+/// Carries out the orders the chat queued, oldest first, each as the player who sent it. A spawn waits
+/// while the previous one is still being made, so nothing is overwritten and nothing is lost.
+fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
+    while super::chat::queued() > 0 {
+        let busy = spawn_busy();
+        let Some(item) = super::chat::take_request(|file| !(busy && file == super::chat::SPAWN_REQUEST)) else { break };
+        super::perf::add(super::perf::ORDER_WAIT, item.at.elapsed().as_nanos() as u64);
+        let written = super::perf::time(super::perf::ORDERS, || {
+            let temp = dir.join(format!("{}.run.tmp", item.file));
+            let target = dir.join(item.file);
+            if std::fs::write(&temp, &item.body).is_err() || std::fs::rename(&temp, &target).is_err() {
+                let _ = std::fs::remove_file(&temp);
+                return false;
+            }
+            super::chat::REQUESTER.store(item.client.wrapping_add(1), Ordering::SeqCst);
+            if item.file == super::chat::SPAWN_REQUEST {
+                poll_request_in(dir);
+            } else {
+                run_command(st, dir);
+            }
+            true
+        });
+        if !written {
+            log(&format!("order from client {} could not be carried out: its file could not be written", item.client));
+        }
+    }
+}
+
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
+    drain_requests(st, dir);
     if poll {
         super::perf::time(super::perf::POLL, || {
             refresh_powers(st, dir);
@@ -3301,6 +3362,7 @@ pub fn new_power_state() -> PowerState {
         buffs_seen: Vec::new(),
         client_powers: HashMap::new(),
         client_scan: None,
+        shield_at: None,
     }
 }
 
@@ -4637,7 +4699,7 @@ fn powers_loop() {
         } else {
             25
         };
-        std::thread::sleep(Duration::from_millis(pause));
+        super::chat::wait_for_work(Duration::from_millis(pause));
         tick = tick.wrapping_add(1);
         let poll = polled.elapsed() >= Duration::from_millis(250);
         if poll {

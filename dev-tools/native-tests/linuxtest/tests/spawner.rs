@@ -36,6 +36,7 @@ fn put(b: &mut [u8], off: usize, v: &[u8]) {
 }
 
 fn world(id: u32, slot: u32, transform: &[u8; 56]) -> Box<World> {
+    spawner::set_shield_gap(0);
     let mut w = Box::new(World {
         mem: vec![0u8; 0x400],
         chunk: vec![0u8; 0x4000],
@@ -1565,6 +1566,73 @@ fn a_spawn_asked_from_chat_appears_next_to_the_player_who_asked() {
     assert!(((x >> 32) - 40).abs() <= 2 && ((z >> 32) - 60).abs() <= 2, "{} {}", x >> 32, z >> 32);
     drop(seen);
     assert_eq!(m182_chat_requester(0), 0);
+}
+
+#[test]
+fn queued_orders_run_in_order_each_as_its_sender_and_a_spawn_never_overwrites_another() {
+    use linuxtest::native::chat::{self, Session, Verdict};
+    let _g = LOCK.lock().unwrap();
+    chat::flush_to_files(&std::env::temp_dir());
+    let t0 = transform(40i64 << 32, 7i64 << 32, 60i64 << 32);
+    let w = world(2, 2, &t0);
+    let mgr = w.mem.as_ptr() as usize;
+    assert!(spawner::calibrate(mgr, 2, &t0[..24]));
+    spawner::PLAYER_ID.store(1, Ordering::SeqCst);
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawner::TRACKED_MGR.store(0, Ordering::SeqCst);
+    spawner::track_player(mgr, 2);
+    config::LIVE.apply(&config::NativeConfig { spawner: true, ..Default::default() });
+    spawn_probe::set_trampoline(fake_create as usize);
+    SEEN.lock().unwrap().clear();
+    spawner::PENDING.store(0, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("m182_orders_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = "secret-key";
+    let mut session = Session::default();
+    let hex = |t: &str| t.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    for (client, count) in [(65u32, 1u32), (65, 2)] {
+        let body = format!(r#"{{"template":"c3db66d6-89a5-4a6c-a8e3-d9a1f6009812","count":{count},"distance":1.0}}"#);
+        let line = format!("!m182 {key} setx m182_spawn.request {}", hex(&body));
+        assert!(matches!(chat::handle_with(&mut session, std::time::Instant::now(), &line, key, client, &dir), Verdict::Swallowed(_)));
+    }
+    assert_eq!(chat::queued(), 2);
+    let mut st = spawner::new_power_state();
+    spawner::power_tick(&mut st, &dir, 1, false);
+    assert_eq!(chat::queued(), 1, "the second spawn waits while the first one is still being made");
+    assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
+    spawner::before(mgr, 7);
+    assert_eq!(SEEN.lock().unwrap().len(), 1);
+    spawner::power_tick(&mut st, &dir, 2, false);
+    assert_eq!(chat::queued(), 0);
+    spawner::before(mgr, 7);
+    assert_eq!(SEEN.lock().unwrap().len(), 3);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_stamina_power_registers_the_players_resource_records_and_releases_them() {
+    use linuxtest::native::patch;
+    let _g = LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("m182_lock_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let t0 = transform(10 << 32, 20 << 32, 30 << 32);
+    let mut w = world(1, 3, &t0);
+    add_component(&mut w, 12, 40, 0x1a00);
+    let stamina_at = 0x1a00 + 40 * 3;
+    put(&mut w.chunk, stamina_at, &resource_bytes(0x04b6_aa8b, [100, 0, 100, 2000, 500, 107, 720, 121]));
+    let mgr = w.mem.as_ptr() as usize;
+    spawner::SERVER_MGR.store(mgr, Ordering::SeqCst);
+    spawner::PLAYER_ID.store(1, Ordering::SeqCst);
+    spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
+    let mut st = spawner::new_power_state();
+    std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
+    spawner::power_tick(&mut st, &dir, 0, true);
+    let expected = w.chunk.as_ptr() as usize + stamina_at;
+    assert!(patch::protected_records().contains(&expected), "{:x?} vs {expected:x}", patch::protected_records());
+    std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":false}"#).unwrap();
+    spawner::power_tick(&mut st, &dir, 1, true);
+    assert!(patch::protected_records().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn m182_chat_requester(value: u32) -> u32 {

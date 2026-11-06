@@ -53,17 +53,93 @@ pub enum Verdict {
 
 #[derive(Default)]
 pub struct Session {
-    buffers: HashMap<String, (String, Instant)>,
-    failures: Vec<Instant>,
+    buffers: HashMap<(u32, String), (String, Instant)>,
+    failures: HashMap<u32, Vec<Instant>>,
 }
 
 /// Chat client (plus one) that wrote the request waiting to be executed; 0 when none.
 pub static REQUESTER: AtomicU32 = AtomicU32::new(0);
 
-fn note_requester(file: &str, client: u32) {
-    if file == "m182_spawn.request" || file == "m182_command.request" {
-        REQUESTER.store(client.wrapping_add(1), Ordering::SeqCst);
+/// Orders that act at once (spawn, command) wait here in arrival order, each with the chat client that
+/// sent it, so several admins can ask at the same time without overwriting one another.
+pub const SPAWN_REQUEST: &str = "m182_spawn.request";
+pub const COMMAND_REQUEST: &str = "m182_command.request";
+
+pub struct Queued {
+    pub file: &'static str,
+    pub body: String,
+    pub client: u32,
+    pub at: Instant,
+}
+
+static REQUESTS: Mutex<std::collections::VecDeque<Queued>> = Mutex::new(std::collections::VecDeque::new());
+static QUEUED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_QUEUED: usize = 256;
+
+static WAKE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+/// Wakes the powers thread so a queued order is carried out right away.
+pub fn wake() {
+    if let Ok(mut flag) = WAKE.0.lock() {
+        *flag = true;
+        WAKE.1.notify_all();
     }
+}
+
+/// Sleeps up to `limit`, or less when an order arrives meanwhile.
+pub fn wait_for_work(limit: Duration) {
+    let Ok(mut flag) = WAKE.0.lock() else {
+        std::thread::sleep(limit);
+        return;
+    };
+    if !*flag {
+        flag = match WAKE.1.wait_timeout(flag, limit) {
+            Ok((guard, _)) => guard,
+            Err(_) => return,
+        };
+    }
+    *flag = false;
+}
+
+fn queue_request(file: &'static str, body: &str, client: u32) -> Result<String, String> {
+    let Ok(mut queue) = REQUESTS.lock() else { return Err("request queue unavailable".to_string()) };
+    if queue.len() >= MAX_QUEUED {
+        return Err("too many orders waiting".to_string());
+    }
+    queue.push_back(Queued { file, body: body.to_string(), client, at: Instant::now() });
+    QUEUED.store(queue.len(), Ordering::SeqCst);
+    drop(queue);
+    wake();
+    Ok(format!("queued {file} ({} bytes)", body.len()))
+}
+
+pub fn queued() -> usize {
+    QUEUED.load(Ordering::SeqCst)
+}
+
+/// The oldest waiting order, taken only when `ready` accepts its kind.
+pub fn take_request(ready: impl Fn(&str) -> bool) -> Option<Queued> {
+    if QUEUED.load(Ordering::SeqCst) == 0 {
+        return None;
+    }
+    let mut queue = REQUESTS.lock().ok()?;
+    if !queue.front().is_some_and(|q| ready(q.file)) {
+        return None;
+    }
+    let item = queue.pop_front();
+    QUEUED.store(queue.len(), Ordering::SeqCst);
+    item
+}
+
+/// Writes every waiting order into its file and empties the queue (for tools that read the files).
+pub fn flush_to_files(dir: &Path) -> usize {
+    let mut n = 0;
+    while let Some(item) = take_request(|_| true) {
+        if store(dir, item.file, &item.body).is_ok() {
+            n += 1;
+        }
+    }
+    n
 }
 
 pub const POWERS_FILE: &str = "m182_powers.json";
@@ -160,12 +236,13 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
     let (_, rest) = next_token(t);
     let (given, rest) = next_token(rest);
 
-    session.failures.retain(|at| now.duration_since(*at) < FAILURE_WINDOW);
-    if session.failures.len() >= MAX_FAILURES {
+    let failures = session.failures.entry(client).or_default();
+    failures.retain(|at| now.duration_since(*at) < FAILURE_WINDOW);
+    if failures.len() >= MAX_FAILURES {
         return Verdict::Swallowed(format!("chat: client {client} ignored (too many wrong keys)"));
     }
     if !same(given, key) {
-        session.failures.push(now);
+        failures.push(now);
         return Verdict::Swallowed(format!(
             "chat: client {client} used a wrong key ({} characters, the server key has {}; the first {} match; same letters ignoring case: {})",
             given.chars().count(),
@@ -176,6 +253,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
     }
 
     session.buffers.retain(|_, (_, at)| now.duration_since(*at) < BUFFER_LIFE);
+    session.failures.retain(|_, list| !list.is_empty());
 
     let (command, rest) = next_token(rest);
     let lowered = command.to_ascii_lowercase();
@@ -203,17 +281,13 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
         "mark" => Ok("mark".to_string()),
         "set" => {
             let (file, body) = next_token(rest);
-            let written = write_json(dir, file, body, client);
-            if written.is_ok() {
-                note_requester(file, client);
-            }
-            written
+            write_json(dir, file, body, client)
         }
         "put" => {
             let (file, chunk) = next_token(rest);
             match allowed(file) {
                 Some(name) if chunk.len() <= MAX_BUFFER => {
-                    session.buffers.insert(name.to_string(), (chunk.to_string(), now));
+                    session.buffers.insert((client, name.to_string()), (chunk.to_string(), now));
                     Ok(format!("put {name} ({} bytes buffered)", chunk.len()))
                 }
                 Some(_) => Err("chunk too large".to_string()),
@@ -223,7 +297,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
         "add" => {
             let (file, chunk) = next_token(rest);
             match allowed(file) {
-                Some(name) => match session.buffers.get_mut(name) {
+                Some(name) => match session.buffers.get_mut(&(client, name.to_string())) {
                     Some((buffer, at)) if buffer.len() + chunk.len() <= MAX_BUFFER => {
                         buffer.push_str(chunk);
                         *at = now;
@@ -238,13 +312,9 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
         "end" => {
             let (file, _) = next_token(rest);
             match allowed(file) {
-                Some(name) => match session.buffers.remove(name) {
+                Some(name) => match session.buffers.remove(&(client, name.to_string())) {
                     Some((buffer, _)) => {
-                        let written = write_json(dir, name, &buffer, client);
-                        if written.is_ok() {
-                            note_requester(name, client);
-                        }
-                        written
+                        write_json(dir, name, &buffer, client)
                     }
                     None => Err(format!("nothing buffered for {name}")),
                 },
@@ -255,11 +325,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
             let (file, packed) = next_token(rest);
             match unpack(packed) {
                 Ok(body) => {
-                    let written = write_json(dir, file, &body, client);
-                    if written.is_ok() {
-                        note_requester(file, client);
-                    }
-                    written
+                    write_json(dir, file, &body, client)
                 }
                 Err(why) => Err(why),
             }
@@ -268,7 +334,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
             let (file, chunk) = next_token(rest);
             match allowed(file) {
                 Some(name) if chunk.len() <= MAX_BUFFER => {
-                    session.buffers.insert(name.to_string(), (chunk.to_string(), now));
+                    session.buffers.insert((client, name.to_string()), (chunk.to_string(), now));
                     Ok(format!("putz {name} ({} bytes buffered)", chunk.len()))
                 }
                 Some(_) => Err("chunk too large".to_string()),
@@ -278,7 +344,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
         "addz" => {
             let (file, chunk) = next_token(rest);
             match allowed(file) {
-                Some(name) => match session.buffers.get_mut(name) {
+                Some(name) => match session.buffers.get_mut(&(client, name.to_string())) {
                     Some((buffer, at)) if buffer.len() + chunk.len() <= MAX_BUFFER => {
                         buffer.push_str(chunk);
                         *at = now;
@@ -293,14 +359,10 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
         "endz" => {
             let (file, _) = next_token(rest);
             match allowed(file) {
-                Some(name) => match session.buffers.remove(name) {
+                Some(name) => match session.buffers.remove(&(client, name.to_string())) {
                     Some((buffer, _)) => match unpack(&buffer) {
                         Ok(body) => {
-                            let written = write_json(dir, name, &body, client);
-                            if written.is_ok() {
-                                note_requester(name, client);
-                            }
-                            written
+                            write_json(dir, name, &body, client)
                         }
                         Err(why) => Err(why),
                     },
@@ -399,6 +461,12 @@ fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String,
     }
     if name == SPAWNER_OP_FILE {
         return apply_spawner_op(dir, &value);
+    }
+    if name == SPAWN_REQUEST {
+        return queue_request(SPAWN_REQUEST, body, client);
+    }
+    if name == COMMAND_REQUEST {
+        return queue_request(COMMAND_REQUEST, body, client);
     }
     let target = destination(name, client);
     store(dir, &target, body)?;
