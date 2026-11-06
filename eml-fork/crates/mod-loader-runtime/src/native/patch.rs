@@ -424,9 +424,10 @@ fn send_lines_to_asker(out: usize, queue: usize, kind: usize, text: usize, clien
 }
 
 /// The panel that lives in this very game (the one hosting the world) has no network between it and the answer:
-/// its lines are read here instead of being queued in the chat.
+/// its lines are read here instead of being queued in the chat. A dedicated server (it has a chat key, panels
+/// talk to it from other computers) never has such a panel: its first player is a remote one.
 fn is_local_panel(client: usize) -> bool {
-    !super::spawner::is_remote_client() && super::probe::inject_on() && client & 0x3f == 0
+    !super::spawner::is_remote_client() && super::probe::inject_on() && LIVE.chat_key().is_empty() && client & 0x3f == 0
 }
 
 fn who_is(entry: &super::table::Entry) -> String {

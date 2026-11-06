@@ -171,3 +171,9 @@ by asking, and stays current without polling.
   (thread `m182-replies`) looks for `[M182R#seq` / `[M182S#seq` lines in memory every 400 ms for at most 14 s per request, feeds them to the
   same receivers as the hook, and stops as soon as the answer is complete. Idle clients run nothing. The log says how many answers were
   read, or that none appeared (server without this version).
+
+## A dedicated server has no local panel
+
+`patch::is_local_panel` (answers read in-process instead of queued to the chat) requires an empty chat key. A dedicated server always has
+a chat key, and its first connected player (client 64, peer 0) is a remote panel; treating that player as local made the server consume its
+own answers and nothing reached the client.
