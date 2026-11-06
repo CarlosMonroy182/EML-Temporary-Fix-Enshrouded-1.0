@@ -530,6 +530,91 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usi
     call(context, costs, pay)
 }
 
+static RESOURCE_LOCK: [std::sync::atomic::AtomicU32; 2] =
+    [std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)];
+static RESOURCE_TRAMPOLINE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+static RESOURCE_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_resource_lock(server: u32, client: u32) {
+    RESOURCE_LOCK[0].store(server, Ordering::Relaxed);
+    RESOURCE_LOCK[1].store(client, Ordering::Relaxed);
+}
+
+extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usize, delta: i32, kind: u32) -> usize {
+    if delta < 0 && (kind == super::spawner::STAMINA_SIGNATURE || kind == super::spawner::MANA_SIGNATURE) {
+        let who = entity as u32;
+        let locked = RESOURCE_LOCK.iter().any(|slot| {
+            let value = slot.load(Ordering::Relaxed);
+            value != 0 && value == who
+        });
+        if RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
+            super::spawner::log(&format!(
+                "resource lock: copy {N} entity {who} type {kind:#x} delta {delta} -> {} (locked {:?})",
+                if locked { "not spent" } else { "spent" },
+                [RESOURCE_LOCK[0].load(Ordering::Relaxed), RESOURCE_LOCK[1].load(Ordering::Relaxed)]
+            ));
+        }
+        if locked {
+            return 0;
+        }
+    }
+    let original = RESOURCE_TRAMPOLINE[N].load(Ordering::SeqCst);
+    let call: extern "win64" fn(usize, usize, i32, u32) -> usize = unsafe { std::mem::transmute(original) };
+    call(chunk, entity, delta, kind)
+}
+
+fn find_all(sections: &[&'static [u8]], signature: &[u8]) -> Vec<*mut u8> {
+    let mut hits = Vec::new();
+    for section in sections {
+        if section.len() < signature.len() {
+            continue;
+        }
+        let last_start = section.len() - signature.len();
+        let mut i = 0usize;
+        while i <= last_start {
+            if section[i] == signature[0] && &section[i..i + signature.len()] == signature {
+                hits.push(unsafe { section.as_ptr().add(i) } as *mut u8);
+                i += signature.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    hits
+}
+
+fn install_resource_lock(sections: &[&'static [u8]]) {
+    let hits = find_all(sections, &signatures::RESOURCE_DELTA);
+    if hits.len() != 2 {
+        super::spawner::log(&format!("resource lock off: delta function matched {} times", hits.len()));
+        return;
+    }
+    let hooks = [hook_resource_delta::<0> as usize, hook_resource_delta::<1> as usize];
+    for (n, target) in hits.into_iter().enumerate() {
+        let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE) } as *mut u8;
+        if page.is_null() {
+            super::spawner::log("resource lock off: trampoline allocation failed");
+            return;
+        }
+        let displaced = signatures::RESOURCE_DELTA_DISPLACED;
+        unsafe {
+            std::ptr::copy_nonoverlapping(target, page, displaced);
+            let tail = page.add(displaced);
+            tail.write(0xFF);
+            tail.add(1).write(0x25);
+            tail.add(2).cast::<u32>().write_unaligned(0);
+            tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
+        }
+        RESOURCE_TRAMPOLINE[n].store(page as usize, Ordering::SeqCst);
+        if unsafe { write_jump(target, hooks[n]) }.is_err() {
+            RESOURCE_TRAMPOLINE[n].store(0, Ordering::SeqCst);
+            super::spawner::log("resource lock off: VirtualProtect failed");
+            return;
+        }
+    }
+    super::spawner::log("resource lock ready: stamina and mana are not spent while the power is on");
+}
+
 fn install_pay_costs(sections: &[&'static [u8]]) {
     let target = match find_unique(sections, &signatures::PAY_COSTS) {
         Ok(addr) => addr,
@@ -835,6 +920,7 @@ pub fn install() -> Outcome {
     }
     if super::config::LIVE.spawner() {
         install_permissions(&sections);
+        install_resource_lock(&sections);
         if super::config::LIVE.free_building() {
             install_pay_costs(&sections);
         }

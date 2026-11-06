@@ -61,8 +61,8 @@ const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
 const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
 const DAMAGE_SIGNATURE: u32 = 0xb866_36b9;
-const STAMINA_SIGNATURE: u32 = 0x04b6_aa8b;
-const MANA_SIGNATURE: u32 = 0x6aa2_574e;
+pub(super) const STAMINA_SIGNATURE: u32 = 0x04b6_aa8b;
+pub(super) const MANA_SIGNATURE: u32 = 0x6aa2_574e;
 const SUSCEPTIBILITY_SIGNATURE: u32 = 2_415_994_894;
 const SUSCEPTIBILITY_SIZE: usize = 84;
 const FALL_DAMAGE_SIZE: usize = 24;
@@ -3089,6 +3089,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         spawners_tick(&mut st.spawners, dir);
     }
     let client = client_pair();
+    if st.powers.stamina {
+        super::patch::set_resource_lock(id, client.map(|pair| pair.1).unwrap_or(0));
+    } else {
+        super::patch::set_resource_lock(0, 0);
+    }
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
