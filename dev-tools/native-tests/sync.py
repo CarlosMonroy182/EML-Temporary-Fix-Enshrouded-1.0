@@ -4,7 +4,7 @@ S=os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','..','eml-fork','
 D='/home/claude/m182_native_work/linuxtest/src/native/'
 def rd(f): return open(S+f).read()
 def wr(f,t): open(D+f,'w').write(t)
-for f in ['probe.rs','outbox.rs','watch.rs','faction.rs','signatures.rs','config.rs','groups.rs','invites.rs','chat.rs','roster.rs','shared.rs']:
+for f in ['probe.rs','outbox.rs','watch.rs','faction.rs','signatures.rs','config.rs','groups.rs','invites.rs','chat.rs','roster.rs','shared.rs','divine.rs']:
     wr(f,rd(f))
 wr('signatures.rs',rd('signatures.rs'))
 m=rd('mod.rs').replace('#[cfg(windows)]','#[cfg(all())]').replace('#[cfg(not(windows))]','#[cfg(any())]').replace('\nmod patch;','\npub mod patch;').replace('\nmod outbox;','\npub mod outbox;').replace('\nmod probe;','\npub mod probe;').replace('\nmod signatures;','\npub mod signatures;').replace('\nmod spawn_probe;','\npub mod spawn_probe;').replace('\nmod spawner;','\npub mod spawner;').replace('\nmod table;','\npub mod table;').replace('\nmod vfx;','\npub mod vfx;')

@@ -17,6 +17,9 @@ pub mod shared;
 mod signatures;
 
 #[cfg(windows)]
+mod divine;
+
+#[cfg(windows)]
 mod guard;
 
 #[cfg(windows)]

@@ -30,7 +30,6 @@ const CATALOG: &[(&str, &str)] = &[
     ("VFX_Enemy_Vukah_Shaman_Lightning_Sky_Explosion", "bf944b00-58cc-45a1-a8da-c30a59d8c146"),
     ("VFX_Player_Projectile_Wand_Heavy_Piercing_Impact_Lightning", "f8afd903-8a98-4bfe-bab5-0decbc0da0c6"),
     ("VFX_Skill_MassDestruction_Impact", "b24e0244-7e12-44d6-8be2-6db92ac3ab8e"),
-    ("VFX_Teleport_Entity", "c1b5925c-198b-4ba1-9866-d98ed563122d"),
     ("VFX_Skill_BloodMagic_Trigger", "dca5c97a-dfa5-4a9b-aa68-ac653f690e00"),
     ("VFX_Skill_ChainHit_Impact", "fbdb3570-e74f-4673-8ea1-aa0e2b6fdf41"),
     ("VFX_Spell_ChainLightning_SourceTarget_NoTarget", "9c9932c9-2317-4260-8bb9-6e505456e9c3"),
@@ -379,27 +378,6 @@ pub fn run(manager: usize) {
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-pub const DIVINE_EFFECT: &str = "VFX_Teleport_Entity";
-static DIVINE_CHECKED: AtomicU32 = AtomicU32::new(0);
-static DIVINE_BLOCKED: AtomicBool = AtomicBool::new(false);
-
-/// True once the game has shown that it does not give the divine aura copies a lifetime; the aura then
-/// stops creating them so nothing can pile up.
-pub fn divine_blocked() -> bool {
-    DIVINE_BLOCKED.load(Ordering::Relaxed)
-}
-
-fn check_divine(manager: usize, template: [u8; 16], id: u32, life_ms: Option<u64>) {
-    let Some(life) = life_ms else { return };
-    if template_guid(DIVINE_EFFECT) != Some(template) || DIVINE_CHECKED.fetch_add(1, Ordering::Relaxed) >= 3 {
-        return;
-    }
-    if spawner::has_life_time(manager, id, life.saturating_mul(1_000_000)) == Some(false) {
-        DIVINE_BLOCKED.store(true, Ordering::Relaxed);
-        log("vfx: ERROR the divine aura effect was created without a lifetime, so the aura is stopped for this session");
-    }
-}
-
 /// Called on every server tick (the server's player-table pump).
 pub fn server_tick() {
     if QUEUED.load(Ordering::Relaxed) == 0 {
@@ -436,7 +414,7 @@ fn run_queue(manager: usize) {
             if FAILED.fetch_add(1, Ordering::Relaxed) < 3 {
                 log("vfx: the game did not create an effect");
             }
-        } else if { check_divine(manager, s.template, id, s.life_ms); SPAWNED.fetch_add(1, Ordering::Relaxed) < 5 } {
+        } else if SPAWNED.fetch_add(1, Ordering::Relaxed) < 5 {
             log(&format!("vfx: effect created id={id} scale={:.1}", s.scale));
         }
     }

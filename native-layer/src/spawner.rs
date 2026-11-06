@@ -247,13 +247,35 @@ fn layout(p: &Placement) -> Option<Vec<Slot>> {
     Some(out)
 }
 
-/// Whether the entity carries a 24-byte LifeTime component that was filled in with a duration of at most `limit_ns`.
-pub(super) fn has_life_time(manager: usize, id: u32, limit_ns: u64) -> Option<bool> {
+/// Takes an entity out of the world by bringing its health to zero.
+pub(super) fn retire_entity(manager: usize, id: u32) -> bool {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    for slot in &slots {
+        if slot.stride != 40 {
+            continue;
+        }
+        if let Some(b) = read_bytes(slot.addr, 40) {
+            if b.len() >= 40 && u32_at(&b, 0) == HEALTH_SIGNATURE {
+                return write_bytes(slot.addr + 8, &0u32.to_le_bytes());
+            }
+        }
+    }
+    false
+}
+
+/// Position in meters of an entity that carries a transform component.
+pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;
-    Some(slots.iter().any(|slot| {
-        slot.stride == 24
-            && read_bytes(slot.addr, 8).is_some_and(|b| b.len() >= 8 && (1..=limit_ns).contains(&u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])))
-    }))
+    for slot in &slots {
+        if slot.stride != TRANSFORM_SIZE {
+            continue;
+        }
+        let b = read_bytes(slot.addr, TRANSFORM_SIZE)?;
+        if plausible_position(&b) {
+            return Some([le_i64(&b, 0) as f64 / METERS, le_i64(&b, 8) as f64 / METERS, le_i64(&b, 16) as f64 / METERS]);
+        }
+    }
+    None
 }
 
 fn entity_layout(manager: usize, id: u32) -> Option<(usize, Placement, Vec<Slot>)> {
@@ -1405,7 +1427,7 @@ pub fn tick() {
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() && !super::divine::pending() {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1418,6 +1440,7 @@ pub fn before(manager: usize, edx: u32) {
         spawn_now(manager);
     }
     run_aura_queue(manager);
+    super::divine::run_orders(manager);
     super::vfx::run(manager);
     BUSY.store(false, Ordering::SeqCst);
 }
@@ -1630,6 +1653,9 @@ pub fn after(manager: usize, edx: u32, desc: usize, ret: u32) {
     }
     if LIVE.spawner() {
         harvest_loot_node(manager, edx, desc);
+    }
+    if is_server(manager) {
+        super::divine::note_created(manager, desc, ret);
     }
     let settled = PLAYER_ID.load(Ordering::Relaxed) != 0 && calibration_done();
     let server = is_server(manager);
@@ -1930,6 +1956,10 @@ fn aura_guid(wanted: &'static str) -> Option<[u8; 16]> {
     None
 }
 
+pub(super) fn create_prop(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u32 {
+    spawn_effect(manager, template, x, y, z)
+}
+
 fn spawn_effect(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u32 {
     let mut transform = [0u8; TRANSFORM_SIZE];
     write_u64(&mut transform, 0, x as u64);
@@ -2006,7 +2036,7 @@ struct PowerState {
     client_powers: HashMap<u32, ClientPowers>,
     client_scan: Option<Instant>,
     shield_at: Option<Instant>,
-    aura_at: Option<Instant>,
+    divine_on: bool,
 }
 
 #[derive(Default)]
@@ -2018,7 +2048,7 @@ struct ClientPowers {
     seen: Vec<u32>,
     heal: bool,
     absent_since: Option<Instant>,
-    aura_at: Option<Instant>,
+    divine_on: bool,
 }
 
 static RES_INDEX: [[AtomicI32; 6]; 2] = [
@@ -3111,6 +3141,7 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
         .map(|(client, _)| *client)
         .collect();
     for client in gone {
+        super::divine::release(SERVER_MGR.load(Ordering::SeqCst), client);
         st.client_powers.remove(&client);
         let _ = std::fs::remove_file(dir.join(super::chat::client_powers_file(client)));
         log(&format!("powers: chat client {client} left, its powers were dropped"));
@@ -3137,7 +3168,13 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
             Err(e) => log(&format!("powers (chat client {client}): invalid file ({e})")),
         }
     }
-    st.client_powers.retain(|client, c| present.contains(client) || c.heal);
+    st.client_powers.retain(|client, c| {
+        let keep = present.contains(client) || c.heal;
+        if !keep && c.divine_on {
+            super::divine::release(SERVER_MGR.load(Ordering::SeqCst), *client);
+        }
+        keep
+    });
 }
 
 fn client_powers_busy(st: &PowerState) -> bool {
@@ -3219,7 +3256,13 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
             refill_mana(manager, id, &mut c.mana_peak);
         }
         if c.powers.aura {
-            divine_aura(manager, id, &mut c.aura_at);
+            if let Some(t) = transform_of(manager, id).filter(|t| t.len() >= 24) {
+                super::divine::follow(manager, client, [le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)]);
+            }
+            c.divine_on = true;
+        } else if c.divine_on {
+            c.divine_on = false;
+            super::divine::release(manager, client);
         }
         if c.powers.stamina {
             if tick % 2 == 0 {
@@ -3231,28 +3274,6 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
             }
         }
     }
-}
-
-const DIVINE_EFFECT: &str = super::vfx::DIVINE_EFFECT;
-const DIVINE_EVERY: Duration = Duration::from_millis(1200);
-const DIVINE_LIFE_MS: u64 = 1500;
-
-/// The teleport effect around an administrator who switched the divine aura on, renewed while it is
-/// on and every copy removes itself. Nothing runs for anybody else, nor when it is off.
-fn divine_aura(manager: usize, id: u32, last: &mut Option<Instant>) {
-    if last.is_some_and(|t| t.elapsed() < DIVINE_EVERY) {
-        return;
-    }
-    *last = Some(Instant::now());
-    if super::vfx::divine_blocked() {
-        return;
-    }
-    let Some(t) = transform_of(manager, id) else { return };
-    if t.len() < 24 {
-        return;
-    }
-    let Some(template) = super::vfx::template_guid(DIVINE_EFFECT) else { return };
-    super::vfx::queue_effect(template, (u64_at(&t, 0) as i64, u64_at(&t, 8) as i64, u64_at(&t, 16) as i64), 1.0, DIVINE_LIFE_MS);
 }
 
 fn spawn_busy() -> bool {
@@ -3369,7 +3390,16 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }
     }
     if hosting && st.powers.aura {
-        divine_aura(manager, id, &mut st.aura_at);
+        if let Some(t) = transform_of(manager, id).filter(|t| t.len() >= 24) {
+            super::divine::follow(manager, super::divine::HOST, [le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16)]);
+        }
+        st.divine_on = true;
+    } else if st.divine_on {
+        st.divine_on = false;
+        super::divine::release(manager, super::divine::HOST);
+    }
+    if hosting {
+        super::divine::sweep(manager);
     }
     if st.powers.fly {
         if !st.gravity_off {
@@ -3467,7 +3497,7 @@ pub fn new_power_state() -> PowerState {
         client_powers: HashMap::new(),
         client_scan: None,
         shield_at: None,
-        aura_at: None,
+        divine_on: false,
     }
 }
 
@@ -4908,6 +4938,7 @@ fn powers_loop() {
     }
     let mut st = new_power_state();
     clear_client_power_files(&dir);
+    super::divine::start();
     let mut tick = 0u32;
     let mut polled = Instant::now();
     loop {
