@@ -961,14 +961,18 @@ fn write_mode() {
     } else {
         return;
     };
-    if HOSTING.swap(hosting, Ordering::SeqCst) == hosting {
+    if HOSTING.load(Ordering::SeqCst) == hosting {
         return;
     }
     let Ok(dir) = std::env::current_dir() else { return };
+    let text = format!("{{\"hosting\":{}}}", hosting == 1);
+    let path = dir.join("m182_mode.json");
     let tmp = dir.join("m182_mode.json.tmp");
-    if std::fs::write(&tmp, format!("{{\"hosting\":{}}}", hosting == 1)).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join("m182_mode.json"));
+    let written = (std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, &path).is_ok()) || std::fs::write(&path, &text).is_ok();
+    if !written {
+        return;
     }
+    HOSTING.store(hosting, Ordering::SeqCst);
     log(&format!("mode: {}", if hosting == 1 { "this game hosts the world" } else { "connected to a remote server" }));
 }
 

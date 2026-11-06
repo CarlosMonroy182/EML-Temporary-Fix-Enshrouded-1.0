@@ -355,4 +355,5 @@ EN = {
 "Sincronizando con el servidor…": "Syncing with the server…",
 "Datos compartidos al día (hace {} s)": "Shared data up to date ({} s ago)",
 "El servidor no respondió con «{topic}». Pulsa «Sincronizar» para intentarlo otra vez.": "The server did not answer for '{topic}'. Press 'Sync' to try again.",
+"Sin respuesta del servidor todavía. Pulsa «Sincronizar».": "No answer from the server yet. Press 'Sync'.",
 }

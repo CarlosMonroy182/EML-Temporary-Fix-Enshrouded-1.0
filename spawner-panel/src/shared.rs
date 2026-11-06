@@ -25,6 +25,7 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_TRIES: u8 = 3;
 const SAFETY_CHECK: Duration = Duration::from_secs(240);
 const STATUS_EVERY: Duration = Duration::from_secs(20);
+const NO_ANSWER: Duration = Duration::from_secs(15);
 
 /// What the panel keeps in a file for each topic that is shared.
 pub fn topic_of_file(file: &str) -> Option<&'static str> {
@@ -161,6 +162,7 @@ struct Core {
     last_check: Option<Instant>,
     last_status: Option<Instant>,
     synced_at: Option<Instant>,
+    begun: Option<Instant>,
     note: String,
 }
 
@@ -194,7 +196,10 @@ pub struct Applied {
 
 fn ask(c: &mut Core, topic: &str, now: Instant) {
     match c.out.get_mut(topic) {
-        Some(out) => out.stale = true,
+        Some(out) => {
+            out.stale = true;
+            remote::note(&format!("shared: {topic} changed while it was being asked, it will be asked again"));
+        }
         None => {
             if let Some(dir) = &c.dir {
                 let name = remote_file(topic);
@@ -274,18 +279,19 @@ pub fn want_status() {
     });
 }
 
-/// One line for the header: how fresh the shared state is.
-pub fn line() -> String {
+/// One line for the header: how fresh the shared state is, and whether it is a problem.
+pub fn line() -> (String, bool) {
     with(|c| {
         if !c.started {
-            return String::new();
+            return (String::new(), false);
         }
         if !c.note.is_empty() {
-            return c.note.clone();
+            return (c.note.clone(), true);
         }
         match c.synced_at {
-            None => "Sincronizando con el servidor…".to_string(),
-            Some(at) => format!("Datos compartidos al día (hace {} s)", at.elapsed().as_secs()),
+            None if c.begun.is_some_and(|t| t.elapsed() > NO_ANSWER) => ("Sin respuesta del servidor todavía. Pulsa «Sincronizar».".to_string(), true),
+            None => ("Sincronizando con el servidor…".to_string(), false),
+            Some(at) => (format!("Datos compartidos al día (hace {} s)", at.elapsed().as_secs()), false),
         }
     })
 }
@@ -382,6 +388,7 @@ pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
     c.dir = Some(dir.to_path_buf());
     if !c.started {
         c.started = true;
+        c.begun = Some(now);
         let _ = std::fs::remove_file(dir.join(REV_FILE));
         for t in TOPICS.iter().chain(std::iter::once(&STATUS)) {
             let _ = std::fs::remove_file(dir.join(remote_file(t)));
@@ -419,6 +426,7 @@ pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
         }
         let stale = c.out.get(&topic).is_some_and(|o| o.stale);
         c.out.remove(&topic);
+        remote::note(&format!("shared: {topic} arrived ({} bytes{})", text.len(), if stale { ", discarded: asked again" } else { "" }));
         if stale {
             ask(c, &topic, now);
             continue;
@@ -453,6 +461,7 @@ pub fn tick(dir: &Path, connected: bool) -> Vec<Applied> {
         let Some(out) = c.out.get_mut(&topic) else { continue };
         if out.tries >= MAX_TRIES {
             c.out.remove(&topic);
+            remote::note(&format!("shared: no answer for {topic} after {MAX_TRIES} tries"));
             c.note = format!("El servidor no respondió con «{topic}». Pulsa «Sincronizar» para intentarlo otra vez.");
             continue;
         }

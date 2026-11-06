@@ -153,3 +153,7 @@ by asking, and stays current without polling.
   pushes to the local panel. Other admins connected to that host still get theirs through the narrowed chat entry.
 - Panel server strip: three fixed-height rows (status + "Reenviar todo", "Sincronizar" + sync message, upload hint) with truncated
   labels, so the layout does not move with the message length.
+- `m182_mode.json` is rewritten until it succeeds (a failed rename used to leave the previous session's `false` for a hosting game, which made
+  the panel treat its own hosted world as a remote server). The local panel also gets player-list and team answers directly (`accept_reply`).
+- The panel logs every shared-state event (`shared: ... arrived / asked again / no answer`) in `m182_panel.log`; the header line is red when
+  the server has not answered for 15 s or a topic ran out of tries.

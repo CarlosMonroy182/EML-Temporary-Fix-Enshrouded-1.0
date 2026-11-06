@@ -48,8 +48,8 @@ impl App {
                 if button(ui, "Sincronizar", Vec2::new(130.0, 24.0), true, false) {
                     crate::shared::refresh_all();
                 }
-                let line = crate::shared::line();
-                ui.add(egui::Label::new(RichText::new(line).color(MUTED).size(14.5)).truncate());
+                let (line, problem) = crate::shared::line();
+                ui.add(egui::Label::new(RichText::new(line).color(if problem { BAD } else { MUTED }).size(14.5)).truncate());
             });
         }
         if remote::connected() && !self.upload_hint.is_empty() {

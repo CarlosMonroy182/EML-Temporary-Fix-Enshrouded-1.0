@@ -540,12 +540,20 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
         }
         super::chat::Verdict::Teams(seq) => {
             let line = super::spawner::teams_line(seq);
+            if is_local_panel(client) {
+                accept_reply(&line);
+                return 1;
+            }
             let sent = replace_text(text, &line);
             super::spawner::log(&format!("chat: client {} asked for the teams ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
             if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
         }
         super::chat::Verdict::Roster(seq) => {
             let line = super::spawner::roster_line(seq, client as u32);
+            if is_local_panel(client) {
+                accept_reply(&line);
+                return 1;
+            }
             let sent = replace_text(text, &line);
             super::spawner::log(&format!("chat: client {} asked for the player list ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
             if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
