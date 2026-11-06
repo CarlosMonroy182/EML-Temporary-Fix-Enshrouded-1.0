@@ -3070,23 +3070,25 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
 
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
     if poll {
-        refresh_powers(st, dir);
-        if SERVER_MGR.load(Ordering::SeqCst) != 0 {
-            refresh_client_powers(st, dir);
-        }
-        run_command(st, dir);
-        scan_request(st, dir);
+        super::perf::time(super::perf::POLL, || {
+            refresh_powers(st, dir);
+            if SERVER_MGR.load(Ordering::SeqCst) != 0 {
+                refresh_client_powers(st, dir);
+            }
+            run_command(st, dir);
+            scan_request(st, dir);
+        });
     }
     let Some((manager, id)) = world_pair() else { return };
     let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
     if hosting && tick % 8 == 0 {
-        deliveries_tick();
+        super::perf::time(super::perf::DELIVERIES, deliveries_tick);
     }
     if hosting && tick % 4 == 0 {
-        groups_tick(st, dir);
+        super::perf::time(super::perf::GROUPS, || groups_tick(st, dir));
     }
     if hosting && tick % 16 == 0 {
-        spawners_tick(&mut st.spawners, dir);
+        super::perf::time(super::perf::SPAWNERS, || spawners_tick(&mut st.spawners, dir));
     }
     let client = client_pair();
     if st.powers.stamina {
@@ -3121,7 +3123,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
-    shield_tick(st, &want);
+    super::perf::time(super::perf::SHIELD, || shield_tick(st, &want));
     if hosting {
         apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick);
     }
@@ -4562,6 +4564,7 @@ fn powers_loop() {
     clear_client_power_files(&dir);
     let mut tick = 0u32;
     let mut polled = Instant::now();
+    let mut reported = Instant::now();
     loop {
         let urgent = st.powers.god
             || st.powers.fly
@@ -4583,7 +4586,13 @@ fn powers_loop() {
         if poll {
             polled = Instant::now();
         }
-        power_tick(&mut st, &dir, tick, poll);
+        super::perf::time(super::perf::POWER, || power_tick(&mut st, &dir, tick, poll));
+        if reported.elapsed() >= Duration::from_secs(60) {
+            reported = Instant::now();
+            if let Some(line) = super::perf::report() {
+                log(&line);
+            }
+        }
     }
 }
 

@@ -26,6 +26,7 @@ mod pillar;
 
 #[cfg(windows)]
 mod patch;
+mod perf;
 
 #[cfg(windows)]
 mod spawn_probe;

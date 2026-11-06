@@ -240,7 +240,9 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
     if replace_text(text, &line) { 0 } else { 1 }
 }
 
-extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: usize, client: usize) -> u8 {
+static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
+
+extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
     if key.is_empty() {
         return 0;
@@ -252,6 +254,12 @@ extern "win64" fn hook_chat(_out: usize, _context: usize, _kind: usize, text: us
     }
     let Some(bytes) = super::spawn_probe::read_bytes(pointer, length) else { return 0 };
     let message = String::from_utf8_lossy(&bytes);
+    if CHAT_SEEN.fetch_add(1, Ordering::Relaxed) < 20 {
+        super::spawner::log(&format!(
+            "chat seen: out {out:#x} context {context:#x} kind {kind:#x} client {client:#x} length {length} ours {}",
+            super::chat::has_prefix(&message)
+        ));
+    }
     if super::invites::is_command(&message) {
         return team_command(text, &message, client as u32);
     }
