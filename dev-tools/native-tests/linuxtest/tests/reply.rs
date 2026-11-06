@@ -70,3 +70,32 @@ fn a_game_connected_to_a_server_reads_its_answers_from_the_chat_line_and_never_s
     assert!(!patch::take_server_reply(&t as *const Text as usize));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_change_notice_reaches_only_the_panels_it_is_for() {
+    let line = b"[M182R#0] z=00000001 p=00000002 s=00000003 t=00000004 r=00000005";
+    let mut queue = vec![0u8; 0x400];
+    let mut entry = vec![0u8; 0x80];
+    entry[8..12].copy_from_slice(&(line.len() as u32).to_le_bytes());
+    entry[0x40..0x40 + line.len()].copy_from_slice(line);
+    let size = ((line.len() as u32 + 0x17) + 3) / 4 * 4;
+    let mut mask = 0u32;
+    for peer in 0..32usize {
+        if peer < 5 {
+            queue[0x0c + peer * 12] = 1;
+            queue[0x14 + peer * 12..0x14 + peer * 12 + 4].copy_from_slice(&(100u32 + size).to_le_bytes());
+        } else {
+            mask |= 1 << peer;
+        }
+    }
+    entry[0x20..0x24].copy_from_slice(&mask.to_le_bytes());
+    let entry_at = entry.as_ptr() as u64;
+    queue[0x1c8..0x1d0].copy_from_slice(&entry_at.to_le_bytes());
+
+    assert!(patch::narrow_last_entry_to(queue.as_ptr() as usize, &[1, 3], line));
+
+    let counter = |p: usize| u32::from_le_bytes(queue[0x14 + p * 12..0x14 + p * 12 + 4].try_into().unwrap());
+    assert_eq!((counter(0), counter(1), counter(2), counter(3), counter(4)), (100, 100 + size, 100, 100 + size, 100));
+    let mask = u32::from_le_bytes(entry[0x20..0x24].try_into().unwrap());
+    assert_eq!(mask & 0b11111, 0b10101, "everybody but the two panels is marked as done");
+}

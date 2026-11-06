@@ -4,6 +4,17 @@ use crate::remote;
 use crate::theme::*;
 use crate::App;
 
+fn topic_label(topic: &str) -> &'static str {
+    match topic {
+        "zones" => "zona(s)",
+        "places" => "lugar(es)",
+        "teams" => "equipo(s)",
+        "templates" => "plantilla(s)",
+        "spawners" => "aparición(es)",
+        _ => "elemento(s)",
+    }
+}
+
 impl App {
     /// One line under the header while the panel drives a server.
     pub fn server_strip(&mut self, ui: &mut egui::Ui) {
@@ -27,7 +38,26 @@ impl App {
             if button(ui, "Reenviar todo", Vec2::new(130.0, 24.0), remote::connected() && !status.sending, false) {
                 self.resend_state();
             }
+            if remote::connected() {
+                let line = crate::shared::line();
+                if !line.is_empty() {
+                    ui.label(RichText::new(line).color(MUTED).size(14.5));
+                }
+                if button(ui, "Sincronizar", Vec2::new(120.0, 24.0), true, false) {
+                    crate::shared::refresh_all();
+                }
+            }
         });
+        if remote::connected() && !self.upload_hint.is_empty() {
+            let names: Vec<String> = self.upload_hint.iter().map(|(t, n)| format!("{n} {}", topic_label(t))).collect();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("El servidor no tiene {} y tu perfil «{}» sí.", names.join(", "), self.profile)).color(GOLD_DIM).size(14.5));
+                if button(ui, "Subir mi perfil al servidor", Vec2::new(230.0, 24.0), true, true) {
+                    let sent = self.upload_profile();
+                    self.remote_notice = format!("{sent} elemento(s) enviados al servidor. Lo que ya existía no se tocó.");
+                }
+            });
+        }
     }
 
     #[allow(dead_code)]

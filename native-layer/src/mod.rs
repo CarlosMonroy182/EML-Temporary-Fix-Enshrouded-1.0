@@ -13,6 +13,7 @@ pub mod groups;
 pub mod invites;
 pub mod pillar_cfg;
 pub mod roster;
+pub mod shared;
 mod signatures;
 
 #[cfg(windows)]

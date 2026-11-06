@@ -162,7 +162,7 @@ fn member_json(m: &Member) -> Value {
     json!({"creature": m.creature, "template": m.template, "level": m.level, "count": m.count, "health": m.health, "damage": m.damage, "drops": drops_json(&m.drops)})
 }
 
-fn templates_json(list: &[RaidTemplate]) -> Vec<Value> {
+pub(crate) fn templates_json(list: &[RaidTemplate]) -> Vec<Value> {
     list.iter().map(|t| json!({"name": t.name, "active": t.active, "members": t.members.iter().map(member_json).collect::<Vec<_>>()})).collect()
 }
 
@@ -178,7 +178,7 @@ fn parse_member(t: &Value) -> Option<Member> {
     })
 }
 
-fn parse_templates(v: Option<&Value>) -> Vec<RaidTemplate> {
+pub(crate) fn parse_templates(v: Option<&Value>) -> Vec<RaidTemplate> {
     v.and_then(|d| d.as_array())
         .map(|list| {
             list.iter()
@@ -291,12 +291,13 @@ pub fn op_replace_all(list: &[Spawner], per_message: usize) -> Vec<String> {
 
 /// Saves the list next to the game and, when the panel drives a server, tells it only what changed.
 pub fn save_change(dir: &Path, list: &[Spawner], op: &str) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(&to_json(list)).map_err(|e| e.to_string())?;
-    crate::write_local(dir, SPAWNERS_FILE, "m182_spawners.json.tmp", &text)?;
     if crate::remote::route(SPAWNERS_FILE) != crate::remote::Route::Local {
         crate::remote::submit(OP_FILE, op)?;
+        crate::shared::spawners_changed();
+        return Ok(());
     }
-    Ok(())
+    let text = serde_json::to_string_pretty(&to_json(list)).map_err(|e| e.to_string())?;
+    crate::write_local(dir, SPAWNERS_FILE, "m182_spawners.json.tmp", &text)
 }
 
 pub fn parse(text: &str) -> Vec<Spawner> {
@@ -337,6 +338,9 @@ pub fn load(dir: &Path) -> Vec<Spawner> {
 }
 
 pub fn save(dir: &Path, list: &[Spawner]) -> Result<(), String> {
+    if crate::remote::active() {
+        return Ok(());
+    }
     let text = serde_json::to_string_pretty(&to_json(list)).map_err(|e| e.to_string())?;
     write_atomic(dir, SPAWNERS_FILE, "m182_spawners.json.tmp", &text)
 }

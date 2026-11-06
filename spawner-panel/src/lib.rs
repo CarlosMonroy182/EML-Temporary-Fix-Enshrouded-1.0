@@ -11,6 +11,7 @@ pub mod profile;
 pub mod remote;
 mod server;
 pub mod remote_proto;
+pub mod shared;
 mod session;
 mod social;
 mod spawners;
@@ -163,6 +164,11 @@ pub struct App {
     creature_drops: Vec<spawners::Drop>,
     remote_cfg: remote::Settings,
     remote_notice: String,
+    /// The lists on screen come from the server (not from this PC's files).
+    remote_view: bool,
+    /// Shared topics the server has empty although this profile has something to give.
+    upload_hint: Vec<(String, usize)>,
+    spawner_done: Vec<String>,
 }
 
 fn faction_label(raw: &str) -> &str {
@@ -417,6 +423,9 @@ pub(crate) fn write_local(dir: &Path, name: &str, tmp: &str, text: &str) -> Resu
 /// Writes a file for the native layer; when the panel drives a server, the files the server
 /// understands are also (or only) typed into the game chat.
 pub fn write_atomic(dir: &Path, name: &str, tmp: &str, text: &str) -> Result<(), String> {
+    if remote::connected() && shared::covers(name) {
+        return shared::local_change(name, text);
+    }
     match remote::route_for(name, text) {
         remote::Route::Local => write_local(dir, name, tmp, text),
         remote::Route::Both => {
@@ -434,7 +443,11 @@ fn read_player(dir: &Path) -> Option<[f64; 3]> {
 
 fn load_places(dir: &Path) -> Vec<Place> {
     let Ok(text) = std::fs::read_to_string(dir.join(PLACES_FILE)) else { return Vec::new() };
-    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&text) else { return Vec::new() };
+    parse_places(&text)
+}
+
+fn parse_places(text: &str) -> Vec<Place> {
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(text) else { return Vec::new() };
     items
         .iter()
         .filter_map(|v| {
@@ -576,6 +589,9 @@ impl App {
             spawner_notice: String::new(),
             remote_cfg: remote_cfg.clone(),
             remote_notice: String::new(),
+            remote_view: false,
+            upload_hint: Vec::new(),
+            spawner_done: Vec::new(),
             profiles: profile::list(&dir),
             profile: profile::active(&dir),
             profile_new: String::new(),
@@ -630,6 +646,9 @@ impl App {
                 self.places = load_places(&self.dir);
                 self.ev = events::EventState::default();
                 self.place_index = 0;
+                self.remote_view = false;
+                self.upload_hint.clear();
+                shared::invalidate();
                 self.profile = active.clone();
                 self.profiles = profile::list(&self.dir);
                 self.profile_notice = format!("Perfil activo: {active}");
@@ -865,14 +884,23 @@ impl App {
         }
         if self.spawner_checked.elapsed() >= Duration::from_secs(2) {
             self.spawner_checked = Instant::now();
-            self.spawner_status = spawners::load_status(&self.dir);
-            self.clean_raids();
+            if !self.remote_view {
+                self.spawner_status = spawners::load_status(&self.dir);
+                self.clean_raids();
+            }
         }
         if self.player_checked.elapsed() >= Duration::from_millis(700) {
             self.player_checked = Instant::now();
             self.player = read_player(&self.dir);
             remote::set_hosting(remote::read_hosting(&self.dir));
             let connected = remote::connected();
+            let arrived = shared::tick(&self.dir, connected);
+            if !arrived.is_empty() {
+                self.apply_shared(arrived);
+            }
+            if !connected && self.remote_view {
+                self.leave_server_view();
+            }
             if connected && !self.synced {
                 self.synced = true;
                 self.send_powers();
@@ -894,20 +922,105 @@ impl App {
         }
     }
 
+    /// Puts on screen what the server sent: from then on the lists are the server's.
+    fn apply_shared(&mut self, list: Vec<shared::Applied>) {
+        let first = !self.remote_view;
+        for a in list {
+            let text = a.data.to_string();
+            match a.topic.as_str() {
+                "zones" => {
+                    let chosen: Vec<String> = self.ev.zones.iter().filter_map(|&i| self.social.zones.get(i).map(|z| z.name.clone())).collect();
+                    self.social.zones = social::parse_zones(&text);
+                    self.ev.zones = self.social.zones.iter().enumerate().filter(|(_, z)| chosen.contains(&z.name)).map(|(i, _)| i).collect();
+                }
+                "places" => {
+                    let keep = self.places.get(self.place_index).map(|p| p.name.clone());
+                    self.places = parse_places(&text);
+                    self.fill_spawner_names();
+                    self.place_index = keep.and_then(|n| self.places.iter().position(|p| p.name == n)).unwrap_or(0);
+                }
+                "teams" => {
+                    self.social.teams = social::parse_teams(&text);
+                    self.social.live_note = "Equipos sincronizados con el servidor.".to_string();
+                }
+                "spawners" => {
+                    self.spawners = spawners::parse(&text);
+                    self.fill_spawner_names();
+                    if first {
+                        self.ev.restored = false;
+                    }
+                }
+                "templates" => {
+                    let keep = self.ev.selected.and_then(|i| self.ev.templates.get(i)).map(|t| t.name.clone());
+                    self.ev.templates = spawners::parse_templates(a.data.get("templates"));
+                    self.ev.loaded = true;
+                    self.ev.selected = keep.and_then(|n| self.ev.templates.iter().position(|t| t.name == n)).or(if self.ev.templates.is_empty() { None } else { Some(0) });
+                }
+                "status" => {
+                    self.spawner_status = spawners::parse_status(&text);
+                    self.spawner_done = spawners::parse_done(&text);
+                    self.clean_raids();
+                }
+                _ => {}
+            }
+            if !a.taken.is_empty() {
+                let names = a.taken.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
+                self.social.notice = format!("No se creó {names}: otro admin ya tiene uno con ese nombre. Se muestra el del servidor.");
+                self.spawner_notice = self.social.notice.clone();
+            }
+        }
+        self.remote_view = true;
+        self.upload_hint = shared::upload_hint(&self.dir);
+    }
+
+    /// Back to this PC's files when the game is no longer connected to a server.
+    fn leave_server_view(&mut self) {
+        self.remote_view = false;
+        self.upload_hint.clear();
+        self.social = social::SocialState::load(&self.dir);
+        self.spawners = spawners::load(&self.dir);
+        self.places = load_places(&self.dir);
+        self.ev = events::EventState::default();
+        self.place_index = 0;
+        self.spawner_status = spawners::load_status(&self.dir);
+    }
+
+    /// The spawners the server has carry the creature's template; the name shown comes from the catalog.
+    fn fill_spawner_names(&mut self) {
+        let name_of = |guid: &str, entries: &[Entry]| entries.iter().find(|e| e.guid.eq_ignore_ascii_case(guid)).map(|e| e.alias.clone().unwrap_or_else(|| e.label.clone()));
+        for s in &mut self.spawners {
+            for t in &mut s.pool {
+                for m in t.members.iter_mut().filter(|m| m.creature.is_empty()) {
+                    if let Some(name) = name_of(&m.template, &self.creatures.entries) {
+                        m.creature = name;
+                    }
+                }
+            }
+            if s.creature.is_empty() {
+                if let Some(e) = self.creatures.entries.iter().find(|e| e.guid.eq_ignore_ascii_case(&s.template)) {
+                    s.creature = e.alias.clone().unwrap_or_else(|| e.label.clone());
+                }
+            }
+            if s.place.is_empty() || (s.place.starts_with("X ") && s.place.contains(" Z ")) {
+                let near = self.places.iter().find(|p| (p.x - s.at[0]).abs() < 2.5 && (p.z - s.at[2]).abs() < 2.5);
+                s.place = near.map(|p| p.name.clone()).unwrap_or_else(|| format!("X {:.0} Z {:.0}", s.at[0], s.at[2]));
+            }
+        }
+    }
+
+    /// Gives the server what this profile has and the server lacks (nothing that already exists is touched).
+    pub fn upload_profile(&mut self) -> usize {
+        let sent = shared::upload_missing(&self.dir);
+        self.upload_hint.clear();
+        sent
+    }
+
     /// Manual button: sends the server everything the panel has configured.
     pub fn resend_state(&mut self) -> usize {
         remote::forget_sent();
         let mut sent = 0;
-        for name in ["m182_powers.json", "m182_zones.json", "m182_teams.json"] {
-            if let Ok(text) = std::fs::read_to_string(self.dir.join(name)) {
-                if remote::submit(name, &text).is_ok() {
-                    sent += 1;
-                }
-            }
-        }
-        let standing: Vec<_> = self.spawners.iter().filter(|s| !s.once).cloned().collect();
-        for op in spawners::op_replace_all(&standing, 4) {
-            if remote::submit(spawners::OP_FILE, &op).is_ok() {
+        if let Ok(text) = std::fs::read_to_string(self.dir.join(powers::POWERS_FILE)) {
+            if remote::submit(powers::POWERS_FILE, &text).is_ok() {
                 sent += 1;
             }
         }
@@ -1170,6 +1283,9 @@ impl App {
     }
 
     fn spawner_list(&mut self, ui: &mut egui::Ui) {
+        if remote::connected() {
+            shared::want_status();
+        }
         label_title(ui, &format!("APARICIONES ACTIVAS ({})", self.spawners.len()));
         if self.spawners.is_empty() {
             ui.label(RichText::new("Ninguna.").color(MUTED).size(14.5));
@@ -1188,7 +1304,7 @@ impl App {
                         ui.label(RichText::new(note).color(MUTED).size(13.5));
                     }
                     let live = self.spawner_status.get(&s.id);
-                    let state = if remote::connected() || (remote::active() && live.is_none()) { "Activa en el servidor".to_string() } else { spawners::describe(live) };
+                    let state = if live.is_none() && (remote::connected() || remote::active()) { "Activa en el servidor".to_string() } else { spawners::describe(live) };
                     ui.label(RichText::new(state).color(GOLD_DIM).size(14.5));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1510,6 +1626,9 @@ mod tests {
             spawner_notice: String::new(),
             remote_cfg: remote::read_settings(&std::env::temp_dir().join("m182_none")),
             remote_notice: String::new(),
+            remote_view: false,
+            upload_hint: Vec::new(),
+            spawner_done: Vec::new(),
         }
     }
 

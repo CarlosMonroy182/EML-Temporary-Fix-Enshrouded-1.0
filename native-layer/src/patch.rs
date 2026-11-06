@@ -295,6 +295,20 @@ pub fn take_server_reply(text: usize) -> bool {
         }
         return true;
     }
+    if message.starts_with(super::shared::REV_TAG) {
+        let note = super::shared::receive_revs(&dir, &message);
+        if !note.is_empty() {
+            super::spawner::log(&note);
+        }
+        return true;
+    }
+    if message.starts_with(super::shared::SNAP_TAG) {
+        let note = super::shared::receive_snapshot(&dir, &message);
+        if !note.is_empty() {
+            super::spawner::log(&note);
+        }
+        return true;
+    }
     if message.starts_with("[M182T#") {
         let Some(seq) = number(7) else { return false };
         match super::groups::parse_live_line(&message, seq) {
@@ -315,6 +329,11 @@ type EnqueueFn = extern "win64" fn(*mut u8, usize, usize, usize, u32, u32, u32, 
 /// player except the one who asked, so the answer to a panel request is not shown to the whole server.
 /// Returns false when it could not be done and the caller should let the game broadcast it as before.
 fn send_to_asker_only(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize) -> bool {
+    send_to_peers(out, queue, kind, text, &[client], frame)
+}
+
+/// Same, for several players at once (the panels that must hear about a change).
+fn send_to_peers(out: usize, queue: usize, kind: usize, text: usize, clients: &[usize], frame: usize) -> bool {
     let original = CHAT_TRAMPOLINE.load(Ordering::SeqCst);
     if original == 0 || queue == 0 {
         return false;
@@ -330,8 +349,9 @@ fn send_to_asker_only(out: usize, queue: usize, kind: usize, text: usize, client
     if status != 0 {
         return true;
     }
-    if !narrow_last_entry(queue, (client & 0x3f) as usize, line.as_bytes()) {
-        super::spawner::log("chat: could not limit an answer to the player who asked; it was sent to everybody");
+    let peers: Vec<usize> = clients.iter().map(|c| c & 0x3f).collect();
+    if !narrow_last_entry_to(queue, &peers, line.as_bytes()) {
+        super::spawner::log("chat: could not limit an answer to the players it is for; it was sent to everybody");
     }
     true
 }
@@ -339,6 +359,10 @@ fn send_to_asker_only(out: usize, queue: usize, kind: usize, text: usize, client
 /// The newest entry of the server's chat queue is delivered to every connected player that has not marked it as
 /// done. Marks it done for everybody but `target` and takes back the byte count the game added for them.
 pub fn narrow_last_entry(queue: usize, target: usize, line: &[u8]) -> bool {
+    narrow_last_entry_to(queue, &[target], line)
+}
+
+pub fn narrow_last_entry_to(queue: usize, targets: &[usize], line: &[u8]) -> bool {
     use super::spawn_probe::{read_bytes, u32_at, u64_at};
     let Some(tail) = read_bytes(queue + 0x1c8, 8).map(|b| u64_at(&b, 0) as usize) else { return false };
     if tail == 0 {
@@ -359,7 +383,7 @@ pub fn narrow_last_entry(queue: usize, target: usize, line: &[u8]) -> bool {
     let Some(peers) = read_bytes(queue + 0x0c, 32 * 12) else { return false };
     let mut mask = u32_at(&entry, 0x20);
     for peer in 0..32usize {
-        if peer == target || mask >> peer & 1 != 0 {
+        if targets.contains(&peer) || mask >> peer & 1 != 0 {
             continue;
         }
         if peers[peer * 12] != 0 {
@@ -372,6 +396,42 @@ pub fn narrow_last_entry(queue: usize, target: usize, line: &[u8]) -> bool {
         mask |= 1 << peer;
     }
     super::spawner::write_bytes(tail + 0x20, &mask.to_le_bytes())
+}
+
+/// Several lines for the player who asked, each queued separately and shown to nobody else.
+fn send_lines_to_asker(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize, lines: &[String]) -> usize {
+    let mut sent = 0;
+    for line in lines {
+        if !replace_text(text, line) || !send_to_asker_only(out, queue, kind, text, client, frame) {
+            break;
+        }
+        sent += 1;
+    }
+    sent
+}
+
+fn who_is(entry: &super::table::Entry) -> String {
+    format!("{}|{}", entry.name.as_deref().unwrap_or(""), entry.id.as_deref().unwrap_or(""))
+}
+
+/// After a shared change: a short line with the new fingerprints goes to the other panels that are connected
+/// (and to nobody else). Returns true when it was queued; the caller must put its own text back.
+fn tell_other_panels(out: usize, queue: usize, kind: usize, text: usize, author: usize, frame: usize) -> bool {
+    if !super::shared::take_change() {
+        return false;
+    }
+    let present: Vec<(u32, String)> = super::table::entries().iter().map(|e| (e.client, who_is(e))).collect();
+    let targets: Vec<usize> = super::shared::targets(std::time::Instant::now(), &present, author as u32).into_iter().map(|c| c as usize).collect();
+    if targets.is_empty() {
+        return false;
+    }
+    let Ok(dir) = std::env::current_dir() else { return false };
+    if !replace_text(text, &super::shared::rev_line(&dir, 0)) {
+        return false;
+    }
+    let sent = send_to_peers(out, queue, kind, text, &targets, frame);
+    super::spawner::log(&format!("shared state: {} panel(s) told that something changed ({})", targets.len(), if sent { "sent" } else { "not sent" }));
+    sent
 }
 
 static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
@@ -408,7 +468,16 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
         ));
     }
     if super::invites::is_command(&message) {
-        return team_command(text, &message, client as u32);
+        let verdict = team_command(text, &message, client as u32);
+        if verdict == 0 && super::shared::peek_change() {
+            let line = message_text(text);
+            if tell_other_panels(out, context, kind, text, client, frame) {
+                if let Some(line) = line {
+                    replace_text(text, &line);
+                }
+            }
+        }
+        return verdict;
     }
     if !super::chat::has_prefix(&message) {
         super::chat::note_other(&message, client as u32);
@@ -429,10 +498,23 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
         }
     }
     let Ok(dir) = std::env::current_dir() else { return 0 };
+    if super::chat::authenticated(&message, &key) && !super::shared::seen_recently(client as u32, std::time::Instant::now()) {
+        if let Some(entry) = super::table::entries().iter().find(|e| e.client == client as u32) {
+            super::shared::remember_panel(client as u32, &who_is(entry), std::time::Instant::now());
+        }
+    }
     match super::perf::time(super::perf::CHAT, || super::chat::handle(&message, &key, client as u32, &dir)) {
         super::chat::Verdict::Pass => 0,
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
+            tell_other_panels(out, context, kind, text, client, frame);
+            1
+        }
+        super::chat::Verdict::Lines(lines) => {
+            let sent = send_lines_to_asker(out, context, kind, text, client, frame, &lines);
+            if sent != lines.len() {
+                super::spawner::log(&format!("chat: client {} asked for shared state but only {sent} of {} line(s) could be sent", client as u32, lines.len()));
+            }
             1
         }
         super::chat::Verdict::Teams(seq) => {

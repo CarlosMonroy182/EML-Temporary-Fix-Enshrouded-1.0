@@ -125,6 +125,14 @@ pub fn players(key: &str, seq: u32) -> String {
     format!("{PREFIX} {key} players {seq}")
 }
 
+pub fn rev(key: &str, seq: u32) -> String {
+    format!("{PREFIX} {key} rev {seq}")
+}
+
+pub fn pull(key: &str, seq: u32, topic: &str) -> String {
+    format!("{PREFIX} {key} pull {seq} {topic}")
+}
+
 pub fn teams(key: &str, seq: u32) -> String {
     format!("{PREFIX} {key} teams {seq}")
 }

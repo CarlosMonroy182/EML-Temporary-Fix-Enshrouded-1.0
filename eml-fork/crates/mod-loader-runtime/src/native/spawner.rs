@@ -3344,10 +3344,13 @@ fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
 }
 
 static SLOW_TICKS: AtomicU64 = AtomicU64::new(0);
+const TICK_PARTS: usize = 13;
 
 /// A power tick that took long: says which part of it did, so a hitch can be traced to its cause.
-fn report_slow_tick(total: Duration, marks: &[u64; 8]) {
-    const NAMES: [&str; 8] = ["requests", "world", "resource lock", "shield", "client powers", "heal", "stamina", "fly"];
+fn report_slow_tick(total: Duration, marks: &[u64; TICK_PARTS]) {
+    const NAMES: [&str; TICK_PARTS] = [
+        "orders", "chat file", "powers file", "client powers file", "command file", "scan file", "world", "resource lock", "shield", "client powers", "heal", "stamina", "fly",
+    ];
     let n = SLOW_TICKS.fetch_add(1, Ordering::Relaxed);
     if n >= 30 && n % 20 != 0 {
         return;
@@ -3358,7 +3361,7 @@ fn report_slow_tick(total: Duration, marks: &[u64; 8]) {
 
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
     let started = Instant::now();
-    let mut marks = [0u64; 8];
+    let mut marks = [0u64; TICK_PARTS];
     let mut last = started;
     macro_rules! mark {
         ($i:expr) => {{
@@ -3368,18 +3371,23 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }};
     }
     drain_requests(st, dir);
+    mark!(0);
     if poll {
         super::outbox::poll(dir);
+        mark!(1);
         super::perf::time(super::perf::POLL, || {
             refresh_powers(st, dir);
+            mark!(2);
             if SERVER_MGR.load(Ordering::SeqCst) != 0 {
                 refresh_client_powers(st, dir);
             }
+            mark!(3);
             run_command(st, dir);
+            mark!(4);
             scan_request(st, dir);
+            mark!(5);
         });
     }
-    mark!(0);
     let Some((manager, id)) = world_pair() else { return };
     let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
     if hosting && tick % 8 == 0 {
@@ -3391,10 +3399,10 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
     if hosting && tick % 16 == 0 {
         super::perf::time(super::perf::SPAWNERS, || spawners_tick(&mut st.spawners, dir));
     }
-    mark!(1);
+    mark!(6);
     let client = client_pair();
     refresh_resource_lock(st, manager, id, client, hosting);
-    mark!(2);
+    mark!(7);
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
@@ -3423,11 +3431,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }
     }
     super::perf::time(super::perf::SHIELD, || shield_tick(st, &want));
-    mark!(3);
+    mark!(8);
     if hosting {
         apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick, poll);
     }
-    mark!(4);
+    mark!(9);
     if st.heal_once {
         refill_health(manager, id);
         if let Some((m, c)) = client {
@@ -3441,7 +3449,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             refill_mana(m, c, &mut st.mana_peak_c);
         }
     }
-    mark!(5);
+    mark!(10);
     if st.powers.stamina {
         if tick % 2 == 0 {
             cleanse_debuffs(manager, id, &mut st.buffs_seen);
@@ -3455,7 +3463,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
-    mark!(6);
+    mark!(11);
     if st.powers.fly {
         if !st.gravity_off {
             st.gravity_off = true;
@@ -3475,7 +3483,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         st.last_written = None;
         log("fly: gravity restored");
     }
-    mark!(7);
+    mark!(12);
     let total = started.elapsed();
     if total >= Duration::from_millis(250) {
         report_slow_tick(total, &marks);

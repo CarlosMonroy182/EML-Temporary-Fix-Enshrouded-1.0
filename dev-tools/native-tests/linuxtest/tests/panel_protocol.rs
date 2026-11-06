@@ -16,7 +16,7 @@ fn play(lines: &[String], dir: &std::path::Path) {
         let verdict = chat::handle_with(&mut session, Instant::now(), line, KEY, 64, dir);
         match verdict {
             Verdict::Swallowed(note) => assert!(note.contains(" ok") || (line.contains(" endx ") && note.contains("nothing buffered")), "{line}: {note}"),
-            Verdict::Pass | Verdict::Roster(_) | Verdict::Teams(_) => panic!("not recognised: {line}"),
+            Verdict::Pass | Verdict::Roster(_) | Verdict::Teams(_) | Verdict::Lines(_) => panic!("not recognised: {line}"),
         }
     }
 }

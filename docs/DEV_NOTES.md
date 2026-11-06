@@ -117,3 +117,34 @@ polls every 50 ms instead of every 4 ms (`SHIELD_IDLE`).
   `m182_online.json` / `m182_teams_live.json` directly. The old memory scan (`scan_request`) is skipped then; it stays as the fallback.
 - `roster_line` lists the player table only (connected players); tracked entities are used only while the table is empty.
 - `power_tick` logs `slow power tick: N ms (part ...)` when a tick takes >= 250 ms.
+
+## Shared server state (several admins, one truth)
+
+The server is the source of truth for zones, places, spawners, teams and raid templates. A panel on a clean install learns all of it
+by asking, and stays current without polling.
+
+- Topics (`native/shared.rs::Topic`): `zones places spawners teams templates` (shared) and `status` (on demand only). Each has a
+  content-hash revision (FNV folded to 8 hex). The teams revision covers the panel definition and the in-game join/leave file
+  (`m182_members.json`), so a leader inviting or kicking in the game changes it.
+- Commands after the key check: `rev <seq>` returns `[M182R#seq] z= p= s= t= r=`; `pull <seq> <topic>` returns the topic as
+  `[M182S#seq topic i/n hash] chunk` lines (envelope `{"topic","hash","data"}` -> deflate -> base64url, 600 chars per line).
+  Both reach only the asker (`send_lines_to_asker`, queue-entry mask narrowing). The client hook swallows them and writes
+  `m182_remote_rev.json` / `m182_remote_<topic>.json`.
+- Writes are per-item ops through `m182_state_op.json`: `{"t":topic,"add":[],"up":[],"rm":[names]}`. `add` never replaces an existing
+  different item (it is reported as taken), `up` upserts, `rm` is by name. Limits: 500 zones/places, 100 teams, 60 templates.
+  Full-file writes of the shared files are still accepted (older panels) and count as a change.
+- Teams are `panel definition + in-game overlay`; moved people get a `touched` counter assigned by the server so the later change wins;
+  a person belongs to one team.
+- Push: `note_change()` sets a flag when a state op, legacy write, spawner op or invite change happens; after the command is handled
+  `tell_other_panels` sends the rev line to registered panels only (clients that proved the key in the last 12 min, identity still
+  matching the table slot, never the author). No timer, no scan.
+- Panel (`spawner-panel/src/shared.rs`): keeps the last server snapshot per topic, diffs local edits against it and sends only the
+  differences. Nothing is sent before the first snapshot (this removed the path where a stale or wrong-profile team file was pushed:
+  the "Admin MD" team of another profile). A 240 s safety rev check covers lost lines; `status` is pulled only while the spawner
+  list is visible. In remote view the lists come from the server and local profile files are not written; leaving the server
+  reloads the local files. "Subir mi perfil al servidor" uploads the active profile once (create-only).
+- Tests: `dev-tools/native-tests/linuxtest/tests/shared_state.rs` (clean install learns everything, wrong key, split ops),
+  `reply.rs` (multi-panel narrowing), `panel_protocol.rs`; panel: `cargo test --offline --lib -- --test-threads=1`.
+- Not verifiable without the real game: delivery of pushes to several panels through the narrowed mask and long multi-line replies
+  against the chat queue limits. The panel retries after 25 s (3 tries). Ask for `m182_spawner.log` (server) and the panel log.
+- `power_tick` has 13 stage marks to find the cause of the multi-second "requests" stalls in the next logs.

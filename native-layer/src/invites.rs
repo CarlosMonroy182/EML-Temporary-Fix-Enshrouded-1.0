@@ -126,7 +126,9 @@ fn write_members(dir: &Path, file: &MembersFile) -> Result<(), String> {
     });
     let tmp = dir.join("m182_members.json.tmp");
     std::fs::write(&tmp, body.to_string()).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dir.join(groups::MEMBERS_FILE)).map_err(|e| e.to_string())
+    std::fs::rename(&tmp, dir.join(groups::MEMBERS_FILE)).map_err(|e| e.to_string())?;
+    super::shared::note_change();
+    Ok(())
 }
 
 /// The panel counter of a person right now, read from the teams file.

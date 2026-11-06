@@ -283,7 +283,7 @@ impl App {
 
     /// Raids that finished (or are too old) leave the list.
     pub fn clean_raids(&mut self) {
-        let done = std::fs::read_to_string(self.dir.join(spawners::STATUS_FILE)).map(|t| spawners::parse_done(&t)).unwrap_or_default();
+        let done = if self.remote_view { self.spawner_done.clone() } else { std::fs::read_to_string(self.dir.join(spawners::STATUS_FILE)).map(|t| spawners::parse_done(&t)).unwrap_or_default() };
         let now = spawners::now_ms();
         let before = self.spawners.len();
         self.spawners.retain(|s| !(s.once && done.contains(&s.id)) && !spawners::expired(s, now));

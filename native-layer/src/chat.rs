@@ -14,7 +14,7 @@ pub const PREFIXES: [&str; 2] = ["/m182", "!m182"];
 pub const MIN_KEY_LEN: usize = 6;
 
 /// Files a chat command may write; each one is polled by the native layer.
-pub const FILES: [&str; 8] = [
+pub const FILES: [&str; 11] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -23,6 +23,9 @@ pub const FILES: [&str; 8] = [
     "m182_spawners.json",
     "m182_data.json",
     "m182_spawner_op.json",
+    "m182_places.json",
+    "m182_raid_templates.json",
+    "m182_state_op.json",
 ];
 
 pub const SPAWNER_OP_FILE: &str = "m182_spawner_op.json";
@@ -49,6 +52,8 @@ pub enum Verdict {
     Roster(u32),
     /// Ours: the message is replaced by the server's real teams (sequence number echoed).
     Teams(u32),
+    /// Ours: the message is replaced by these lines, each one delivered only to the player who asked.
+    Lines(Vec<String>),
 }
 
 #[derive(Default)]
@@ -182,6 +187,16 @@ pub fn has_prefix(text: &str) -> bool {
     })
 }
 
+/// True when the command names the server key correctly (also with Caps Lock flipping the letters).
+pub fn authenticated(text: &str, key: &str) -> bool {
+    if !valid_key(key) || !has_prefix(text) {
+        return false;
+    }
+    let (_, rest) = next_token(text.trim_start());
+    let (given, _) = next_token(rest);
+    same(given, key) || (key.chars().any(|c| c.is_ascii_alphabetic()) && same(given, &swap_case(key)))
+}
+
 pub fn valid_key(key: &str) -> bool {
     key.len() >= MIN_KEY_LEN && !key.chars().any(char::is_whitespace)
 }
@@ -275,6 +290,21 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
     if command == "teams" {
         let (seq, _) = next_token(rest);
         return Verdict::Teams(seq.parse().unwrap_or(0));
+    }
+    if command == "rev" {
+        let (seq, _) = next_token(rest);
+        return Verdict::Lines(vec![super::shared::rev_line(dir, seq.parse().unwrap_or(0))]);
+    }
+    if command == "pull" {
+        let (seq, more) = next_token(rest);
+        let (topic, _) = next_token(more);
+        let Some(topic) = super::shared::Topic::from_name(topic) else {
+            return Verdict::Swallowed(format!("chat: client {client} rejected: unknown topic \"{topic}\""));
+        };
+        return match super::shared::snapshot_lines(dir, seq.parse().unwrap_or(0), topic) {
+            Ok(lines) => Verdict::Lines(lines),
+            Err(why) => Verdict::Swallowed(format!("chat: client {client} rejected: {why}")),
+        };
     }
     let outcome = match command.as_str() {
         "ping" => Ok("ping".to_string()),
@@ -399,7 +429,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
 
 const MAX_UNPACKED: usize = 512 * 1024;
 
-fn unb64(text: &str) -> Result<Vec<u8>, String> {
+pub(super) fn unb64(text: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4 + 3);
     let (mut acc, mut bits) = (0u32, 0u32);
     for c in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
@@ -459,6 +489,9 @@ fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String,
     if name == DATA_FILE {
         return write_data(dir, &value);
     }
+    if name == super::shared::OP_FILE {
+        return super::shared::apply_op(dir, &value);
+    }
     if name == SPAWNER_OP_FILE {
         return apply_spawner_op(dir, &value);
     }
@@ -470,6 +503,9 @@ fn write_json(dir: &Path, file: &str, body: &str, client: u32) -> Result<String,
     }
     let target = destination(name, client);
     store(dir, &target, body)?;
+    if super::shared::Topic::SHARED.iter().any(|t| t.file() == target) {
+        super::shared::note_change();
+    }
     Ok(format!("wrote {target} ({} bytes)", body.len()))
 }
 
@@ -575,6 +611,11 @@ fn expand_spawner(row: &serde_json::Value) -> Result<serde_json::Value, String> 
             out.insert("drops".into(), Value::Array(drops));
         }
     }
+    for (short, long) in [("n", "name"), ("pl", "place")] {
+        if let Some(s) = spawner_field(row, short, long).and_then(Value::as_str) {
+            out.insert(long.into(), json!(s.chars().filter(|c| !c.is_control()).take(64).collect::<String>()));
+        }
+    }
     if let Some(v) = spawner_field(row, "e", "every").filter(|v| v.is_number()) {
         out.insert("every".into(), v.clone());
     }
@@ -655,6 +696,7 @@ fn apply_spawner_op(dir: &Path, op: &serde_json::Value) -> Result<String, String
     }
     let text = json!({ "spawners": rows }).to_string();
     store(dir, SPAWNERS_FILE, &text)?;
+    super::shared::note_change();
     Ok(format!("{SPAWNERS_FILE}: {} spawner(s) now ({added} added or replaced, {removed} removed)", rows.len()))
 }
 

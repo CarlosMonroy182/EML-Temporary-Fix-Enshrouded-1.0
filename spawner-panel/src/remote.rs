@@ -20,7 +20,7 @@ pub const ONLINE_FILE: &str = "m182_online.json";
 pub const CONFIG_KEY: &str = "remote_key";
 
 /// Files the server accepts through chat.
-pub const FORWARDED: [&str; 7] = [
+pub const FORWARDED: [&str; 8] = [
     "m182_spawn.request",
     "m182_command.request",
     "m182_powers.json",
@@ -28,10 +28,11 @@ pub const FORWARDED: [&str; 7] = [
     "m182_teams.json",
     "m182_spawners.json",
     "m182_spawner_op.json",
+    "m182_state_op.json",
 ];
 
 /// Requests that only make sense on the server: they are not written next to the game.
-const REMOTE_ONLY: [&str; 3] = ["m182_spawn.request", "m182_command.request", "m182_spawner_op.json"];
+const REMOTE_ONLY: [&str; 4] = ["m182_spawn.request", "m182_command.request", "m182_spawner_op.json", "m182_state_op.json"];
 
 /// Types lines into the game; implemented by the Windows host.
 pub trait Typist: Send {
@@ -61,6 +62,8 @@ struct Job {
     lines: Vec<String>,
     tries: u8,
     sum: Option<(String, u64)>,
+    /// Only asks the server something: goes out even while the profile is not confirmed.
+    read_only: bool,
 }
 
 struct State {
@@ -352,33 +355,45 @@ pub fn submit(name: &str, text: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    push(Job { file: name.to_string(), lines: proto::compose_best(&key, name, &body, limit), tries: 0, sum }, replace);
+    push(Job { file: name.to_string(), lines: proto::compose_best(&key, name, &body, limit), tries: 0, sum, read_only: false }, replace);
     Ok(())
 }
 
 pub fn submit_pvp(on: bool) {
     let key = state().settings.key.clone();
-    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)], tries: 0, sum: None }, true);
+    push(Job { file: "pvp".to_string(), lines: vec![proto::pvp(&key, on)], tries: 0, sum: None, read_only: false }, true);
 }
 
 pub fn submit_friendly_fire(on: bool) {
     let key = state().settings.key.clone();
-    push(Job { file: "friendlyfire".to_string(), lines: vec![proto::friendly_fire(&key, on)], tries: 0, sum: None }, true);
+    push(Job { file: "friendlyfire".to_string(), lines: vec![proto::friendly_fire(&key, on)], tries: 0, sum: None, read_only: false }, true);
 }
 
 pub fn submit_players(seq: u32) {
     let key = state().settings.key.clone();
-    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0, sum: None }, true);
+    push(Job { file: "players".to_string(), lines: vec![proto::players(&key, seq)], tries: 0, sum: None, read_only: false }, true);
 }
 
 pub fn submit_teams(seq: u32) {
     let key = state().settings.key.clone();
-    push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0, sum: None }, true);
+    push(Job { file: "teams".to_string(), lines: vec![proto::teams(&key, seq)], tries: 0, sum: None, read_only: false }, true);
+}
+
+/// Asks for the short list of fingerprints of what the server holds.
+pub fn submit_rev(seq: u32) {
+    let key = state().settings.key.clone();
+    push(Job { file: "rev".to_string(), lines: vec![proto::rev(&key, seq)], tries: 0, sum: None, read_only: true }, true);
+}
+
+/// Asks for one shared topic (zones, places, spawners, teams, templates or status).
+pub fn submit_pull(seq: u32, topic: &str) {
+    let key = state().settings.key.clone();
+    push(Job { file: format!("pull {topic}"), lines: vec![proto::pull(&key, seq, topic)], tries: 0, sum: None, read_only: true }, true);
 }
 
 pub fn submit_ping() {
     let key = state().settings.key.clone();
-    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0, sum: None }, true);
+    push(Job { file: "ping".to_string(), lines: vec![proto::ping(&key)], tries: 0, sum: None, read_only: false }, true);
 }
 
 pub fn status() -> Status {
@@ -400,15 +415,14 @@ const RETRY_PAUSE: Duration = Duration::from_millis(1500);
 fn worker() {
     loop {
         std::thread::sleep(Duration::from_millis(150));
-        if held() {
-            continue;
-        }
+        let held = held();
         let (job, typist) = {
             let mut s = state();
             if s.queue.is_empty() || s.typist.is_none() {
                 continue;
             }
-            let job = s.queue.pop_front();
+            let Some(at) = (if held { s.queue.iter().position(|j| j.read_only) } else { Some(0) }) else { continue };
+            let job = s.queue.remove(at);
             s.status.queued = s.queue.len();
             s.status.sending = true;
             (job, s.typist.take())
