@@ -1,0 +1,11 @@
+{
+    "id": "m182_divine",
+    "name": "M182 Divine Aura",
+    "description": "Lets the server remove the teleport glow of the divine aura when the administrator moves.",
+    "version": "1.0.0",
+    "capabilities": ["patch"],
+    "dependencies": [],
+    "authors": ["M182"],
+    "license": null,
+    "icon": null
+}

@@ -354,7 +354,7 @@ EN = {
 "Pidiendo todo al servidor…": "Asking the server for everything…",
 "Sincronizando con el servidor…": "Syncing with the server…",
 "Datos compartidos al día": "Shared data up to date",
-"Aura divina: efecto de teletransporte a tu alrededor, lo ve todo el mundo": "Divine aura: a teleport effect around you, visible to everybody",
+"Aura divina": "God aura",
 "Datos compartidos al día (hace {} min)": "Shared data up to date ({} min ago)",
 "El servidor no respondió con «{topic}». Pulsa «Sincronizar» para intentarlo otra vez.": "The server did not answer for '{topic}'. Press 'Sync' to try again.",
 "Sin respuesta del servidor todavía. Pulsa «Sincronizar».": "No answer from the server yet. Press 'Sync'.",

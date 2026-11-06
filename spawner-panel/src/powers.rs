@@ -70,7 +70,7 @@ impl App {
         let mut changed = false;
         changed |= ui.checkbox(&mut self.powers.god, "Modo dios: la vida se mantiene llena").changed();
         changed |= ui.checkbox(&mut self.powers.stamina, "Stamina y maná infinitos").changed();
-        changed |= ui.checkbox(&mut self.powers.aura, "Aura divina: efecto de teletransporte a tu alrededor, lo ve todo el mundo").changed();
+        changed |= ui.checkbox(&mut self.powers.aura, "Aura divina").changed();
         if changed {
             self.save_powers();
         }

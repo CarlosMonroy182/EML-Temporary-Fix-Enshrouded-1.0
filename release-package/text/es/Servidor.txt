@@ -30,6 +30,7 @@ Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta
 
 VFX
 - La carpeta mods\m182_vfx forma parte de este paquete. En un servidor dedicado hace que los efectos de carga de bastón los vea todo el mundo; no hace falta nada mas. Sube la carpeta junto con el resto. Para apagarlo, borra mods\m182_vfx. Su registro es m182_vfx.log.
+- Aura divina (opción del panel «Admin del jugador»): necesita la carpeta mods\m182_divine, que viene en este paquete. Sin ella el brillo no se puede quitar y el log m182_spawner.log lo marca como ERROR.
 - Modo ligero: en un servidor dedicado los efectos son mas ligeros por defecto (un efecto por carga, como maximo uno cada 0.4 s, vigilancia mas lenta mientras nadie carga). Para usar los efectos completos, crea m182_vfx.json en la carpeta del servidor con {"server_light": false}.
 
 Hecho por M182.

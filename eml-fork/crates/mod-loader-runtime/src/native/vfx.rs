@@ -426,6 +426,17 @@ pub fn create_effect(manager: usize, template: [u8; 16], at: (i64, i64, i64), sc
 
 /// Like `create_effect`, optionally overriding how long the effect lives.
 pub fn create_effect_for(manager: usize, template: [u8; 16], at: (i64, i64, i64), scale: f32, life_ms: Option<u64>) -> u32 {
+    create_with_life(manager, template, at, scale, life_ms.map(life_time_bytes))
+}
+
+/// Creates a prop that the game itself destroys after `life_ms`, or sooner if its lifetime is brought down later.
+pub fn create_expiring(manager: usize, template: [u8; 16], at: (i64, i64, i64), life_ms: u64) -> u32 {
+    let mut life = life_time_bytes(life_ms);
+    life[16] = 1;
+    create_with_life(manager, template, at, 1.0, Some(life))
+}
+
+fn create_with_life(manager: usize, template: [u8; 16], at: (i64, i64, i64), scale: f32, life: Option<[u8; LIFE_TIME_SIZE]>) -> u32 {
     let mut transform = [0u8; TRANSFORM_SIZE];
     transform[0..8].copy_from_slice(&(at.0 as u64).to_le_bytes());
     transform[8..16].copy_from_slice(&(at.1 as u64).to_le_bytes());
@@ -434,13 +445,13 @@ pub fn create_effect_for(manager: usize, template: [u8; 16], at: (i64, i64, i64)
     for off in [40, 44, 48] {
         transform[off..off + 4].copy_from_slice(&scale.to_le_bytes());
     }
-    let life = life_time_bytes(life_ms.unwrap_or(0));
+    let life = life.unwrap_or([0u8; LIFE_TIME_SIZE]);
     let mut entries = [0u8; 0x100];
     entries[0..4].copy_from_slice(&HASH_CURRENT_TRANSFORM.to_le_bytes());
     entries[8..16].copy_from_slice(&(transform.as_ptr() as u64).to_le_bytes());
     entries[16..24].copy_from_slice(&(TRANSFORM_SIZE as u64).to_le_bytes());
     let mut count = 1u64;
-    if life_ms.is_some() {
+    if life.iter().any(|b| *b != 0) {
         entries[24..28].copy_from_slice(&HASH_LIFE_TIME.to_le_bytes());
         entries[32..40].copy_from_slice(&(life.as_ptr() as u64).to_le_bytes());
         entries[40..48].copy_from_slice(&(LIFE_TIME_SIZE as u64).to_le_bytes());

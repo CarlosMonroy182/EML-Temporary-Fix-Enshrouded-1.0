@@ -98,6 +98,9 @@ jobs:
             cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
             cp spawner-mods/m182_vfx/mod.json $out/mods/m182_vfx/
             cp spawner-mods/m182_vfx/src/mod.lua $out/mods/m182_vfx/src/
+            mkdir -p $out/mods/m182_divine/src
+            cp spawner-mods/m182_divine/mod.json $out/mods/m182_divine/
+            cp spawner-mods/m182_divine/src/mod.lua $out/mods/m182_divine/src/
             mkdir -p $out/mods/m182_inferno_beam/src
             cp spawner-mods/m182_inferno_beam/mod.json $out/mods/m182_inferno_beam/
             cp spawner-mods/m182_inferno_beam/src/mod.lua $out/mods/m182_inferno_beam/src/

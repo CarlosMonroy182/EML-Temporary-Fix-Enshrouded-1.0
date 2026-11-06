@@ -263,6 +263,45 @@ pub(super) fn retire_entity(manager: usize, id: u32) -> bool {
     false
 }
 
+static LIFE_INDEX: AtomicI32 = AtomicI32::new(-1);
+const LIFE_STRIDE: usize = 24;
+
+fn life_slot(slots: &[Slot], known: &[u64]) -> Option<(usize, usize, Vec<u8>)> {
+    let cached = LIFE_INDEX.load(Ordering::Relaxed);
+    for slot in slots {
+        if slot.stride != LIFE_STRIDE || (cached >= 0 && slot.index != cached as usize) {
+            continue;
+        }
+        let Some(b) = read_bytes(slot.addr, LIFE_STRIDE) else { continue };
+        if b.len() < LIFE_STRIDE {
+            continue;
+        }
+        if cached >= 0 || known.contains(&u64_at(&b, 0)) {
+            LIFE_INDEX.store(slot.index as i32, Ordering::Relaxed);
+            return Some((slot.index, slot.addr, b));
+        }
+    }
+    None
+}
+
+/// True when the entity carries the lifetime component, with one of the given lifetimes (in nanoseconds).
+pub(super) fn has_life_time(manager: usize, id: u32, known: &[u64]) -> bool {
+    entity_layout(manager, id).is_some_and(|(_, _, slots)| life_slot(&slots, known).is_some())
+}
+
+/// Makes the game destroy an entity through its own lifetime: the entity leaves the world and every player sees it go.
+/// Falls back to bringing its health to zero when the entity has no lifetime.
+pub(super) fn expire_entity(manager: usize, id: u32, known: &[u64]) -> bool {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    if let Some((_, addr, mut b)) = life_slot(&slots, known) {
+        b[0..8].copy_from_slice(&1u64.to_le_bytes());
+        b[8..16].copy_from_slice(&1u64.to_le_bytes());
+        b[16] = 1;
+        return write_bytes(addr, &b);
+    }
+    retire_entity(manager, id)
+}
+
 /// Position in meters of an entity that carries a transform component.
 pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;
@@ -1956,8 +1995,8 @@ fn aura_guid(wanted: &'static str) -> Option<[u8; 16]> {
     None
 }
 
-pub(super) fn create_prop(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u32 {
-    spawn_effect(manager, template, x, y, z)
+pub(super) fn create_expiring_prop(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64, life_ms: u64) -> u32 {
+    super::vfx::create_expiring(manager, template, (x, y, z), life_ms)
 }
 
 fn spawn_effect(manager: usize, template: [u8; 16], x: i64, y: i64, z: i64) -> u32 {

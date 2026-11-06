@@ -1,6 +1,7 @@
 //! Divine aura: the glow of the towers' teleport platforms (`Prop_Ancient_Teleporter_Effect_On`)
 //! appears under an administrator who switched the aura on once he has stood still for ten seconds,
-//! and is taken out of the world as soon as he moves or switches the aura off. Nothing here runs for anybody else, nor while no aura is on.
+//! and is taken out of the world as soon as he moves or switches the aura off. The glow is destroyed through its lifetime
+//! (see `mods/m182_divine`), so every player sees it go. Nothing here runs for anybody else, nor while no aura is on.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,6 +19,10 @@ const ORDER_RETRY: Duration = Duration::from_secs(3);
 const STRAY_METERS: f64 = 3.0;
 const SWEEP_EVERY: Duration = Duration::from_secs(8);
 const METERS: f64 = 4_294_967_296.0;
+const LIFE_MS: u64 = 600_000;
+const RENEW_AFTER: Duration = Duration::from_secs(540);
+const CHECK_GONE_AFTER: Duration = Duration::from_secs(3);
+const LIFE_NS: [u64; 2] = [LIFE_MS * 1_000_000, 1_000_000_000_000_000_000];
 
 /// Owner key of the game this process hosts; chat clients use their client number.
 pub const HOST: u32 = u32::MAX;
@@ -31,6 +36,7 @@ struct Owner {
     old: Vec<u32>,
     anchor: Option<[f64; 3]>,
     still_since: Option<Instant>,
+    born: Option<Instant>,
 }
 
 static OWNERS: Mutex<Option<HashMap<u32, Owner>>> = Mutex::new(None);
@@ -38,6 +44,8 @@ static ORDERS: Mutex<Vec<(u32, [i64; 3])>> = Mutex::new(Vec::new());
 static SEEN: Mutex<Vec<(usize, u32)>> = Mutex::new(Vec::new());
 static PENDING: AtomicU32 = AtomicU32::new(0);
 static WATCH: AtomicBool = AtomicBool::new(false);
+static LEAVING: Mutex<Vec<(usize, u32, Instant)>> = Mutex::new(Vec::new());
+static MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 static SWEPT: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn light() -> Option<[u8; 16]> {
@@ -82,6 +90,35 @@ fn forget(spot: [f64; 3]) {
     }
 }
 
+/// Takes a glow out of the world through its lifetime, and keeps an eye on it until it is gone.
+fn drop_glow(manager: usize, id: u32) -> bool {
+    let done = spawner::expire_entity(manager, id, &LIFE_NS);
+    if let Ok(mut leaving) = LEAVING.lock() {
+        if leaving.len() >= 64 {
+            leaving.remove(0);
+        }
+        leaving.push((manager, id, Instant::now()));
+    }
+    done
+}
+
+fn check_leaving() {
+    let due: Vec<(usize, u32)> = match LEAVING.lock() {
+        Ok(mut l) if !l.is_empty() => {
+            let (due, rest): (Vec<_>, Vec<_>) = l.drain(..).partition(|(_, _, t)| t.elapsed() >= CHECK_GONE_AFTER);
+            *l = rest;
+            due.into_iter().map(|(m, id, _)| (m, id)).collect()
+        }
+        _ => return,
+    };
+    for (manager, id) in due {
+        if spawner::find_record(manager, id).is_some() {
+            spawner::log("divine aura: ERROR the glow did not go away (is the mods\\m182_divine folder installed on the server?)");
+            spawner::expire_entity(manager, id, &LIFE_NS);
+        }
+    }
+}
+
 /// Starts watching for glows left in the world by an earlier run of the server.
 pub fn start() {
     if std::path::Path::new(RECORD_FILE).is_file() {
@@ -118,7 +155,7 @@ pub fn follow(manager: usize, key: u32, position: [i64; 3]) {
     owner.checked = Some(Instant::now());
     WATCH.store(true, Ordering::Relaxed);
     for id in std::mem::take(&mut owner.old) {
-        spawner::retire_entity(manager, id);
+        drop_glow(manager, id);
     }
     let here = meters(position);
     let moved = owner.anchor.is_none_or(|a| flat(a, here) > STILL_METERS || (a[1] - here[1]).abs() > STILL_METERS);
@@ -129,17 +166,24 @@ pub fn follow(manager: usize, key: u32, position: [i64; 3]) {
             orders.retain(|(k, _)| *k != key);
         }
         if let Some(id) = owner.id.take() {
-            spawner::retire_entity(manager, id);
+            drop_glow(manager, id);
             forget(owner.spot);
         }
         return;
     }
     if let Some(id) = owner.id {
+        if owner.born.is_some_and(|t| t.elapsed() >= RENEW_AFTER) {
+            drop_glow(manager, id);
+            forget(owner.spot);
+            owner.id = None;
+            owner.asked = None;
+            return;
+        }
         if spawner::find_record(manager, id).is_none() {
             owner.id = None;
             forget(owner.spot);
         } else if flat(owner.spot, here) > 2.0 {
-            spawner::retire_entity(manager, id);
+            drop_glow(manager, id);
             forget(owner.spot);
             owner.id = None;
             owner.anchor = Some(here);
@@ -169,7 +213,7 @@ pub fn release(manager: usize, key: u32) {
         orders.retain(|(k, _)| *k != key);
     }
     for id in owner.old.into_iter().chain(owner.id) {
-        spawner::retire_entity(manager, id);
+        drop_glow(manager, id);
     }
     if owner.id.is_some() {
         forget(owner.spot);
@@ -187,10 +231,13 @@ pub fn run_orders(manager: usize) {
     };
     let Some(template) = light() else { return };
     for (key, at) in orders.into_iter().take(8) {
-        let id = spawner::create_prop(manager, template, at[0], at[1], at[2]);
+        let id = spawner::create_expiring_prop(manager, template, at[0], at[1], at[2], LIFE_MS);
         if id == 0 {
             spawner::log("divine aura: ERROR the game did not create the glow");
             continue;
+        }
+        if !spawner::has_life_time(manager, id, &LIFE_NS) && !MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+            spawner::log("divine aura: ERROR the glow has no lifetime, so it cannot be removed: install the mods\\m182_divine folder (server and the PC that hosts)");
         }
         let Ok(mut guard) = OWNERS.lock() else { continue };
         match guard.as_mut().and_then(|m| m.get_mut(&key)) {
@@ -200,11 +247,12 @@ pub fn run_orders(manager: usize) {
                     forget(owner.spot);
                 }
                 owner.spot = meters(at);
+                owner.born = Some(Instant::now());
                 record(owner.spot);
             }
             None => {
                 record(meters(at));
-                if spawner::retire_entity(manager, id) {
+                if drop_glow(manager, id) {
                     forget(meters(at));
                 }
             }
@@ -214,6 +262,7 @@ pub fn run_orders(manager: usize) {
 
 /// Glows saved in the world by a run that ended with an aura on are taken out when they load.
 pub fn sweep(manager: usize) {
+    check_leaving();
     if !WATCH.load(Ordering::Relaxed) {
         return;
     }
@@ -237,7 +286,7 @@ pub fn sweep(manager: usize) {
         }
         let Some(at) = spawner::entity_position(manager, id) else { continue };
         if let Some(spot) = spots.iter().find(|s| flat(**s, at) <= STRAY_METERS) {
-            if spawner::retire_entity(manager, id) {
+            if drop_glow(manager, id) {
                 forget(*spot);
                 gone.push(id);
             }
