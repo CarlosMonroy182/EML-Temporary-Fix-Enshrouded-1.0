@@ -62,7 +62,7 @@ fn connected() -> bool {
 
 /// Reads the lines the panel left in `m182_chat_out.txt` (only while chat sending is switched on).
 pub fn poll(dir: &Path) {
-    if !super::probe::inject_on() {
+    if !super::probe::inject_on() || !super::config::LIVE.chat_key().is_empty() {
         return;
     }
     report_ready(dir);
