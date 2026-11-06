@@ -1080,9 +1080,9 @@ pub fn start() {
 
 fn run_loop(dir: std::path::PathBuf) {
     let mut modified = None;
-    let mut checked = Instant::now() - Duration::from_secs(10);
+    let mut checked = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
     let mut players: Vec<u32> = Vec::new();
-    let mut scanned = Instant::now() - Duration::from_secs(10);
+    let mut scanned = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
     let mut states: HashMap<u32, PlayerCharge> = HashMap::new();
     let mut auras: HashMap<u32, AuraState> = HashMap::new();
     let mut key_was_down = false;

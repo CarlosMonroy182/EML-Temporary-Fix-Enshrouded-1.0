@@ -29,7 +29,7 @@ pub fn tick() {
         return;
     }
     let Ok(mut guard) = STATE.lock() else { return };
-    let st = guard.get_or_insert_with(|| State { checked: Instant::now() - Duration::from_secs(1), scanned: None, players: Vec::new(), last: HashMap::new(), logged: 0 });
+    let st = guard.get_or_insert_with(|| State { checked: Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now), scanned: None, players: Vec::new(), last: HashMap::new(), logged: 0 });
     if st.checked.elapsed() < Duration::from_millis(CHECK_EVERY_MS) {
         return;
     }

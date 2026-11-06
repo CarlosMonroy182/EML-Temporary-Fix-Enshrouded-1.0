@@ -70,8 +70,8 @@ pub fn permission(entity: u32, stored: u32, shown: u32, caller: usize) {
     if map.len() > 600 {
         map.clear();
     }
-    let entry = map.entry((caller, entity, stored)).or_insert((0, now - Duration::from_secs(3600)));
-    let quiet = now.duration_since(entry.1) >= BURST_GAP;
+    let entry = map.entry((caller, entity, stored)).or_insert((0, now.checked_sub(Duration::from_secs(3600)).unwrap_or(now)));
+    let quiet = entry.0 == 0 || now.duration_since(entry.1) >= BURST_GAP;
     entry.1 = now;
     if quiet {
         let before = entry.0;
