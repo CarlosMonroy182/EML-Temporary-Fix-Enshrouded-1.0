@@ -44,6 +44,8 @@ pub struct NativeConfig {
     pub free_building: bool,
     /// On the game client, the hammer works away from any Flame Altar.
     pub client_build_anywhere: bool,
+    /// Diagnostic: logs which thread calls each hooked game function and how often (off by default).
+    pub thread_probe: bool,
 }
 
 impl Default for NativeConfig {
@@ -52,6 +54,7 @@ impl Default for NativeConfig {
             enabled: true,
             free_building: true,
             client_build_anywhere: true,
+            thread_probe: false,
             pvp: false,
             pvp_friend_checks: false,
             pvp_friendly_fire: false,
@@ -191,6 +194,7 @@ impl LiveState {
         self.chat_admin_only.store(cfg.chat_admin_only, Ordering::Relaxed);
         self.free_building.store(cfg.enabled && cfg.free_building, Ordering::Relaxed);
         self.client_build_anywhere.store(cfg.enabled && cfg.client_build_anywhere, Ordering::Relaxed);
+        super::probe::set(cfg.enabled && cfg.thread_probe);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);

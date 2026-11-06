@@ -126,6 +126,7 @@ pub(super) fn original_create(manager: usize, edx: u32, desc: usize, r9: usize) 
 }
 
 extern "win64" fn hook_create(manager: usize, edx: u32, desc: usize, r9: usize, caller: usize) -> u32 {
+    super::probe::hit(super::probe::CREATE);
     if LIVE.spawn_probe() {
         log_call(manager, edx as usize, desc, caller);
     }

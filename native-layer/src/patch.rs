@@ -55,6 +55,7 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
 }
 
 extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
+    super::probe::hit(super::probe::ENEMY_VALUES);
     let (a, b) = (rcx as u8, rdx as u8);
     let hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
     team_check_report(a, b, hostile, "values");
@@ -62,6 +63,7 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
 }
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
+    super::probe::hit(super::probe::ENEMY_PTRS);
     let (fa, fb) = (read_faction(a), read_faction(b));
     if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
         if let Some(line) = groups::protected_report(a as usize, b as usize, fa, fb) {
@@ -75,10 +77,12 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
 }
 
 extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
+    super::probe::hit(super::probe::FRIEND_VALUES);
     faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks()) as u8
 }
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
+    super::probe::hit(super::probe::FRIEND_OPTS);
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
     let (fa, fb) = (read_faction(a), read_faction(b));
     faction::friend_opts(fa, fb, flag, LIVE.pvp_friend_checks()) as u8
@@ -157,6 +161,7 @@ pub fn restricted_permissions() -> u64 {
 }
 
 extern "win64" fn filter_permissions(entity: u32, permissions: u32, caller: usize) -> u32 {
+    super::probe::hit(super::probe::PERMISSIONS);
     let bit = entity.wrapping_sub(1);
     let shown = if bit < 64 && PERMISSIONS_RESTRICTED.load(Ordering::Relaxed) >> bit & 1 != 0 {
         super::roster::visitor_permissions(permissions as u8) as u32
@@ -244,6 +249,16 @@ static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
 
 extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize) -> u8 {
     let key = LIVE.chat_key();
+    if super::probe::on() {
+        let head = super::spawn_probe::read_bytes(text, 16).unwrap_or_default();
+        let length = super::spawn_probe::u64_at(&head, 8) as usize;
+        let pointer = super::spawn_probe::u64_at(&head, 0) as usize;
+        let ours = !key.is_empty()
+            && length > 0
+            && length <= 0x400
+            && super::spawn_probe::read_bytes(pointer, length).is_some_and(|b| super::chat::has_prefix(&String::from_utf8_lossy(&b)));
+        super::probe::chat(context, kind, length, ours, client);
+    }
     if key.is_empty() {
         return 0;
     }
@@ -398,6 +413,7 @@ unsafe extern "win64" fn stub_pump() {
 }
 
 extern "win64" fn hook_pump() {
+    super::probe::hit(super::probe::PUMP);
     super::spawner::tick();
     super::vfx::server_tick();
     super::veil_beam::tick();
@@ -498,6 +514,7 @@ fn pay_caller_is_new(caller: usize, pay: u8) -> bool {
 }
 
 extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usize, caller: usize) -> u8 {
+    super::probe::hit(super::probe::PAY);
     if LIVE.free_building() {
         if let Some(head) = super::spawn_probe::read_bytes(context, 16) {
             if head[0] == 0 {
@@ -558,6 +575,7 @@ pub fn protected_records() -> Vec<usize> {
 }
 
 extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usize, delta: i32, kind: u32) -> usize {
+    super::probe::hit(super::probe::RESOURCE);
     if delta < 0 && (kind == super::spawner::STAMINA_SIGNATURE || kind == super::spawner::MANA_SIGNATURE) {
         let locked = chunk != 0 && RESOURCE_LOCK.iter().any(|slot| slot.load(Ordering::Relaxed) == chunk);
         if !locked && RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
@@ -713,6 +731,7 @@ static QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
 static QUERY_LOGGED: AtomicU64 = AtomicU64::new(0);
 
 extern "win64" fn note_query_world(world: usize) {
+    super::probe::hit(super::probe::WORLD_QUERY);
     let calls = QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
     if !LIVE.client_build_anywhere() || world == 0 {
         return;
@@ -859,7 +878,7 @@ fn install_build_zones(sections: &[&'static [u8]]) {
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
-    if LIVE.chat_key().is_empty() {
+    if LIVE.chat_key().is_empty() && !super::probe::on() {
         return;
     }
     let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {
