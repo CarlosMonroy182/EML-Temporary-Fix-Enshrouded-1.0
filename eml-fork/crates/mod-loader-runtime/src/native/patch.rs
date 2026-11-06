@@ -278,6 +278,11 @@ pub fn take_server_reply(text: usize) -> bool {
         return false;
     }
     let Some(message) = message_text(text) else { return false };
+    accept_reply(&message)
+}
+
+/// Same, for a line this process produced itself (an asker living in the game that hosts the world).
+pub fn accept_reply(message: &str) -> bool {
     let Ok(dir) = std::env::current_dir() else { return false };
     let number = |from: usize| -> Option<u32> {
         let rest = &message[from..];
@@ -285,9 +290,9 @@ pub fn take_server_reply(text: usize) -> bool {
     };
     if message.starts_with("[M182#") {
         let Some(seq) = number(6) else { return false };
-        match super::roster::parse_reply(&message, seq) {
+        match super::roster::parse_reply(message, seq) {
             Some(list) => {
-                let own = super::roster::parse_own(&message, seq);
+                let own = super::roster::parse_own(message, seq);
                 super::spawner::store_roster(&dir, seq, &list, own);
                 super::spawner::log(&format!("roster {seq}: {} player(s) read from the server's answer", list.len()));
             }
@@ -296,14 +301,14 @@ pub fn take_server_reply(text: usize) -> bool {
         return true;
     }
     if message.starts_with(super::shared::REV_TAG) {
-        let note = super::shared::receive_revs(&dir, &message);
+        let note = super::shared::receive_revs(&dir, message);
         if !note.is_empty() {
             super::spawner::log(&note);
         }
         return true;
     }
     if message.starts_with(super::shared::SNAP_TAG) {
-        let note = super::shared::receive_snapshot(&dir, &message);
+        let note = super::shared::receive_snapshot(&dir, message);
         if !note.is_empty() {
             super::spawner::log(&note);
         }
@@ -311,7 +316,7 @@ pub fn take_server_reply(text: usize) -> bool {
     }
     if message.starts_with("[M182T#") {
         let Some(seq) = number(7) else { return false };
-        match super::groups::parse_live_line(&message, seq) {
+        match super::groups::parse_live_line(message, seq) {
             Some((live, complete)) => {
                 super::spawner::store_teams(&dir, &live, complete);
                 super::spawner::log(&format!("teams {seq}: {} team(s) read from the server's answer", live.len()));
@@ -410,6 +415,12 @@ fn send_lines_to_asker(out: usize, queue: usize, kind: usize, text: usize, clien
     sent
 }
 
+/// The panel that lives in this very game (the one hosting the world) has no network between it and the answer:
+/// its lines are read here instead of being queued in the chat.
+fn is_local_panel(client: usize) -> bool {
+    !super::spawner::is_remote_client() && super::probe::inject_on() && client & 0x3f == 0
+}
+
 fn who_is(entry: &super::table::Entry) -> String {
     format!("{}|{}", entry.name.as_deref().unwrap_or(""), entry.id.as_deref().unwrap_or(""))
 }
@@ -421,11 +432,15 @@ fn tell_other_panels(out: usize, queue: usize, kind: usize, text: usize, author:
         return false;
     }
     let present: Vec<(u32, String)> = super::table::entries().iter().map(|e| (e.client, who_is(e))).collect();
-    let targets: Vec<usize> = super::shared::targets(std::time::Instant::now(), &present, author as u32).into_iter().map(|c| c as usize).collect();
+    let mut targets: Vec<usize> = super::shared::targets(std::time::Instant::now(), &present, author as u32).into_iter().map(|c| c as usize).collect();
+    let Ok(dir) = std::env::current_dir() else { return false };
+    if let Some(at) = targets.iter().position(|c| is_local_panel(*c)) {
+        targets.remove(at);
+        accept_reply(&super::shared::rev_line(&dir, 0));
+    }
     if targets.is_empty() {
         return false;
     }
-    let Ok(dir) = std::env::current_dir() else { return false };
     if !replace_text(text, &super::shared::rev_line(&dir, 0)) {
         return false;
     }
@@ -508,6 +523,12 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
         super::chat::Verdict::Swallowed(line) => {
             super::spawner::log(&line);
             tell_other_panels(out, context, kind, text, client, frame);
+            1
+        }
+        super::chat::Verdict::Lines(lines) if is_local_panel(client) => {
+            for line in &lines {
+                accept_reply(line);
+            }
             1
         }
         super::chat::Verdict::Lines(lines) => {

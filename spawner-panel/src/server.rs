@@ -22,40 +22,45 @@ impl App {
             return;
         }
         let status = remote::status();
-        ui.horizontal_wrapped(|ui| {
+        let row = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| add(ui));
+        };
+        row(ui, &mut |ui| {
             ui.label(RichText::new("SERVIDOR").color(GOLD).size(14.5));
-            if status.sending {
-                ui.label(RichText::new("escribiendo… no toques el teclado").color(GOLD_DIM).size(14.5));
-            } else if !status.error.is_empty() {
-                ui.label(RichText::new(status.error.clone()).color(BAD).size(14.5));
-            } else if status.queued > 0 {
-                ui.label(RichText::new(format!("{} envíos en cola", status.queued)).color(MUTED).size(14.5));
-            } else if !status.last.is_empty() {
-                ui.label(RichText::new(status.last.clone()).color(GOOD).size(14.5));
-            } else {
-                ui.label(RichText::new("listo").color(MUTED).size(14.5));
-            }
             if button(ui, "Reenviar todo", Vec2::new(130.0, 24.0), remote::connected() && !status.sending, false) {
                 self.resend_state();
             }
-            if remote::connected() {
-                let line = crate::shared::line();
-                if !line.is_empty() {
-                    ui.label(RichText::new(line).color(MUTED).size(14.5));
-                }
-                if button(ui, "Sincronizar", Vec2::new(120.0, 24.0), true, false) {
+            let (text, color) = if status.sending {
+                ("escribiendo… no toques el teclado".to_string(), GOLD_DIM)
+            } else if !status.error.is_empty() {
+                (status.error.clone(), BAD)
+            } else if status.queued > 0 {
+                (format!("{} envíos en cola", status.queued), MUTED)
+            } else if !status.last.is_empty() {
+                (status.last.clone(), GOOD)
+            } else {
+                ("listo".to_string(), MUTED)
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(color).size(14.5)).truncate());
+        });
+        if remote::connected() {
+            row(ui, &mut |ui| {
+                if button(ui, "Sincronizar", Vec2::new(130.0, 24.0), true, false) {
                     crate::shared::refresh_all();
                 }
-            }
-        });
+                let line = crate::shared::line();
+                ui.add(egui::Label::new(RichText::new(line).color(MUTED).size(14.5)).truncate());
+            });
+        }
         if remote::connected() && !self.upload_hint.is_empty() {
             let names: Vec<String> = self.upload_hint.iter().map(|(t, n)| format!("{n} {}", topic_label(t))).collect();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("El servidor no tiene {} y tu perfil «{}» sí.", names.join(", "), self.profile)).color(GOLD_DIM).size(14.5));
+            let text = format!("El servidor no tiene {} y tu perfil «{}» sí.", names.join(", "), self.profile);
+            row(ui, &mut |ui| {
                 if button(ui, "Subir mi perfil al servidor", Vec2::new(230.0, 24.0), true, true) {
                     let sent = self.upload_profile();
                     self.remote_notice = format!("{sent} elemento(s) enviados al servidor. Lo que ya existía no se tocó.");
                 }
+                ui.add(egui::Label::new(RichText::new(text.clone()).color(GOLD_DIM).size(14.5)).truncate());
             });
         }
     }

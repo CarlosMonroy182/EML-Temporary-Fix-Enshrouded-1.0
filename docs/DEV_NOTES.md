@@ -148,3 +148,8 @@ by asking, and stays current without polling.
 - Not verifiable without the real game: delivery of pushes to several panels through the narrowed mask and long multi-line replies
   against the chat queue limits. The panel retries after 25 s (3 tries). Ask for `m182_spawner.log` (server) and the panel log.
 - `power_tick` has 13 stage marks to find the cause of the multi-second "requests" stalls in the next logs.
+- A game that hosts the world and also runs the panel (`inject_on` and the asker is peer 0) never receives its own answers through the chat
+  (`is_remote_client()` is false there), so `patch.rs::accept_reply` reads those lines directly, for the asker's `rev`/`pull` answers and for
+  pushes to the local panel. Other admins connected to that host still get theirs through the narrowed chat entry.
+- Panel server strip: three fixed-height rows (status + "Reenviar todo", "Sincronizar" + sync message, upload hint) with truncated
+  labels, so the layout does not move with the message length.
