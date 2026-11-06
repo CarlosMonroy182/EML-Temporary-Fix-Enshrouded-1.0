@@ -468,11 +468,31 @@ fn cost_entries(costs: usize) -> Vec<(u32, i32)> {
         .collect()
 }
 
-pub(super) fn gives_items(entries: &[(u32, i32)]) -> bool {
-    entries.iter().any(|(_, amount)| *amount < 0)
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_pay_costs() {
+    core::arch::naked_asm!(
+        "sub rsp, 0x38",
+        "mov r11, [rsp + 0x38]",
+        "mov [rsp + 0x20], r11",
+        "call {f}",
+        "add rsp, 0x38",
+        "ret",
+        f = sym hook_pay_costs,
+    );
 }
 
-extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8) -> u8 {
+static PAY_CALLERS: std::sync::Mutex<Vec<(usize, u8)>> = Mutex::new(Vec::new());
+
+fn pay_caller_is_new(caller: usize, pay: u8) -> bool {
+    let Ok(mut seen) = PAY_CALLERS.try_lock() else { return false };
+    if seen.contains(&(caller, pay)) || seen.len() >= 64 {
+        return false;
+    }
+    seen.push((caller, pay));
+    true
+}
+
+extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usize, caller: usize) -> u8 {
     if LIVE.free_building() {
         if let Some(head) = super::spawn_probe::read_bytes(context, 16) {
             if head[0] == 0 {
@@ -481,22 +501,24 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8) -> u8 {
                     let owner = super::spawn_probe::u32_at(&raw, 0);
                     let admin = super::table::entries().iter().any(|e| e.entity() == owner && super::roster::is_admin(e.permissions));
                     let entries = if admin { cost_entries(costs) } else { Vec::new() };
-                    let gives = gives_items(&entries);
-                    if PAY_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
-                        let known: Vec<u32> = super::table::entries().iter().map(|e| e.entity()).collect();
+                    let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
+                    if pay_caller_is_new(caller, pay) {
                         super::spawner::log(&format!(
-                            "free building: payment by owner {owner} (pay={pay}) -> {} (players online {known:?}, entries {:?})",
-                            if !admin {
-                                "charged"
-                            } else if gives {
-                                "passed to the game, it hands items over"
-                            } else {
-                                "free, administrator"
-                            },
+                            "free building: new payment caller +{:#x} pay={pay} mode={} owner={owner} admin={admin} entries {:?}",
+                            caller.wrapping_sub(base),
+                            head[0],
                             &entries[..entries.len().min(6)]
                         ));
                     }
-                    if admin && !gives {
+                    if PAY_LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+                        let known: Vec<u32> = super::table::entries().iter().map(|e| e.entity()).collect();
+                        super::spawner::log(&format!(
+                            "free building: payment by owner {owner} (pay={pay}) -> {} (players online {known:?}, entries {:?})",
+                            if admin { "free, administrator" } else { "charged" },
+                            &entries[..entries.len().min(6)]
+                        ));
+                    }
+                    if admin {
                         return 1;
                     }
                 }
@@ -534,7 +556,7 @@ fn install_pay_costs(sections: &[&'static [u8]]) {
         tail.add(6).cast::<u64>().write_unaligned(target.add(displaced) as u64);
     }
     PAY_TRAMPOLINE.store(page as usize, Ordering::SeqCst);
-    match unsafe { write_jump(target, hook_pay_costs as usize) } {
+    match unsafe { write_jump(target, stub_pay_costs as usize) } {
         Ok(()) => super::spawner::log("free building ready: administrators build without spending materials"),
         Err(code) => {
             PAY_TRAMPOLINE.store(0, Ordering::SeqCst);
