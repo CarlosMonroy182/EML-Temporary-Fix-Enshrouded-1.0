@@ -3059,7 +3059,7 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
             refill_mana(manager, id, &mut c.mana_peak);
         }
         if c.powers.stamina {
-            if tick % 4 == 0 {
+            if tick % 32 == 0 {
                 cleanse_debuffs(manager, id, &mut c.seen);
             }
             refill_stamina(manager, id, &mut c.stamina_peak);
@@ -3134,7 +3134,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }
     }
     if st.powers.stamina {
-        if tick % 4 == 0 {
+        if tick % 32 == 0 {
             cleanse_debuffs(manager, id, &mut st.buffs_seen);
         }
         refill_stamina(manager, id, &mut st.stamina_peak);
@@ -4565,13 +4565,10 @@ fn powers_loop() {
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
-        let busy = urgent || st.powers.stamina || client_powers_busy(&st);
-        let pause = if st.powers.fly {
+        let pause = if st.powers.fly || st.powers.stamina || client_powers_busy(&st) {
             1
         } else if urgent {
             4
-        } else if busy {
-            8
         } else {
             25
         };
