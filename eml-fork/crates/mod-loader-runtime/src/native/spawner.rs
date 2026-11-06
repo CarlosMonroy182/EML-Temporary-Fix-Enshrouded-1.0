@@ -1180,6 +1180,9 @@ pub fn forget_layouts() {
     if let Ok(mut r) = MISSING.lock() {
         *r = None;
     }
+    for cell in &BUFF_INDEX {
+        cell.store(-1, Ordering::Relaxed);
+    }
 }
 
 /// Where an entity's components are, for loops that ask many times a second. The slow lookup (record
@@ -2217,9 +2220,52 @@ fn buff_container_plausible(b: &[u8]) -> bool {
     true
 }
 
-pub fn cleanse_debuffs(manager: usize, id: u32, seen: &mut Vec<u32>) -> usize {
-    let Some((_, _, slots)) = entity_layout(manager, id) else { return 0 };
+static BUFF_INDEX: [AtomicI32; 2] = [AtomicI32::new(-1), AtomicI32::new(-1)];
+
+/// Clears the debuffs held in one buff container. Returns how many were cleared.
+fn cleanse_container(base: usize, b: &[u8], id: u32, seen: &mut Vec<u32>) -> usize {
     let mut cleansed = 0;
+    for (start, count) in DEBUFF_SLOTS {
+        for i in 0..count {
+            let at = start + i * BUFF_STRIDE;
+            let kind = u32_at(b, at + 4);
+            if kind == 0 || b[at + 8] != 0 {
+                continue;
+            }
+            if write_bytes(base + at + 8, &[1]) {
+                cleansed += 1;
+                if seen.len() < 40 && !seen.contains(&kind) {
+                    seen.push(kind);
+                    log(&format!("states: debuff type {kind} (entity {}) cleansed at slot offset {at}", u32_at(b, at)));
+                }
+            }
+        }
+    }
+    let _ = id;
+    cleansed
+}
+
+pub fn cleanse_debuffs(manager: usize, id: u32, seen: &mut Vec<u32>) -> usize {
+    let kind = kind_of(manager);
+    let cached = BUFF_INDEX[kind].load(Ordering::Relaxed);
+    if cached >= 0 {
+        if let Some(p) = quick_placement(manager, id) {
+            if let Some((addr, stride)) = component_quick(&p, cached as usize) {
+                if stride == BUFF_CONTAINER_SIZE {
+                    if let Some(b) = read_bytes(addr, BUFF_CONTAINER_SIZE) {
+                        if buff_container_plausible(&b) {
+                            return cleanse_container(addr, &b, id, seen);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let key = (manager, id, 98usize);
+    if recently_missing(key) {
+        return 0;
+    }
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return 0 };
     for slot in &slots {
         if slot.stride != BUFF_CONTAINER_SIZE {
             continue;
@@ -2231,25 +2277,12 @@ pub fn cleanse_debuffs(manager: usize, id: u32, seen: &mut Vec<u32>) -> usize {
         if !BUFF_FOUND.swap(true, Ordering::Relaxed) {
             log(&format!("states: buff container found (entity {id})"));
         }
-        for (start, count) in DEBUFF_SLOTS {
-            for i in 0..count {
-                let at = start + i * BUFF_STRIDE;
-                let kind = u32_at(&b, at + 4);
-                if kind == 0 || b[at + 8] != 0 {
-                    continue;
-                }
-                if write_bytes(slot.addr + at + 8, &[1]) {
-                    cleansed += 1;
-                    if seen.len() < 40 && !seen.contains(&kind) {
-                        seen.push(kind);
-                        log(&format!("states: debuff type {kind} (entity {}) cleansed at slot offset {at}", u32_at(&b, at)));
-                    }
-                }
-            }
-        }
-        return cleansed;
+        BUFF_INDEX[kind].store(slot.index as i32, Ordering::Relaxed);
+        note_found(key);
+        return cleanse_container(slot.addr, &b, id, seen);
     }
-    cleansed
+    note_missing(key);
+    0
 }
 
 pub fn refill_mana(manager: usize, id: u32, peak: &mut u32) -> bool {
@@ -2909,7 +2942,8 @@ pub fn teams_line(seq: u32) -> String {
 
 pub fn roster_line(seq: u32, client: u32) -> String {
     let table = super::table::entries();
-    let mut ids: Vec<u32> = tracked_ids();
+    // The player table is who is connected; the tracked entities also hold characters nobody is playing.
+    let mut ids: Vec<u32> = if table.is_empty() { tracked_ids() } else { Vec::new() };
     for e in &table {
         if !ids.contains(&e.entity()) {
             ids.push(e.entity());
@@ -3309,7 +3343,30 @@ fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
     }
 }
 
+static SLOW_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// A power tick that took long: says which part of it did, so a hitch can be traced to its cause.
+fn report_slow_tick(total: Duration, marks: &[u64; 8]) {
+    const NAMES: [&str; 8] = ["requests", "world", "resource lock", "shield", "client powers", "heal", "stamina", "fly"];
+    let n = SLOW_TICKS.fetch_add(1, Ordering::Relaxed);
+    if n >= 30 && n % 20 != 0 {
+        return;
+    }
+    let parts: Vec<String> = marks.iter().enumerate().filter(|(_, us)| **us >= 5_000).map(|(i, us)| format!("{} {} ms", NAMES[i], us / 1000)).collect();
+    log(&format!("slow power tick: {} ms ({})", total.as_millis(), if parts.is_empty() { "spread over several parts".to_string() } else { parts.join(", ") }));
+}
+
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
+    let started = Instant::now();
+    let mut marks = [0u64; 8];
+    let mut last = started;
+    macro_rules! mark {
+        ($i:expr) => {{
+            let now = Instant::now();
+            marks[$i] = now.duration_since(last).as_micros() as u64;
+            last = now;
+        }};
+    }
     drain_requests(st, dir);
     if poll {
         super::outbox::poll(dir);
@@ -3322,6 +3379,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             scan_request(st, dir);
         });
     }
+    mark!(0);
     let Some((manager, id)) = world_pair() else { return };
     let hosting = SERVER_MGR.load(Ordering::SeqCst) != 0;
     if hosting && tick % 8 == 0 {
@@ -3333,8 +3391,10 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
     if hosting && tick % 16 == 0 {
         super::perf::time(super::perf::SPAWNERS, || spawners_tick(&mut st.spawners, dir));
     }
+    mark!(1);
     let client = client_pair();
     refresh_resource_lock(st, manager, id, client, hosting);
+    mark!(2);
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
@@ -3363,9 +3423,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }
     }
     super::perf::time(super::perf::SHIELD, || shield_tick(st, &want));
+    mark!(3);
     if hosting {
         apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick, poll);
     }
+    mark!(4);
     if st.heal_once {
         refill_health(manager, id);
         if let Some((m, c)) = client {
@@ -3379,6 +3441,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             refill_mana(m, c, &mut st.mana_peak_c);
         }
     }
+    mark!(5);
     if st.powers.stamina {
         if tick % 2 == 0 {
             cleanse_debuffs(manager, id, &mut st.buffs_seen);
@@ -3392,6 +3455,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
+    mark!(6);
     if st.powers.fly {
         if !st.gravity_off {
             st.gravity_off = true;
@@ -3410,6 +3474,11 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         set_gravity(st, true);
         st.last_written = None;
         log("fly: gravity restored");
+    }
+    mark!(7);
+    let total = started.elapsed();
+    if total >= Duration::from_millis(250) {
+        report_slow_tick(total, &marks);
     }
 }
 
@@ -3674,24 +3743,42 @@ fn scan_roster(seq: u32, dir: std::path::PathBuf) {
     };
     match found {
         Some((list, own)) => {
-            let players: Vec<String> = list
-                .iter()
-                .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
-                .collect();
-            let me = match own {
-                Some((n, p)) => format!(",\"me\":{{\"n\":{n},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1}}}", p[0], p[1], p[2]),
-                None => String::new(),
-            };
-            let text = format!("{{\"seq\":{seq},\"players\":[{}]{me}}}", players.join(","));
-            let tmp = dir.join("m182_online.json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join(ONLINE_FILE));
-            }
+            store_roster(&dir, seq, &list, own);
             log(&format!("roster {seq}: {} player(s) read from the chat after {} pass(es), {} ms", list.len(), passes, started.elapsed().as_millis()));
         }
         None => log(&format!("roster {seq}: the answer never appeared in memory ({passes} passes)")),
     }
     SCAN_BUSY.store(false, Ordering::SeqCst);
+}
+
+/// Writes the server's answer to a player-list request where the panel reads it.
+pub fn store_roster(dir: &std::path::Path, seq: u32, list: &[(u32, String)], own: Option<(u32, [f64; 3])>) {
+    let players: Vec<String> = list
+        .iter()
+        .map(|(n, name)| format!("{{\"n\":{n},\"name\":{}}}", serde_json::Value::String(name.clone())))
+        .collect();
+    let me = match own {
+        Some((n, p)) => format!(",\"me\":{{\"n\":{n},\"x\":{:.1},\"y\":{:.1},\"z\":{:.1}}}", p[0], p[1], p[2]),
+        None => String::new(),
+    };
+    let text = format!("{{\"seq\":{seq},\"players\":[{}]{me}}}", players.join(","));
+    let tmp = dir.join("m182_online.json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(ONLINE_FILE));
+    }
+}
+
+/// Writes the server's answer to a teams request where the panel reads it.
+pub fn store_teams(dir: &std::path::Path, live: &[groups::LiveTeam], complete: bool) {
+    let tmp = dir.join("m182_teams_live.json.tmp");
+    if std::fs::write(&tmp, groups::live_json(live, complete)).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(groups::LIVE_FILE));
+    }
+}
+
+/// True on a game that is connected to somebody else's server (it does not host the world).
+pub fn is_remote_client() -> bool {
+    SERVER_MGR.load(Ordering::SeqCst) == 0
 }
 
 fn find_teams(regions: &[(usize, usize)], seq: u32) -> Option<(Vec<groups::LiveTeam>, bool)> {
@@ -3712,10 +3799,7 @@ fn scan_teams(seq: u32, dir: std::path::PathBuf) {
     };
     match found {
         Some((live, complete)) => {
-            let tmp = dir.join("m182_teams_live.json.tmp");
-            if std::fs::write(&tmp, groups::live_json(&live, complete)).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join(groups::LIVE_FILE));
-            }
+            store_teams(&dir, &live, complete);
             log(&format!("teams {seq}: {} team(s) read from the chat ({}), {} ms", live.len(), if complete { "complete" } else { "cut" }, started.elapsed().as_millis()));
         }
         None => log(&format!("teams {seq}: the answer never appeared in memory")),
@@ -3728,6 +3812,9 @@ fn scan_request(_st: &mut PowerState, dir: &std::path::Path) {
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let _ = std::fs::remove_file(&path);
     let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+    if super::patch::replies_read_by_hook() {
+        return;
+    }
     let seq = value.as_ref().and_then(|v| v.get("seq").and_then(|s| s.as_u64())).unwrap_or(0) as u32;
     let kind = value.as_ref().and_then(|v| v.get("kind").and_then(|k| k.as_str())).unwrap_or("").to_string();
     if SCAN_BUSY.swap(true, Ordering::SeqCst) {

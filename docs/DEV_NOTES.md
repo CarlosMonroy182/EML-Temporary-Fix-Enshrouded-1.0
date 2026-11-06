@@ -107,3 +107,13 @@ A failed record lookup walks all 640 component slots. On a game client the serve
 shield did that every 4 ms. `spawner.rs` now remembers misses per (manager, entity, record) with a wait that doubles up to 8 s
 (`MISSING`), scans through the cached archetype shapes (`component_quick`), and when nothing can be protected the power loop
 polls every 50 ms instead of every 4 ms (`SHIELD_IDLE`).
+
+## Panel answers (player list, teams) without chat noise
+
+- The server answers `[M182#n] ...` / `[M182T#n] ...` by rewriting the asker's message. `patch.rs::send_to_asker_only` now queues it
+  itself and then marks the queue entry as delivered for every peer but the asker (`entry+0x20` bit mask, per-peer byte counters at
+  `queue+0x14+12*peer`, peer = `client & 0x3f`), so other players never receive it.
+- A game connected to a server (`chat_key` empty, `chat_inject` on) swallows those lines in `hook_chat` (`take_server_reply`) and writes
+  `m182_online.json` / `m182_teams_live.json` directly. The old memory scan (`scan_request`) is skipped then; it stays as the fallback.
+- `roster_line` lists the player table only (connected players); tracked entities are used only while the table is empty.
+- `power_tick` logs `slow power tick: N ms (part ...)` when a tick takes >= 250 ms.

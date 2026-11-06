@@ -868,24 +868,41 @@ impl App {
             }
         }
         let manual = self.social.manual;
-        for s in self.social.seen.iter().filter(|_| !manual) {
-            let team = self.social.teams.iter().find(|t| t.members.iter().any(|m| m.key == s.member.key())).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
-            let place = match &s.online {
-                Some(o) if o.located() => format!("X {:.0}  Z {:.0}", o.x, o.z),
-                Some(_) => String::new(),
-                None => "cargando…".to_string(),
-            };
-            let host = s.online.as_ref().map(|o| o.me).unwrap_or(s.member.slot == 0);
-            let name = if host { format!("{}  (tú)", s.member.name) } else { s.member.name.clone() };
-            ui.horizontal_wrapped(|ui| {
-                let label = RichText::new(name).font(title_font(17.0));
-                ui.label(if host { label.color(GOLD) } else { label.color(PARCHMENT) });
-                let id = s.member.id_label();
-                if !id.is_empty() {
-                    ui.label(RichText::new(id).color(MUTED));
-                }
-                ui.label(RichText::new(place).color(MUTED));
-                ui.label(team);
+        if !manual && !self.social.seen.is_empty() {
+            let gap = 10.0;
+            let width = ui.available_width();
+            let columns = (((width + gap) / (300.0 + gap)).floor() as usize).clamp(1, 6);
+            let cell = ((width - gap * (columns as f32 - 1.0) - 24.0 * columns as f32) / columns as f32).max(150.0);
+            let height = (ui.available_height() * 0.4).clamp(120.0, 360.0);
+            egui::ScrollArea::vertical().id_salt("online_players").auto_shrink([false, true]).max_height(height).show(ui, |ui| {
+                egui::Grid::new("online_grid").num_columns(columns).spacing([gap, gap]).show(ui, |ui| {
+                    for (i, s) in self.social.seen.iter().enumerate() {
+                        let team = self.social.teams.iter().find(|t| t.members.iter().any(|m| m.key == s.member.key())).map(|t| t.name.clone()).unwrap_or_else(|| "sin equipo".to_string());
+                        let place = match &s.online {
+                            Some(o) if o.located() => format!("X {:.0}  Z {:.0}", o.x, o.z),
+                            Some(_) => String::new(),
+                            None => "cargando…".to_string(),
+                        };
+                        let host = s.online.as_ref().map(|o| o.me).unwrap_or(s.member.slot == 0);
+                        let name = if host { format!("{}  (tú)", s.member.name) } else { s.member.name.clone() };
+                        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8.0)).show(ui, |ui| {
+                            ui.set_width(cell);
+                            let label = RichText::new(name).font(title_font(17.0));
+                            ui.add(egui::Label::new(if host { label.color(GOLD) } else { label.color(PARCHMENT) }).truncate());
+                            let id = s.member.id_label();
+                            if !id.is_empty() {
+                                ui.add(egui::Label::new(RichText::new(id).color(MUTED).size(14.0)).truncate());
+                            }
+                            if !place.is_empty() {
+                                ui.add(egui::Label::new(RichText::new(place).color(MUTED).size(14.0)).truncate());
+                            }
+                            ui.add(egui::Label::new(RichText::new(team).size(15.0)).truncate());
+                        });
+                        if (i + 1) % columns == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
             });
         }
         divider(ui);

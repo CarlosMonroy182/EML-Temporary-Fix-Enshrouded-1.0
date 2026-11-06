@@ -246,9 +246,140 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
     if replace_text(text, &line) { 0 } else { 1 }
 }
 
+/// True once the chat hook is in place on a client, so the answers to the panel's requests are read straight
+/// from the incoming chat line instead of searching the game's memory for them.
+static REPLY_HOOK: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn replies_read_by_hook() -> bool {
+    REPLY_HOOK.load(Ordering::Relaxed)
+}
+
+fn message_text(text: usize) -> Option<String> {
+    let head = super::spawn_probe::read_bytes(text, 16)?;
+    let (pointer, length) = (super::spawn_probe::u64_at(&head, 0) as usize, super::spawn_probe::u64_at(&head, 8) as usize);
+    if length == 0 || length > 0x400 {
+        return None;
+    }
+    let bytes = super::spawn_probe::read_bytes(pointer, length)?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// An answer the server wrote for this game's panel (`[M182#n] ...` player list, `[M182T#n] ...` teams). It is
+/// read here and never reaches the chat window. Returns true when the line was one of ours.
+pub fn take_server_reply(text: usize) -> bool {
+    let Some(head) = super::spawn_probe::read_bytes(text, 16) else { return false };
+    let length = super::spawn_probe::u64_at(&head, 8) as usize;
+    if length < 9 || length > 0x400 {
+        return false;
+    }
+    let pointer = super::spawn_probe::u64_at(&head, 0) as usize;
+    let Some(start) = super::spawn_probe::read_bytes(pointer, 7) else { return false };
+    if &start[..5] != b"[M182" {
+        return false;
+    }
+    let Some(message) = message_text(text) else { return false };
+    let Ok(dir) = std::env::current_dir() else { return false };
+    let number = |from: usize| -> Option<u32> {
+        let rest = &message[from..];
+        rest[..rest.find(']')?].parse().ok()
+    };
+    if message.starts_with("[M182#") {
+        let Some(seq) = number(6) else { return false };
+        match super::roster::parse_reply(&message, seq) {
+            Some(list) => {
+                let own = super::roster::parse_own(&message, seq);
+                super::spawner::store_roster(&dir, seq, &list, own);
+                super::spawner::log(&format!("roster {seq}: {} player(s) read from the server's answer", list.len()));
+            }
+            None => super::spawner::log(&format!("roster {seq}: the server's answer could not be read")),
+        }
+        return true;
+    }
+    if message.starts_with("[M182T#") {
+        let Some(seq) = number(7) else { return false };
+        match super::groups::parse_live_line(&message, seq) {
+            Some((live, complete)) => {
+                super::spawner::store_teams(&dir, &live, complete);
+                super::spawner::log(&format!("teams {seq}: {} team(s) read from the server's answer", live.len()));
+            }
+            None => super::spawner::log(&format!("teams {seq}: the server's answer could not be read")),
+        }
+        return true;
+    }
+    false
+}
+
+type EnqueueFn = extern "win64" fn(*mut u8, usize, usize, usize, u32, u32, u32, u64, usize) -> usize;
+
+/// Queues the (already replaced) message through the game's own function, then marks it as delivered for every
+/// player except the one who asked, so the answer to a panel request is not shown to the whole server.
+/// Returns false when it could not be done and the caller should let the game broadcast it as before.
+fn send_to_asker_only(out: usize, queue: usize, kind: usize, text: usize, client: usize, frame: usize) -> bool {
+    let original = CHAT_TRAMPOLINE.load(Ordering::SeqCst);
+    if original == 0 || queue == 0 {
+        return false;
+    }
+    let Some(stack) = super::spawn_probe::read_bytes(frame + 0x28, 0x28) else { return false };
+    let (a5, a6, a7) = (super::spawn_probe::u32_at(&stack, 0), super::spawn_probe::u32_at(&stack, 8), super::spawn_probe::u32_at(&stack, 0x10));
+    let (a8, optional) = (super::spawn_probe::u64_at(&stack, 0x18), super::spawn_probe::u64_at(&stack, 0x20) as usize);
+    let Some(line) = message_text(text) else { return false };
+    let call: EnqueueFn = unsafe { std::mem::transmute(original) };
+    let answer = call(out as *mut u8, queue, kind, text, a5, a6, a7, a8, optional);
+    let _ = answer;
+    let status = super::spawn_probe::read_bytes(out, 1).map(|b| b[0]).unwrap_or(0xff);
+    if status != 0 {
+        return true;
+    }
+    if !narrow_last_entry(queue, (client & 0x3f) as usize, line.as_bytes()) {
+        super::spawner::log("chat: could not limit an answer to the player who asked; it was sent to everybody");
+    }
+    true
+}
+
+/// The newest entry of the server's chat queue is delivered to every connected player that has not marked it as
+/// done. Marks it done for everybody but `target` and takes back the byte count the game added for them.
+pub fn narrow_last_entry(queue: usize, target: usize, line: &[u8]) -> bool {
+    use super::spawn_probe::{read_bytes, u32_at, u64_at};
+    let Some(tail) = read_bytes(queue + 0x1c8, 8).map(|b| u64_at(&b, 0) as usize) else { return false };
+    if tail == 0 {
+        return false;
+    }
+    let Some(entry) = read_bytes(tail, 0x40) else { return false };
+    let length = u32_at(&entry, 8) as usize;
+    if length != line.len() || read_bytes(tail + 0x40, length).as_deref() != Some(line) {
+        return false;
+    }
+    let size = {
+        let n = length as u64 + 0x17;
+        match n & 3 {
+            0 => n,
+            r => n - r + 4,
+        }
+    } as u32;
+    let Some(peers) = read_bytes(queue + 0x0c, 32 * 12) else { return false };
+    let mut mask = u32_at(&entry, 0x20);
+    for peer in 0..32usize {
+        if peer == target || mask >> peer & 1 != 0 {
+            continue;
+        }
+        if peers[peer * 12] != 0 {
+            let at = queue + 0x14 + peer * 12;
+            let Some(count) = read_bytes(at, 4).map(|b| u32_at(&b, 0)) else { return false };
+            if !super::spawner::write_bytes(at, &count.saturating_sub(size).to_le_bytes()) {
+                return false;
+            }
+        }
+        mask |= 1 << peer;
+    }
+    super::spawner::write_bytes(tail + 0x20, &mask.to_le_bytes())
+}
+
 static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
 
-extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize, _frame: usize) -> u8 {
+extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize, frame: usize) -> u8 {
+    if REPLY_HOOK.load(Ordering::Relaxed) && super::spawner::is_remote_client() && take_server_reply(text) {
+        return 1;
+    }
     let key = LIVE.chat_key();
     if super::probe::on() {
         let head = super::spawn_probe::read_bytes(text, 16).unwrap_or_default();
@@ -308,13 +439,13 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
             let line = super::spawner::teams_line(seq);
             let sent = replace_text(text, &line);
             super::spawner::log(&format!("chat: client {} asked for the teams ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
-            if sent { 0 } else { 1 }
+            if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
         }
         super::chat::Verdict::Roster(seq) => {
             let line = super::spawner::roster_line(seq, client as u32);
             let sent = replace_text(text, &line);
             super::spawner::log(&format!("chat: client {} asked for the player list ({}): {line}", client as u32, if sent { "sent" } else { "could not be sent" }));
-            if sent { 0 } else { 1 }
+            if sent && send_to_asker_only(out, context, kind, text, client, frame) { 1 } else if sent { 0 } else { 1 }
         }
     }
 }
@@ -881,7 +1012,7 @@ fn install_build_zones(sections: &[&'static [u8]]) {
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
-    if LIVE.chat_key().is_empty() && !super::probe::on() {
+    if LIVE.chat_key().is_empty() && !super::probe::on() && !super::probe::inject_on() {
         return;
     }
     let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {
@@ -911,6 +1042,9 @@ fn install_chat(sections: &[&'static [u8]]) {
 
     match unsafe { write_jump(target, stub_chat as usize) } {
         Ok(()) => {
+            if super::probe::inject_on() && LIVE.chat_key().is_empty() {
+                REPLY_HOOK.store(true, Ordering::SeqCst);
+            }
             tracing::info!(target: "m182::native", address = format_args!("{:#x}", target as usize), "chat commands hooked");
             super::spawner::log("chat commands ready");
         }
@@ -1152,7 +1286,7 @@ pub fn install() -> Outcome {
     if super::probe::on() {
         install_watch(&sections);
     }
-    if super::probe::inject_on() {
+    if super::probe::inject_on() && LIVE.chat_key().is_empty() {
         install_chat_out(&sections);
     }
     if super::config::LIVE.spawner() || vfx || pillar {
