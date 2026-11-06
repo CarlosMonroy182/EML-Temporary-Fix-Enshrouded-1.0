@@ -247,6 +247,15 @@ fn layout(p: &Placement) -> Option<Vec<Slot>> {
     Some(out)
 }
 
+/// Whether the entity carries a 24-byte LifeTime component that was filled in with a duration of at most `limit_ns`.
+pub(super) fn has_life_time(manager: usize, id: u32, limit_ns: u64) -> Option<bool> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    Some(slots.iter().any(|slot| {
+        slot.stride == 24
+            && read_bytes(slot.addr, 8).is_some_and(|b| b.len() >= 8 && (1..=limit_ns).contains(&u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])))
+    }))
+}
+
 fn entity_layout(manager: usize, id: u32) -> Option<(usize, Placement, Vec<Slot>)> {
     if manager == 0 || id == 0 {
         return None;
@@ -3224,7 +3233,7 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: boo
     }
 }
 
-const DIVINE_EFFECT: &str = "VFX_Preview_Enemy_Mage_Teleport";
+const DIVINE_EFFECT: &str = super::vfx::DIVINE_EFFECT;
 const DIVINE_EVERY: Duration = Duration::from_millis(1200);
 const DIVINE_LIFE_MS: u64 = 1500;
 
@@ -3235,12 +3244,15 @@ fn divine_aura(manager: usize, id: u32, last: &mut Option<Instant>) {
         return;
     }
     *last = Some(Instant::now());
+    if super::vfx::divine_blocked() {
+        return;
+    }
     let Some(t) = transform_of(manager, id) else { return };
     if t.len() < 24 {
         return;
     }
     let Some(template) = super::vfx::template_guid(DIVINE_EFFECT) else { return };
-    super::vfx::queue_effect(template, (u64_at(&t, 0) as i64, u64_at(&t, 8) as i64, u64_at(&t, 16) as i64), 1.6, DIVINE_LIFE_MS);
+    super::vfx::queue_effect(template, (u64_at(&t, 0) as i64, u64_at(&t, 8) as i64, u64_at(&t, 16) as i64), 1.0, DIVINE_LIFE_MS);
 }
 
 fn spawn_busy() -> bool {
