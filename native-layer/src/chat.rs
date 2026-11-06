@@ -200,10 +200,7 @@ fn handle_checked(session: &mut Session, now: Instant, t: &str, key: &str, clien
     }
     let outcome = match command.as_str() {
         "ping" => Ok("ping".to_string()),
-        "mark" => {
-            super::diag::mark(rest);
-            Ok("mark".to_string())
-        }
+        "mark" => Ok("mark".to_string()),
         "set" => {
             let (file, body) = next_token(rest);
             let written = write_json(dir, file, body, client);

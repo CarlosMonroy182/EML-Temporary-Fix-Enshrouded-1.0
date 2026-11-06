@@ -45,7 +45,6 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
                 seen.push((a, b, hostile));
                 let line = format!("pvp zones: relation check {via} {a} vs {b} -> {}", if hostile { "hostile" } else { "not hostile" });
                 super::spawner::log(&line);
-                super::diag::line(&line);
             }
         }
     }
@@ -164,10 +163,6 @@ extern "win64" fn filter_permissions(entity: u32, permissions: u32, caller: usiz
     } else {
         permissions
     };
-    if super::diag::on() {
-        let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
-        super::diag::permission(entity, permissions, shown, caller.wrapping_sub(base));
-    }
     shown
 }
 

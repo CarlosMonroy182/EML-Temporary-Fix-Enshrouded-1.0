@@ -41,6 +41,10 @@ impl eframe::App for Embedded {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.host.close_requested();
         }
+        if !self.host.visible() && !remote::active() {
+            ctx.request_repaint_after(Duration::from_secs(5));
+            return;
+        }
         eframe::App::update(&mut self.app, ctx, frame);
     }
 }

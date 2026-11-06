@@ -8,8 +8,6 @@
 
 pub mod chat;
 pub mod config;
-pub mod datapatch;
-pub mod diag;
 pub mod faction;
 pub mod groups;
 pub mod invites;
@@ -81,7 +79,6 @@ pub fn attach() {
     }
 
     vfx::start();
-    spawner::start_data_patch();
 
     if patch::install() != patch::Outcome::Retry {
         spawn_watcher(path);

@@ -75,7 +75,6 @@ const ITEM_ARMOR_OFFSET: usize = 1724;
 const ITEM_INFO_SPAN: usize = 2100;
 const POWERS_FILE: &str = "m182_powers.json";
 const COMMAND_FILE: &str = "m182_command.request";
-const TRAIL_FILE: &str = "m182_trail.csv";
 const VK_SPACE: i32 = 0x20;
 const VK_LCONTROL: i32 = 0xA2;
 
@@ -150,8 +149,6 @@ pub(super) fn game_has_focus() -> bool {
 fn key_loop() {
     let mut was_down = [false; 5];
     let mut ticks = 0u32;
-    let mut last_report = Instant::now();
-    let mut last_pos: Option<(i64, i64, i64)> = None;
     let mut file_pos: Option<(i64, i64, i64)> = None;
     let mut last_file = Instant::now();
     loop {
@@ -210,22 +207,6 @@ fn key_loop() {
                     }
                     file_pos = Some(pos);
                     write_position(pos);
-                    record_trail(pos);
-                }
-            }
-        }
-        if last_report.elapsed() >= Duration::from_secs(4) {
-            last_report = Instant::now();
-            if let Some(t) = player_transform() {
-                let pos = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
-                if last_pos != Some(pos) {
-                    last_pos = Some(pos);
-                    log(&format!(
-                        "player position x={:.2} y={:.2} z={:.2}",
-                        pos.0 as f64 / METERS,
-                        pos.1 as f64 / METERS,
-                        pos.2 as f64 / METERS
-                    ));
                 }
             }
         }
@@ -1986,8 +1967,6 @@ struct PowerState {
     groups: GroupState,
     saved: HashMap<(usize, u32), Saved>,
     zone_ids: Vec<u32>,
-    diag_left: u32,
-    diag_last: Option<Instant>,
     spawners: SpawnerSet,
     buffs_seen: Vec<u32>,
     client_powers: HashMap<u32, ClientPowers>,
@@ -2637,7 +2616,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         if let Ok(mut last) = PVP_ZONE_STATE.lock() {
             if *last != state {
                 log(&format!("zones: {state}"));
-                super::diag::line(&format!("zones: {state}"));
                 *last = state;
             }
         }
@@ -2803,31 +2781,6 @@ pub fn roster_line(seq: u32, client: u32) -> String {
         (asking, [le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS])
     });
     super::roster::reply_text_with_own(seq, &entries, own)
-}
-
-fn record_trail(pos: (i64, i64, i64)) {
-    static LAST: Mutex<Option<(f64, f64)>> = Mutex::new(None);
-    let x = pos.0 as f64 / METERS;
-    let z = pos.2 as f64 / METERS;
-    let Ok(mut last) = LAST.lock() else { return };
-    if let Some((lx, lz)) = *last {
-        if ((x - lx).powi(2) + (z - lz).powi(2)).sqrt() < 6.0 {
-            return;
-        }
-    }
-    let Ok(dir) = std::env::current_dir() else { return };
-    let path = dir.join(TRAIL_FILE);
-    if std::fs::metadata(&path).map(|m| m.len() > 8_000_000).unwrap_or(false) {
-        return;
-    }
-    let fresh = !path.exists();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        if fresh {
-            let _ = writeln!(f, "x,y,z");
-        }
-        let _ = writeln!(f, "{:.0},{:.0},{:.0}", x, pos.1 as f64 / METERS, z);
-        *last = Some((x, z));
-    }
 }
 
 fn key_down(vk: i32) -> bool {
@@ -3032,34 +2985,6 @@ fn set_client_position(old: &[u8], pos: [Option<i64>; 3]) -> usize {
     count
 }
 
-fn diagnostics(st: &mut PowerState, manager: usize, id: u32, client: Option<(usize, u32)>) {
-    if st.diag_left == 0 {
-        return;
-    }
-    let now = Instant::now();
-    if st.diag_last.map(|t| now.duration_since(t) < Duration::from_secs(20)).unwrap_or(false) {
-        return;
-    }
-    st.diag_last = Some(now);
-    st.diag_left -= 1;
-    for (label, m, i) in [("server", manager, id)].into_iter().chain(client.map(|(m, i)| ("client", m, i))) {
-        let stamina = resource(m, i, 1, STAMINA_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
-        let heat = resource(m, i, 4, BODY_HEAT_SIGNATURE).map(|(_, b)| hex(&b[8..40])).unwrap_or_default();
-        log(&format!("diag {label}: stamina={stamina} heat={heat}"));
-        if let Some(p) = find_record(m, i).and_then(placement) {
-            let mut small = Vec::new();
-            for index in 0..COMPONENT_SLOTS {
-                if let Some((addr, 4)) = component_address(&p, index) {
-                    if let Some(b) = read_bytes(addr, 4) {
-                        small.push(format!("{index}:{}", hex(&b)));
-                    }
-                }
-            }
-            log(&format!("diag {label}: 4-byte components {}", small.join(" ")));
-        }
-    }
-}
-
 static CLIENT_GONE_MS: AtomicU32 = AtomicU32::new(12_000);
 
 pub fn set_client_gone_ms(ms: u32) {
@@ -3143,8 +3068,8 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
     }
 }
 
-pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
-    if tick % 10 == 0 {
+pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
+    if poll {
         refresh_powers(st, dir);
         if SERVER_MGR.load(Ordering::SeqCst) != 0 {
             refresh_client_powers(st, dir);
@@ -3218,7 +3143,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32) {
             refill_mana(m, c, &mut st.mana_peak_c);
             refill_stamina(m, c, &mut st.stamina_peak_c);
         }
-        diagnostics(st, manager, id, client);
     }
     if st.powers.fly {
         if !st.gravity_off {
@@ -3311,8 +3235,6 @@ pub fn new_power_state() -> PowerState {
         groups: GroupState::new(),
         saved: HashMap::new(),
         zone_ids: Vec::new(),
-        diag_left: 12,
-        diag_last: None,
         spawners: SpawnerSet::default(),
         buffs_seen: Vec::new(),
         client_powers: HashMap::new(),
@@ -3357,243 +3279,6 @@ fn verify_pickup(manager: usize, id: u32, g: &GiveSpec) {
         }
     }
     log(&format!("delivery: item {} requested; the pickup entity {id} was created", g.item));
-}
-
-pub fn start_data_patch() {
-    let Ok(dir) = std::env::current_dir() else { return };
-    if let Err(e) = std::thread::Builder::new().name("m182-datapatch".into()).spawn(move || data_patch_worker(dir)) {
-        log(&format!("data patch: could not start the worker: {e}"));
-    }
-}
-
-fn region_of(addr: usize) -> Option<(usize, usize, u32, u32)> {
-    let mut info = MemInfo::default();
-    let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
-    if n == 0 || info.state != 0x1000 {
-        return None;
-    }
-    Some((info.base, info.alloc_base, info.protect, info.kind))
-}
-
-fn own_image() -> (usize, usize) {
-    let Some((_, alloc, _, _)) = region_of(data_patch_worker as usize) else { return (0, 0) };
-    let mut end = alloc;
-    let mut addr = alloc;
-    for _ in 0..4096 {
-        let mut info = MemInfo::default();
-        let n = unsafe { VirtualQuery(addr as *const c_void, &mut info, std::mem::size_of::<MemInfo>()) };
-        if n == 0 || info.alloc_base != alloc || info.size == 0 {
-            break;
-        }
-        end = info.base + info.size;
-        addr = end;
-    }
-    (alloc, end)
-}
-
-fn write_forced(addr: usize, data: &[u8]) -> bool {
-    let verify = |d: &[u8]| read_bytes(addr, d.len()).map(|b| b == d).unwrap_or(false);
-    if write_bytes(addr, data) && verify(data) {
-        return true;
-    }
-    let mut old = 0u32;
-    let changed = unsafe { VirtualProtect(addr as *mut c_void, data.len(), 0x40, &mut old) } != 0;
-    let wrote = write_bytes(addr, data) && verify(data);
-    if changed {
-        let mut ignore = 0u32;
-        unsafe { VirtualProtect(addr as *mut c_void, data.len(), old, &mut ignore) };
-    }
-    wrote
-}
-
-fn kind_name(kind: u32) -> &'static str {
-    match kind {
-        0x20000 => "private",
-        0x40000 => "mapped",
-        0x100_0000 => "image",
-        _ => "other",
-    }
-}
-
-fn latest_eml_log(dir: &std::path::Path) -> Option<String> {
-    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("logs"))
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|x| x == "log").unwrap_or(false))
-        .collect();
-    names.sort();
-    names.pop().and_then(|p| std::fs::read_to_string(p).ok())
-}
-
-fn data_patch_worker(dir: std::path::PathBuf) {
-    use super::datapatch as dp;
-    let csv_path = dir.join("export").join("m182_items.csv");
-    let mut waited = 0u32;
-    let csv = loop {
-        if let Ok(t) = std::fs::read_to_string(&csv_path) {
-            if t.lines().count() > 100 {
-                break t;
-            }
-        }
-        waited += 1;
-        if waited > 120 {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(5));
-    };
-    let json = std::fs::read_to_string(dir.join("m182_item_stats.json")).ok();
-    let lua = std::fs::read_to_string(dir.join("mods").join("zz_m182_item_stats").join("src").join("m182_data.lua")).ok();
-    let (stack_factor, _) = dp::factors(json.as_deref(), lua.as_deref());
-    let altar_factor = 1.0f64;
-    if stack_factor <= 1.0 && altar_factor <= 1.0 {
-        return;
-    }
-    let log_text = latest_eml_log(&dir);
-    let csv_scaled = dp::csv_is_scaled(&dp::csv_values(&csv), stack_factor, log_text.as_deref());
-    let items = dp::parse_items(&csv, stack_factor, csv_scaled);
-    if items.is_empty() {
-        log("data patch: the item list has no stackable items");
-        return;
-    }
-    let index = dp::GuidIndex::new(&items);
-    let own = (items.as_ptr() as usize, items.as_ptr() as usize + items.len() * std::mem::size_of::<dp::ItemRef>());
-    let image = own_image();
-    let scaled = dp::scaled_altars(altar_factor);
-    log(&format!(
-        "data patch: {} stackable items (list already multiplied: {csv_scaled}), stack factor {stack_factor}, altar factor {altar_factor}",
-        items.len()
-    ));
-
-    let delays = [15u64, 30, 45, 60, 90, 120, 180];
-    let mut pass = 0usize;
-    loop {
-        let wait = delays.get(pass).copied().unwrap_or(600);
-        std::thread::sleep(Duration::from_secs(wait));
-        pass += 1;
-        let started = Instant::now();
-        let mut found: Vec<dp::Found> = Vec::new();
-        let (mut altars_vanilla, mut altars_scaled): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
-        for (start, end) in readable_regions() {
-            let mut at = start;
-            while at < end {
-                let len = (end - at).min(4 << 20);
-                let take = (len + 32).min(end - at);
-                if let Some(buf) = read_bytes(at, take) {
-                    if stack_factor > 1.0 {
-                        index.scan(&buf, at, &items, &mut found);
-                    }
-                    if altar_factor > 1.0 {
-                        dp::altar_runs(&buf, at, &dp::VANILLA_ALTARS, &scaled, &mut altars_vanilla, &mut altars_scaled);
-                    }
-                }
-                at += len;
-            }
-        }
-        found.retain(|f| f.addr < own.0 || f.addr >= own.1);
-        found.sort_by_key(|f| (f.addr, f.item));
-        found.dedup();
-        let outside = |a: &usize| *a < image.0 || *a >= image.1;
-        altars_vanilla.sort_unstable();
-        altars_vanilla.dedup();
-        altars_vanilla.retain(outside);
-        altars_scaled.sort_unstable();
-        altars_scaled.dedup();
-        altars_scaled.retain(outside);
-
-        if altar_factor > 1.0 {
-            let mut patched = 0usize;
-            let mut detail = Vec::new();
-            for addr in &altars_vanilla {
-                let ok = write_forced(*addr, &scaled);
-                if ok {
-                    patched += 1;
-                }
-                let (protect, kind) = region_of(*addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
-                detail.push(format!("{:#x} {} prot {:#x} {}", addr, kind_name(kind), protect, if ok { "patched" } else { "write refused" }));
-            }
-            log(&format!(
-                "data patch: pass {pass}: altar tables in memory: {} vanilla (patched {patched}), {} already scaled",
-                altars_vanilla.len(),
-                altars_scaled.len()
-            ));
-            for line in detail.iter().take(12) {
-                log(&format!("data patch: altar vanilla copy {line}"));
-            }
-            for addr in altars_scaled.iter().take(12) {
-                let (protect, kind) = region_of(*addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
-                log(&format!("data patch: altar scaled copy {:#x} {} prot {:#x}", addr, kind_name(kind), protect));
-            }
-        }
-
-        if stack_factor > 1.0 {
-            if found.is_empty() {
-                log(&format!("data patch: pass {pass}: no item record found in memory ({} ms)", started.elapsed().as_millis()));
-                continue;
-            }
-            let adjacent: Vec<dp::Found> = found.iter().copied().filter(|f| f.adj).collect();
-            let use_adjacent = adjacent.len() >= 30;
-            let pool: &[dp::Found] = if use_adjacent { &adjacent } else { &found };
-            let reader = |a: usize, n: usize| read_bytes(a, n);
-            match dp::vote_offset(pool, &items, &reader) {
-                None => {
-                    log(&format!(
-                        "data patch: pass {pass}: {} guid copies, {} with the item id right before, no common stack field",
-                        found.len(),
-                        adjacent.len()
-                    ));
-                    let mut shown = std::collections::HashSet::new();
-                    let mut count = 0;
-                    for f in pool.iter() {
-                        if count >= 8 {
-                            break;
-                        }
-                        if !shown.insert(f.item) {
-                            continue;
-                        }
-                        if let Some(w) = read_bytes(f.addr.saturating_sub(16), 128) {
-                            let (protect, kind) = region_of(f.addr).map(|r| (r.2, r.3)).unwrap_or((0, 0));
-                            log(&format!(
-                                "data patch: sample item {} vanilla {} target {} at {:#x} ({} prot {:#x}), 16 bytes before the guid then 112: {}",
-                                items[f.item].id,
-                                items[f.item].vanilla,
-                                items[f.item].target,
-                                f.addr,
-                                kind_name(kind),
-                                protect,
-                                hex(&w)
-                            ));
-                            count += 1;
-                        }
-                    }
-                }
-                Some((offset, votes, sampled)) => {
-                    let (mut vanilla, mut already, mut other, mut patched) = (0usize, 0usize, 0usize, 0usize);
-                    for f in pool {
-                        let at = (f.addr as isize + offset) as usize;
-                        let Some(b) = read_bytes(at, 2) else { continue };
-                        let value = u16::from_le_bytes([b[0], b[1]]);
-                        let item = &items[f.item];
-                        match dp::classify(value, item) {
-                            0 => {
-                                vanilla += 1;
-                                if write_forced(at, &item.target.to_le_bytes()) {
-                                    patched += 1;
-                                }
-                            }
-                            1 => already += 1,
-                            _ => other += 1,
-                        }
-                    }
-                    log(&format!(
-                        "data patch: pass {pass}: stack field at {offset:+} ({votes} of {sampled} sampled{}); {} copies: {vanilla} vanilla (patched {patched}), {already} already scaled, {other} other ({} ms)",
-                        if use_adjacent { ", records with the item id before the guid" } else { "" },
-                        pool.len(),
-                        started.elapsed().as_millis()
-                    ));
-                }
-            }
-        }
-    }
 }
 
 pub fn data_regions() -> Vec<(usize, usize)> {
@@ -4871,19 +4556,32 @@ fn powers_loop() {
     let mut st = new_power_state();
     clear_client_power_files(&dir);
     let mut tick = 0u32;
+    let mut polled = Instant::now();
     loop {
-        let busy = st.powers.god
-            || st.powers.stamina
+        let urgent = st.powers.god
             || st.powers.fly
             || st.heal_once
             || !st.saved.is_empty()
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
-            || client_powers_busy(&st)
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
-        std::thread::sleep(Duration::from_millis(if busy { 1 } else { 25 }));
+        let busy = urgent || st.powers.stamina || client_powers_busy(&st);
+        let pause = if st.powers.fly {
+            1
+        } else if urgent {
+            4
+        } else if busy {
+            8
+        } else {
+            25
+        };
+        std::thread::sleep(Duration::from_millis(pause));
         tick = tick.wrapping_add(1);
-        power_tick(&mut st, &dir, tick);
+        let poll = polled.elapsed() >= Duration::from_millis(250);
+        if poll {
+            polled = Instant::now();
+        }
+        power_tick(&mut st, &dir, tick, poll);
     }
 }
 
