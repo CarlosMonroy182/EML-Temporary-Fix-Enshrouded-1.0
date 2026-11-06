@@ -538,28 +538,28 @@ extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usi
     call(context, costs, pay)
 }
 
-static RESOURCE_LOCK: [std::sync::atomic::AtomicU32; 2] =
-    [std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)];
+const LOCK_SLOTS: usize = 64;
+#[allow(clippy::declare_interior_mutable_const)]
+const LOCK_ZERO: AtomicUsize = AtomicUsize::new(0);
+static RESOURCE_LOCK: [AtomicUsize; LOCK_SLOTS] = [LOCK_ZERO; LOCK_SLOTS];
 static RESOURCE_TRAMPOLINE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 static RESOURCE_LOGGED: AtomicU64 = AtomicU64::new(0);
 
-pub fn set_resource_lock(server: u32, client: u32) {
-    RESOURCE_LOCK[0].store(server, Ordering::Relaxed);
-    RESOURCE_LOCK[1].store(client, Ordering::Relaxed);
+/// Addresses of the stamina and mana records that must not be spent. The game passes the record itself
+/// as the first argument, so the comparison is a plain address match.
+pub fn set_resource_lock(records: &[usize]) {
+    for (n, slot) in RESOURCE_LOCK.iter().enumerate() {
+        slot.store(records.get(n).copied().unwrap_or(0), Ordering::Relaxed);
+    }
 }
 
 extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usize, delta: i32, kind: u32) -> usize {
     if delta < 0 && (kind == super::spawner::STAMINA_SIGNATURE || kind == super::spawner::MANA_SIGNATURE) {
-        let who = entity as u32;
-        let locked = RESOURCE_LOCK.iter().any(|slot| {
-            let value = slot.load(Ordering::Relaxed);
-            value != 0 && value == who
-        });
-        if RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
+        let locked = chunk != 0 && RESOURCE_LOCK.iter().any(|slot| slot.load(Ordering::Relaxed) == chunk);
+        if !locked && RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
+            let known: Vec<usize> = RESOURCE_LOCK.iter().map(|s| s.load(Ordering::Relaxed)).filter(|a| *a != 0).collect();
             super::spawner::log(&format!(
-                "resource lock: copy {N} entity {who} type {kind:#x} delta {delta} -> {} (locked {:?})",
-                if locked { "not spent" } else { "spent" },
-                [RESOURCE_LOCK[0].load(Ordering::Relaxed), RESOURCE_LOCK[1].load(Ordering::Relaxed)]
+                "resource lock: copy {N} record {chunk:#x} type {kind:#x} delta {delta} was spent (locked records {known:x?})"
             ));
         }
         if locked {

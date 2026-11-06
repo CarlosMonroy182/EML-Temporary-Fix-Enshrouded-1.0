@@ -3039,10 +3039,65 @@ fn refresh_client_powers(st: &mut PowerState, dir: &std::path::Path) {
 }
 
 fn client_powers_busy(st: &PowerState) -> bool {
-    st.client_powers.values().any(|c| c.powers.god || c.powers.stamina || c.heal)
+    st.client_powers.values().any(|c| c.powers.god || c.heal)
 }
 
-fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
+fn client_stamina_on(st: &PowerState) -> bool {
+    st.client_powers.values().any(|c| c.powers.stamina)
+}
+
+fn lock_records(manager: usize, id: u32, out: &mut Vec<usize>) {
+    if let Some((addr, _)) = resource(manager, id, 1, STAMINA_SIGNATURE) {
+        out.push(addr);
+    }
+    if let Some((addr, _)) = resource(manager, id, 2, MANA_SIGNATURE) {
+        out.push(addr);
+    }
+}
+
+static LOCK_STATE: std::sync::Mutex<(Option<Instant>, Vec<usize>)> = std::sync::Mutex::new((None, Vec::new()));
+
+/// Keeps the game's stamina and mana records of the protected players registered with the spend hook.
+/// The records only move when an entity changes chunk, so a refresh every ~30 ms is plenty.
+fn refresh_resource_lock(st: &PowerState, manager: usize, id: u32, client: Option<(usize, u32)>, hosting: bool) {
+    let wanted = st.powers.stamina || (hosting && client_stamina_on(st));
+    let Ok(mut state) = LOCK_STATE.lock() else { return };
+    if !wanted {
+        if !state.1.is_empty() {
+            state.1.clear();
+            state.0 = None;
+            super::patch::set_resource_lock(&[]);
+            log("resource lock: released");
+        }
+        return;
+    }
+    if state.0.map(|t| t.elapsed() < Duration::from_millis(30)).unwrap_or(false) {
+        return;
+    }
+    state.0 = Some(Instant::now());
+    let mut records = Vec::new();
+    if st.powers.stamina {
+        lock_records(manager, id, &mut records);
+        if let Some((m, c)) = client {
+            lock_records(m, c, &mut records);
+        }
+    }
+    if hosting {
+        let server = SERVER_MGR.load(Ordering::SeqCst);
+        for (number, c) in &st.client_powers {
+            if c.powers.stamina {
+                lock_records(server, (number & 0x3f) + 1, &mut records);
+            }
+        }
+    }
+    if records != state.1 {
+        log(&format!("resource lock: protecting records {records:x?}"));
+        super::patch::set_resource_lock(&records);
+        state.1 = records;
+    }
+}
+
+fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32, poll: bool) {
     let clients: Vec<u32> = st.client_powers.keys().copied().collect();
     for client in clients {
         let id = (client & 0x3f) + 1;
@@ -3059,11 +3114,13 @@ fn apply_client_powers(st: &mut PowerState, manager: usize, tick: u32) {
             refill_mana(manager, id, &mut c.mana_peak);
         }
         if c.powers.stamina {
-            if tick % 32 == 0 {
+            if tick % 2 == 0 {
                 cleanse_debuffs(manager, id, &mut c.seen);
             }
-            refill_stamina(manager, id, &mut c.stamina_peak);
-            refill_mana(manager, id, &mut c.mana_peak);
+            if poll {
+                refill_stamina(manager, id, &mut c.stamina_peak);
+                refill_mana(manager, id, &mut c.mana_peak);
+            }
         }
     }
 }
@@ -3091,11 +3148,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         super::perf::time(super::perf::SPAWNERS, || spawners_tick(&mut st.spawners, dir));
     }
     let client = client_pair();
-    if st.powers.stamina {
-        super::patch::set_resource_lock(id, client.map(|pair| pair.1).unwrap_or(0));
-    } else {
-        super::patch::set_resource_lock(0, 0);
-    }
+    refresh_resource_lock(st, manager, id, client, hosting);
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
@@ -3125,7 +3178,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
     }
     super::perf::time(super::perf::SHIELD, || shield_tick(st, &want));
     if hosting {
-        apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick);
+        apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick, poll);
     }
     if st.heal_once {
         refill_health(manager, id);
@@ -3141,14 +3194,16 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         }
     }
     if st.powers.stamina {
-        if tick % 32 == 0 {
+        if tick % 2 == 0 {
             cleanse_debuffs(manager, id, &mut st.buffs_seen);
         }
-        refill_stamina(manager, id, &mut st.stamina_peak);
-        refill_mana(manager, id, &mut st.mana_peak);
-        if let Some((m, c)) = client {
-            refill_mana(m, c, &mut st.mana_peak_c);
-            refill_stamina(m, c, &mut st.stamina_peak_c);
+        if poll {
+            refill_stamina(manager, id, &mut st.stamina_peak);
+            refill_mana(manager, id, &mut st.mana_peak);
+            if let Some((m, c)) = client {
+                refill_mana(m, c, &mut st.mana_peak_c);
+                refill_stamina(m, c, &mut st.stamina_peak_c);
+            }
         }
     }
     if st.powers.fly {
@@ -4573,10 +4628,12 @@ fn powers_loop() {
             || !st.zone_ids.is_empty()
             || !st.groups.zones.is_empty()
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
-        let pause = if st.powers.fly || st.powers.stamina || client_powers_busy(&st) {
+        let pause = if st.powers.fly || client_powers_busy(&st) {
             1
         } else if urgent {
             4
+        } else if st.powers.stamina || client_stamina_on(&st) {
+            16
         } else {
             25
         };

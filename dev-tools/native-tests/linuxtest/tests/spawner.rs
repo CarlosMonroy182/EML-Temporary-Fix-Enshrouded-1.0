@@ -521,24 +521,24 @@ fn power_tick_reads_files_and_applies_toggles() {
 
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":true,"stamina":true,"fly":false}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(word(&w, health_at, 8), 2073);
     assert_eq!(word(&w, stamina_at, 8), 720);
     w.chunk[stamina_at + 8..stamina_at + 12].copy_from_slice(&100u32.to_le_bytes());
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(word(&w, stamina_at, 8), 720);
-    spawner::power_tick(&mut st, &dir, 25, 25 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 25, true);
     assert_eq!(word(&w, fog_at, 0), 404);
 
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":false,"stamina":false}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":false,"stamina":false,"fly_speed":5}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 50, 50 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 50, true);
     assert_eq!(word(&w, fog_at, 0), 404);
 
     put(&mut w.chunk, health_at, &resource_bytes(0x8eb8_4995, [5, 0, 1200, 873, 100, 800, 45, 2073]));
     std::fs::write(dir.join("m182_command.request"), r#"{"cmd":"heal"}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 70, 70 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 70, true);
     assert_eq!(word(&w, health_at, 8), 2073);
 
     let _ = std::fs::remove_dir_all(dir);
@@ -601,23 +601,23 @@ fn fly_keeps_height_and_switches_gravity_off_and_back() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"fly":true,"fly_speed":30}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(w.chunk[grav_at + 16], 0);
     let main_at = 0x200 + 56 * 3;
     assert_eq!(i64_at(&w, main_at, 8), 20 << 32);
     // the game pulls the player down; the next tick puts the height back
     put(&mut w.chunk, main_at + 8, &((20i64 << 32) - 5_000_000).to_le_bytes());
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(i64_at(&w, main_at, 8), 20 << 32);
     // natural horizontal movement is amplified
     let x0 = i64_at(&w, main_at, 0);
     put(&mut w.chunk, main_at, &(x0 + (METER / 10)).to_le_bytes());
-    spawner::power_tick(&mut st, &dir, 2, 2 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 2, true);
     assert!(i64_at(&w, main_at, 0) > x0 + METER / 10 * 2);
     std::fs::write(dir.join("m182_powers.json"), r#"{"fly":false}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
     std::fs::write(dir.join("m182_powers.json"), r#"{"fly":false,"fly_speed":5}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 10, 10 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 10, true);
     assert_eq!(w.chunk[grav_at + 16], 1);
 }
 
@@ -648,14 +648,14 @@ fn fly_forces_the_flying_locomotion_state_and_leaves_other_components_alone() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"fly":true,"fly_speed":10}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(w.chunk[loco_at + 89], 3);
     assert_eq!(w.chunk[loco_at + 90], 3);
     assert_eq!(w.chunk[net_at + 36], 3);
     // the game decides "falling" again on its next frame
     w.chunk[loco_at + 89] = 2;
     w.chunk[net_at + 36] = 2;
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(w.chunk[loco_at + 89], 3);
     assert_eq!(w.chunk[net_at + 36], 3);
     assert_eq!(w.chunk[loco_at + 225], 0);
@@ -680,7 +680,7 @@ fn fly_ignores_components_that_do_not_look_like_locomotion() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"fly":true,"fly_speed":10}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(w.chunk[loco_at + 89], 200);
     assert_eq!(w.chunk[loco_at + 90], 0x77);
 }
@@ -744,7 +744,7 @@ fn zones_heal_players_inside_and_teams_map_faction_bytes() {
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Base","x":200,"z":200,"radius":20}]}"#).unwrap();
     std::fs::write(dir.join("m182_teams.json"), r#"{"teams":[{"name":"A","members":[1]}]}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(word(&w, health_at, 8), 500);
     let players = std::fs::read_to_string(dir.join("m182_players.json")).unwrap();
     assert!(players.contains("\"n\":1") && players.contains("\"x\":10.0") && players.contains("\"z\":30.0"), "{players}");
@@ -753,7 +753,7 @@ fn zones_heal_players_inside_and_teams_map_faction_bytes() {
 
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Aqui","x":12,"z":28,"radius":10}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 8, 8 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 8, true);
     assert_eq!(word(&w, health_at, 8), 2073);
 
     groups::set_team_map(Vec::new());
@@ -798,7 +798,7 @@ fn teammates_get_a_shared_faction_and_lose_it_when_the_team_breaks_up() {
 
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_teams.json"), r#"{"teams":[{"name":"A","members":[1,2]}]}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(w.chunk[0x2100 + 3], 8);
     assert_eq!(w.chunk[0x2100 + 4], 8);
     assert!(!faction::enemy(8, 8, true));
@@ -806,18 +806,18 @@ fn teammates_get_a_shared_faction_and_lose_it_when_the_team_breaks_up() {
 
     std::fs::write(dir.join("m182_teams.json"), r#"{"teams":[{"name":"A","members":[1]}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 8, 8 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 8, true);
     assert_eq!(w.chunk[0x2100 + 3], 7);
     assert_eq!(w.chunk[0x2100 + 4], 7);
     assert!(faction::enemy(7, 7, true));
 
     std::fs::write(dir.join("m182_teams.json"), r#"{"teams":[{"name":"A","members":[1,2]}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 12, 12 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 12, true);
     assert_eq!(w.chunk[0x2100 + 3], 8);
     config::LIVE.apply(&config::NativeConfig { pvp: false, ..Default::default() });
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 16, 16 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 16, true);
     assert_eq!(w.chunk[0x2100 + 3], 7);
     assert_eq!(faction::team_mask(), 0);
 
@@ -872,7 +872,7 @@ fn god_mode_zeroes_damage_susceptibility_and_fall_damage_then_restores_them() {
 
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, susc_at, 8 + i * 4), 0.0, "slot {i}");
     }
@@ -882,11 +882,11 @@ fn god_mode_zeroes_damage_susceptibility_and_fall_damage_then_restores_them() {
 
     // the game recomputes a hit while shielded: the next tick zeroes it again
     put(&mut w.chunk, susc_at, &susceptibility_bytes(NORMAL));
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(f32_word(&w, susc_at, 12), 0.0);
 
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":false,"fly_speed":5}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 10, 10 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 10, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, susc_at, 8 + i * 4), NORMAL[i], "restored slot {i}");
     }
@@ -914,27 +914,27 @@ fn shield_never_keeps_half_written_values_as_the_original() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     // the game adds one effect on top of the zeroed values (not all zero, not the original either)
     let mut half = [0f32; 19];
     half[3] = 0.25;
     put(&mut w.chunk, susc_at, &susceptibility_bytes(half));
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 2, 2 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
+    spawner::power_tick(&mut st, &dir, 2, true);
     assert_eq!(f32_word(&w, susc_at, 8 + 3 * 4), 0.0);
     // and again with the shield switched off right after such a write
     put(&mut w.chunk, susc_at, &susceptibility_bytes(half));
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":false,"fly_speed":5}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 10, 10 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 10, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, susc_at, 8 + i * 4), NORMAL[i], "restored slot {i}");
     }
     // a second activation cycle behaves the same
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 20, 20 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 20, true);
     assert_eq!(f32_word(&w, susc_at, 12), 0.0);
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":false,"fly_speed":6}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 30, 30 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 30, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, susc_at, 8 + i * 4), NORMAL[i], "second cycle slot {i}");
     }
@@ -963,21 +963,21 @@ fn safe_zone_shields_only_the_players_inside() {
     let mut st = spawner::new_power_state();
 
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Far","x":900,"z":900,"radius":20}]}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(f32_word(&w, susc_at, 12), 1.0);
     assert_eq!(word(&w, health_at, 8), 500);
 
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Here","x":12,"z":28,"radius":10}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 8, 8 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 9, 9 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 8, true);
+    spawner::power_tick(&mut st, &dir, 9, true);
     assert_eq!(f32_word(&w, susc_at, 12), 0.0);
     assert_eq!(word(&w, health_at, 8), 2073);
 
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Far","x":900,"z":900,"radius":20}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 12, 12 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 13, 13 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 12, true);
+    spawner::power_tick(&mut st, &dir, 13, true);
     assert_eq!(f32_word(&w, susc_at, 12), 1.0);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -998,9 +998,9 @@ fn a_limit_the_game_lowers_is_followed_not_fought() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     put(&mut w.chunk, stamina_at, &resource_bytes(0x04b6_aa8b, [300, 0, 300, 2000, 500, 107, 400, 0]));
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(word(&w, stamina_at, 8), 400);
     assert_eq!(word(&w, stamina_at, 16), 400);
     assert_eq!(word(&w, stamina_at, 32), 400);
@@ -1109,7 +1109,7 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
     let mut st = spawner::new_power_state();
 
     // first tick: the creature is requested; the game thread creates it on its next entity creation
-    spawner::power_tick(&mut st, &dir, 16, 16 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 16, true);
     assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
     spawner::before(mgr, 7);
     {
@@ -1120,12 +1120,12 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
         assert_eq!(x, 100i64 << 32);
     }
     std::thread::sleep(std::time::Duration::from_millis(2100));
-    spawner::power_tick(&mut st, &dir, 32, 32 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 32, true);
     let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
     assert!(status.contains("\"id\":\"s1\"") && status.contains("\"alive\":1"), "{status}");
     // alive: nothing else is requested
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    spawner::power_tick(&mut st, &dir, 48, 48 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 48, true);
     assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 0);
 
     // it dies: after three bad readings it counts as gone, then the respawn time starts
@@ -1135,7 +1135,7 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
         spawner::power_tick(&mut st, &dir, tick, tick % 10 == 0);
     }
     std::thread::sleep(std::time::Duration::from_millis(2100));
-    spawner::power_tick(&mut st, &dir, 112, 112 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 112, true);
     let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
     assert!(status.contains("\"alive\":0"), "{status}");
     assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1, "the respawn time (1 s) has passed");
@@ -1145,7 +1145,7 @@ fn spawner_creates_waits_and_respawns_after_a_death() {
     // removing the spawner from the file removes it from the status
     std::fs::write(dir.join("m182_spawners.json"), r#"{"spawners":[]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2100));
-    spawner::power_tick(&mut st, &dir, 128, 128 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 128, true);
     let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
     assert!(!status.contains("s1"), "{status}");
     let _ = std::fs::remove_dir_all(dir);
@@ -1182,7 +1182,7 @@ fn spawners_are_created_only_when_a_player_is_near() {
     .unwrap();
     let mut st = spawner::new_power_state();
 
-    spawner::power_tick(&mut st, &dir, 16, 16 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 16, true);
     assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
     spawner::before(mgr, 7);
     {
@@ -1191,7 +1191,7 @@ fn spawners_are_created_only_when_a_player_is_near() {
         assert_eq!(i64::from_le_bytes(seen[0].3[4..12].try_into().unwrap()), 10i64 << 32);
     }
     std::thread::sleep(std::time::Duration::from_millis(2100));
-    spawner::power_tick(&mut st, &dir, 32, 32 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 32, true);
     let status = std::fs::read_to_string(dir.join("m182_spawner_status.json")).unwrap();
     assert!(status.contains("\"id\":\"far\"") && status.contains("sin jugadores cerca"), "{status}");
     assert!(status.contains("\"id\":\"near\"") && status.contains("\"alive\":1"), "{status}");
@@ -1200,7 +1200,7 @@ fn spawners_are_created_only_when_a_player_is_near() {
     // the player walks to the far spawner: it is created now
     put(&mut w.chunk, 0x200 + 56 * 3, &transform(1030i64 << 32, 5i64 << 32, 2020i64 << 32));
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    spawner::power_tick(&mut st, &dir, 48, 48 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 48, true);
     assert_eq!(spawner::PENDING.load(Ordering::SeqCst), 1);
     spawner::before(mgr, 7);
     {
@@ -1315,14 +1315,14 @@ fn on_screen_stamina_copy_is_never_touched() {
     spawner::CLIENT_PLAYER_ID.store(1, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
+    spawner::power_tick(&mut st, &dir, 1, true);
     let cur = u16::from_le_bytes([client.chunk[net_at], client.chunk[net_at + 1]]);
     assert_eq!(cur, 930, "the copy on screen is left to the game");
     assert_eq!(&client.chunk[float_at..float_at + 4], &1.0f32.to_le_bytes(), "other 4-byte components stay untouched");
     assert_eq!(word(&server, 0x1a00 + 40 * 3, 8), 1000, "the value is held where it was, not pushed up");
     server.chunk[0x1a00 + 40 * 3 + 8..0x1a00 + 40 * 3 + 12].copy_from_slice(&600u32.to_le_bytes());
-    spawner::power_tick(&mut st, &dir, 2, 2 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 2, true);
     assert_eq!(word(&server, 0x1a00 + 40 * 3, 8), 1000, "a drain is undone");
     assert_eq!(u16::from_le_bytes([client.chunk[net_at], client.chunk[net_at + 1]]), 930);
     spawner::CLIENT_MGR.store(0, Ordering::SeqCst);
@@ -1381,12 +1381,12 @@ fn stamina_follows_the_limit_the_game_sets_under_a_state_instead_of_fighting_it(
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(word(&w, at, 8), 631, "refilled to the limit the state leaves, never above it");
     assert_eq!(word(&w, at, 16), 631);
     put(&mut w.chunk, at + 36, &307i32.to_le_bytes());
     w.chunk[at + 8..at + 12].copy_from_slice(&100u32.to_le_bytes());
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
     assert_eq!(word(&w, at, 8), 1027, "a food bonus raises the limit");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1423,7 +1423,7 @@ fn infinite_stamina_cleanses_debuffs_but_never_foods_or_unknown_layouts() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(w.chunk[0x2000 + 240 + 8], 1, "first debuff is cleansed");
     assert_eq!(w.chunk[0x2000 + 240 + 3 * 12 + 8], 1, "fourth debuff is cleansed");
     assert_eq!(w.chunk[0x2000 + 8], 0, "food buffs stay");
@@ -1432,7 +1432,7 @@ fn infinite_stamina_cleanses_debuffs_but_never_foods_or_unknown_layouts() {
     let mut odd = buff_container(&[(1, 5, 0)]);
     odd[240 + 12 + 8] = 7;
     put(&mut w.chunk, 0x2000, &odd);
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(w.chunk[0x2000 + 240 + 12 + 8], 7, "an unrecognised layout is left alone");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1452,7 +1452,7 @@ fn stamina_is_held_at_the_limit_even_if_it_was_switched_on_while_drained() {
     spawner::TRANSFORM_INDEX.store(5, Ordering::SeqCst);
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(word(&w, 0x1a00, 8), 720);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1480,7 +1480,7 @@ fn players_inside_a_safe_zone_get_a_short_lived_aura_effect() {
     SEEN.lock().unwrap().clear();
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Here","x":12,"z":28,"radius":10}]}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     spawner::before(mgr, 7);
     {
         let seen = SEEN.lock().unwrap();
@@ -1490,11 +1490,11 @@ fn players_inside_a_safe_zone_get_a_short_lived_aura_effect() {
         assert_eq!(x, 10i64 << 32);
     }
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 8, 8 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 8, true);
     spawner::before(mgr, 7);
     assert_eq!(SEEN.lock().unwrap().len(), 1, "the effect is repeated every few seconds, not on every tick");
     std::thread::sleep(std::time::Duration::from_millis(3100));
-    spawner::power_tick(&mut st, &dir, 12, 12 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 12, true);
     spawner::before(mgr, 7);
     {
         let seen = SEEN.lock().unwrap();
@@ -1504,7 +1504,7 @@ fn players_inside_a_safe_zone_get_a_short_lived_aura_effect() {
 
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Far","x":900,"z":900,"radius":20}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 16, 16 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 16, true);
     spawner::before(mgr, 7);
     assert_eq!(SEEN.lock().unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(dir);
@@ -1618,7 +1618,7 @@ fn powers_sent_by_a_chat_client_apply_to_that_players_entity_only() {
 
     // chat client 65 is the second player of the world (entity 2)
     std::fs::write(dir.join("m182_powers_65.json"), r#"{"god":true,"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, u2, 8 + i * 4), 0.0, "the sender is immune");
         assert_eq!(f32_word(&w, u1, 8 + i * 4), NORMAL[i], "the other player is untouched");
@@ -1632,8 +1632,8 @@ fn powers_sent_by_a_chat_client_apply_to_that_players_entity_only() {
     std::fs::write(dir.join("m182_powers_65.json"), r#"{"god":false,"stamina":false}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
     std::fs::write(dir.join("m182_powers_65.json"), r#"{"god":false,"stamina":false,"fly_speed":5}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 10, 10 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 11, 11 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 10, true);
+    spawner::power_tick(&mut st, &dir, 11, true);
     for i in 0..19 {
         assert_eq!(f32_word(&w, u2, 8 + i * 4), NORMAL[i], "restored {i}");
     }
@@ -1669,7 +1669,7 @@ fn a_game_connected_to_a_server_controls_the_character_on_screen() {
 
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_powers.json"), r#"{"god":true,"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert_eq!(f32_word(&w, u, 12), 0.0);
     assert_eq!(word(&w, h, 8), 2073);
     assert!(word(&w, s, 8) >= 100);
@@ -1714,7 +1714,7 @@ fn a_base_zone_turns_everybody_outside_its_team_into_a_visitor() {
         r#"{"zones":[{"name":"Base de Ana","x":12,"z":32,"radius":20,"safe":false,"team":1,"lock":true}]}"#,
     )
     .unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(perms(0), 0b10_0000, "Bob is a visitor: no chests, no building");
     assert_eq!(perms(1), 0b11_1110, "Ana belongs to the team that owns the place");
     assert!(st.zone_ids.is_empty(), "a base that is not a safe zone shields nobody");
@@ -1726,7 +1726,7 @@ fn a_base_zone_turns_everybody_outside_its_team_into_a_visitor() {
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 8, 8 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 8, true);
     assert_eq!(perms(0), 0b11_1110);
 
     // an administrator is only restricted when the zone says so
@@ -1734,7 +1734,7 @@ fn a_base_zone_turns_everybody_outside_its_team_into_a_visitor() {
     let mut admin = fake_table(&[(0, 128, 0b11_1111, "Bob"), (1, 65, 0b11_1110, "Ana")]);
     linuxtest::native::patch::PLAYERS_OBJECT.store(admin.as_mut_ptr() as usize, Ordering::SeqCst);
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 12, 12 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 12, true);
     assert_eq!(admin[0x1e0 + 0x10], 0b11_1111);
     std::fs::write(
         dir.join("m182_zones.json"),
@@ -1742,13 +1742,13 @@ fn a_base_zone_turns_everybody_outside_its_team_into_a_visitor() {
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 16, 16 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 16, true);
     assert_eq!(admin[0x1e0 + 0x10], 0b10_0001, "with the test switch even an administrator is a visitor");
 
     // leaving the zone gives everything back
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Lejos","x":900,"z":900,"radius":20,"safe":false,"team":1,"lock":true,"lock_admins":true}]}"#).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    spawner::power_tick(&mut st, &dir, 20, 20 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 20, true);
     assert_eq!(admin[0x1e0 + 0x10], 0b11_1111);
 
     linuxtest::native::patch::PLAYERS_OBJECT.store(0, Ordering::SeqCst);
@@ -1793,7 +1793,7 @@ fn every_connected_player_of_the_table_gets_tracked_and_a_late_joiner_becomes_a_
     let mut st = spawner::new_power_state();
     std::fs::write(dir.join("m182_zones.json"), r#"{"zones":[{"name":"Base","x":12,"z":32,"radius":20,"safe":false,"team":1,"lock":true}]}"#).unwrap();
     std::fs::write(dir.join("m182_teams.json"), r#"{"teams":[{"name":"Casa","members":[],"people":[{"key":"a","name":"bob"}]}]}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 4, 4 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 4, true);
     assert_eq!(perms(1), 0b10_0000, "Ana was never seen by the creation hook, she still loses the chests");
     assert_eq!(perms(0), 0b11_1111, "Bob owns the base");
 
@@ -1982,13 +1982,13 @@ fn powers_of_a_player_who_left_do_not_pass_to_the_next_one() {
     let mut st = spawner::new_power_state();
 
     std::fs::write(dir.join("m182_powers_66.json"), r#"{"god":true,"stamina":true}"#).unwrap();
-    spawner::power_tick(&mut st, &dir, 0, 0 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 0, true);
     assert!(dir.join("m182_powers_66.json").exists(), "still inside the grace period");
     std::thread::sleep(std::time::Duration::from_millis(120));
-    spawner::power_tick(&mut st, &dir, 1, 1 % 10 == 0);
-    spawner::power_tick(&mut st, &dir, 10, 10 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 1, true);
+    spawner::power_tick(&mut st, &dir, 10, true);
     assert!(!dir.join("m182_powers_66.json").exists(), "the entity is gone: its powers are dropped");
-    spawner::power_tick(&mut st, &dir, 20, 20 % 10 == 0);
+    spawner::power_tick(&mut st, &dir, 20, true);
     assert!(!dir.join("m182_powers_66.json").exists());
     spawner::set_client_gone_ms(12_000);
     spawner::SERVER_MGR.store(0, Ordering::SeqCst);
