@@ -481,7 +481,7 @@ unsafe extern "win64" fn stub_pay_costs() {
     );
 }
 
-static PAY_CALLERS: std::sync::Mutex<Vec<(usize, u8)>> = Mutex::new(Vec::new());
+static PAY_CALLERS: std::sync::Mutex<Vec<(usize, u8)>> = std::sync::Mutex::new(Vec::new());
 
 fn pay_caller_is_new(caller: usize, pay: u8) -> bool {
     let Ok(mut seen) = PAY_CALLERS.try_lock() else { return false };
