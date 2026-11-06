@@ -63,6 +63,7 @@ const ZERO32: AtomicU32 = AtomicU32::new(0);
 const ROW: [AtomicU32; THREADS] = [ZERO32; THREADS];
 
 static ON: AtomicBool = AtomicBool::new(false);
+static INJECT: AtomicBool = AtomicBool::new(false);
 static CALLS: [AtomicU64; SLOTS] = [ZERO; SLOTS];
 static SEEN: [[AtomicU32; THREADS]; SLOTS] = [ROW; SLOTS];
 static REPORT_AT: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +77,15 @@ pub fn set(on: bool) {
         START.get_or_init(Instant::now);
     }
     ON.store(on, Ordering::Relaxed);
+}
+
+pub fn set_inject(on: bool) {
+    INJECT.store(on, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn inject_on() -> bool {
+    INJECT.load(Ordering::Relaxed)
 }
 
 #[inline]

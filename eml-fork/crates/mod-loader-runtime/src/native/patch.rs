@@ -162,6 +162,7 @@ pub fn restricted_permissions() -> u64 {
 
 extern "win64" fn filter_permissions(entity: u32, permissions: u32, caller: usize) -> u32 {
     super::probe::hit(super::probe::PERMISSIONS);
+    super::outbox::pump();
     let bit = entity.wrapping_sub(1);
     let shown = if bit < 64 && PERMISSIONS_RESTRICTED.load(Ordering::Relaxed) >> bit & 1 != 0 {
         super::roster::visitor_permissions(permissions as u8) as u32
@@ -247,9 +248,9 @@ fn team_command(text: usize, message: &str, client: u32) -> u8 {
 
 static CHAT_SEEN: AtomicU64 = AtomicU64::new(0);
 
-extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize) -> u8 {
+extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize, client: usize, frame: usize) -> u8 {
     let key = LIVE.chat_key();
-    if super::probe::on() {
+    if super::probe::on() || super::probe::inject_on() {
         let head = super::spawn_probe::read_bytes(text, 16).unwrap_or_default();
         let length = super::spawn_probe::u64_at(&head, 8) as usize;
         let pointer = super::spawn_probe::u64_at(&head, 0) as usize;
@@ -258,6 +259,7 @@ extern "win64" fn hook_chat(out: usize, context: usize, kind: usize, text: usize
             && length <= 0x400
             && super::spawn_probe::read_bytes(pointer, length).is_some_and(|b| super::chat::has_prefix(&String::from_utf8_lossy(&b)));
         super::probe::chat(context, kind, length, ours, client);
+        super::outbox::capture(context, kind, frame, length, client);
     }
     if key.is_empty() {
         return 0;
@@ -339,6 +341,8 @@ unsafe extern "win64" fn stub_chat() {
         "movups [rsp + 0x80], xmm5",
         "mov eax, dword ptr [rsp + 0x100]",
         "mov dword ptr [rsp + 0x20], eax",
+        "lea rax, [rsp + 0xd0]",
+        "mov qword ptr [rsp + 0x28], rax",
         "call {f}",
         "movzx eax, al",
         "mov dword ptr [rsp + 0x28], eax",
@@ -878,7 +882,7 @@ fn install_build_zones(sections: &[&'static [u8]]) {
 }
 
 fn install_chat(sections: &[&'static [u8]]) {
-    if LIVE.chat_key().is_empty() && !super::probe::on() {
+    if LIVE.chat_key().is_empty() && !super::probe::on() && !super::probe::inject_on() {
         return;
     }
     let target = match find_unique(sections, &signatures::CHAT_ENQUEUE) {

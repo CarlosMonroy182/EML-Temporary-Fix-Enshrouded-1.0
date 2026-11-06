@@ -25,6 +25,9 @@ mod panel_host;
 mod pillar;
 
 #[cfg(windows)]
+mod outbox;
+
+#[cfg(windows)]
 mod patch;
 mod perf;
 mod probe;

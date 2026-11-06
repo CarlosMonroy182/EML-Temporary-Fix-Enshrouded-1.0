@@ -46,6 +46,8 @@ pub struct NativeConfig {
     pub client_build_anywhere: bool,
     /// Diagnostic: logs which thread calls each hooked game function and how often (off by default).
     pub thread_probe: bool,
+    /// Experimental: sends the lines left in `m182_chat_out.txt` through the game's own chat function.
+    pub chat_inject: bool,
 }
 
 impl Default for NativeConfig {
@@ -55,6 +57,7 @@ impl Default for NativeConfig {
             free_building: true,
             client_build_anywhere: true,
             thread_probe: false,
+            chat_inject: false,
             pvp: false,
             pvp_friend_checks: false,
             pvp_friendly_fire: false,
@@ -195,6 +198,7 @@ impl LiveState {
         self.free_building.store(cfg.enabled && cfg.free_building, Ordering::Relaxed);
         self.client_build_anywhere.store(cfg.enabled && cfg.client_build_anywhere, Ordering::Relaxed);
         super::probe::set(cfg.enabled && cfg.thread_probe);
+        super::probe::set_inject(cfg.enabled && cfg.chat_inject);
 
         let chat_key = cfg.chat_key.trim();
         let usable = cfg.enabled && super::chat::valid_key(chat_key);

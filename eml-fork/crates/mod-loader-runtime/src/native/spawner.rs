@@ -3188,6 +3188,7 @@ fn drain_requests(st: &mut PowerState, dir: &std::path::Path) {
 pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: bool) {
     drain_requests(st, dir);
     if poll {
+        super::outbox::poll(dir);
         super::perf::time(super::perf::POLL, || {
             refresh_powers(st, dir);
             if SERVER_MGR.load(Ordering::SeqCst) != 0 {
