@@ -105,6 +105,16 @@ pub static SAVE_SET: [u8; 29] = [
 
 pub const SAVE_SET_DISPLACED: usize = 16;
 
+/// Inside the per-player update (`0x73ad80`): the server sends the player's final save to the client in chunks of 0x2bc
+/// bytes. At this point `rbx` is the player object (`+0x110` data, `+0x118` length, `+0x108` already advanced) and `r13`
+/// the offset of the chunk about to be sent (0 for the first one). The first 17 bytes are whole, position independent
+/// instructions.
+pub static FINAL_CHUNK: [u8; 22] = [
+    0x4c, 0x8b, 0x83, 0x18, 0x01, 0x00, 0x00, 0x48, 0x8b, 0x8b, 0x10, 0x01, 0x00, 0x00, 0x49, 0x8b, 0xc0, 0x49, 0x2b, 0xc5, 0x4d, 0x3b,
+];
+
+pub const FINAL_CHUNK_DISPLACED: usize = 17;
+
 /// The server's and the game's building payment: `bool(context, costs, pay)`. The first byte of the
 /// context is the payment mode (0 = the player's inventory transaction at `+8`).
 pub static PAY_COSTS: [u8; 16] = [

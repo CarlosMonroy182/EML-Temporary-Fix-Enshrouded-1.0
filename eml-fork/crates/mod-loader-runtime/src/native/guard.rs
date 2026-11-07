@@ -32,6 +32,8 @@ static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static SET_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static DUMPS: AtomicUsize = AtomicUsize::new(0);
 static SET_CALLS: AtomicUsize = AtomicUsize::new(0);
+static FINAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+static FINAL_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 /// How many calls of the server-copy hook are described in detail in the log.
 const DIAG_CALLS: usize = 12;
 static MAX_DUMPS: AtomicUsize = AtomicUsize::new(20);
@@ -252,6 +254,12 @@ extern "win64" fn on_set_save(slot: usize, span_ptr: usize, extra: usize, player
         ));
     }
     let Some(blob) = blob else { return };
+    record_copy(player, state, blob, call);
+}
+
+/// Stores the character found in a save blob as the server's copy.
+fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) {
+    let diag = call < DIAG_CALLS;
     let hash = fnv1a(&blob);
     if let Ok(mut seen) = LAST_SEEN.lock() {
         if seen.get_or_insert_with(HashMap::new).insert(player, hash) == Some(hash) {
@@ -272,6 +280,30 @@ extern "win64" fn on_set_save(slot: usize, span_ptr: usize, extra: usize, player
     if changed && (before.is_none() || state >= FINAL_SAVE_STATE || before.as_deref().and_then(stats) != stats(character)) {
         log(&format!("server copy: player {player}, state {state}, character {}, {}, {} bytes", hex(&id), describe(character), character.len()));
     }
+}
+
+/// The server sends the final save of a leaving player to the client: its first chunk.
+extern "win64" fn on_final_chunk(player_obj: usize, offset: usize) {
+    if offset != 0 || player_obj == 0 {
+        return;
+    }
+    let Some(head) = read_mem(player_obj + 8, 8) else { return };
+    let player = u32_le(&head, 0);
+    let Some(vec) = read_mem(player_obj + 0x110, 0x10) else { return };
+    let (ptr, size) = (usize_le(&vec, 0), usize_le(&vec, 8));
+    let call = FINAL_CALLS.fetch_add(1, Ordering::SeqCst);
+    if ptr < 0x10000 || size < 0x30 || size > MAX_BLOB {
+        log(&format!("final save: player {player}, unreadable blob (ptr={ptr:#x}, size={size})"));
+        return;
+    }
+    let Some(blob) = read_mem(ptr, size) else {
+        log(&format!("final save: player {player}, blob not readable (size {size})"));
+        return;
+    };
+    if call < DIAG_CALLS {
+        log(&format!("final save: player {player}, {size} bytes, starts {}", hex(&blob[..blob.len().min(16)])));
+    }
+    record_copy(player, FINAL_SAVE_STATE, blob, call);
 }
 
 /// A client uploads its character when it joins.
@@ -353,6 +385,29 @@ macro_rules! entry_stub {
 entry_stub!(stub_probe, probe, TRAMPOLINE);
 entry_stub!(stub_set_save, on_set_save, SET_TRAMPOLINE);
 
+/// Hook in the middle of the per-player update: passes `rbx` and `r13` to the handler and keeps every register.
+#[unsafe(naked)]
+unsafe extern "win64" fn stub_final_chunk() {
+    core::arch::naked_asm!(
+        "push rsi", "push rax", "push rcx", "push rdx", "push r8", "push r9", "push r10", "push r11",
+        "mov rsi, rsp",
+        "and rsp, -16",
+        "sub rsp, 0xa0",
+        "movups [rsp + 0x20], xmm0", "movups [rsp + 0x30], xmm1", "movups [rsp + 0x40], xmm2",
+        "movups [rsp + 0x50], xmm3", "movups [rsp + 0x60], xmm4", "movups [rsp + 0x70], xmm5",
+        "mov rcx, rbx",
+        "mov rdx, r13",
+        "call {f}",
+        "movups xmm0, [rsp + 0x20]", "movups xmm1, [rsp + 0x30]", "movups xmm2, [rsp + 0x40]",
+        "movups xmm3, [rsp + 0x50]", "movups xmm4, [rsp + 0x60]", "movups xmm5, [rsp + 0x70]",
+        "mov rsp, rsi",
+        "pop r11", "pop r10", "pop r9", "pop r8", "pop rdx", "pop rcx", "pop rax", "pop rsi",
+        "jmp qword ptr [rip + {t}]",
+        f = sym on_final_chunk,
+        t = sym FINAL_TRAMPOLINE,
+    );
+}
+
 /// Builds the code that runs the displaced instructions and continues the original function.
 fn make_trampoline(target: *mut u8, displaced: usize) -> Option<usize> {
     let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 0x1000, 0x3000, 0x40) } as *mut u8;
@@ -402,7 +457,13 @@ pub(super) fn install(sections: &[&'static [u8]]) {
     MAX_DUMPS.store(cfg.max_dumps as usize, Ordering::SeqCst);
     let upload = hook(sections, &signatures::SAVE_DESERIALIZE, signatures::SAVE_DESERIALIZE_DISPLACED, &TRAMPOLINE, stub_probe as usize, "upload");
     let copy = hook(sections, &signatures::SAVE_SET, signatures::SAVE_SET_DISPLACED, &SET_TRAMPOLINE, stub_set_save as usize, "server copy");
-    log(&format!("guard: observe mode (upload hook {}, server copy hook {}); nothing is blocked", if upload { "on" } else { "off" }, if copy { "on" } else { "off" }));
+    let fin = hook(sections, &signatures::FINAL_CHUNK, signatures::FINAL_CHUNK_DISPLACED, &FINAL_TRAMPOLINE, stub_final_chunk as usize, "final save");
+    log(&format!(
+        "guard: observe mode (upload hook {}, server copy hook {}, final save hook {}); nothing is blocked",
+        if upload { "on" } else { "off" },
+        if copy { "on" } else { "off" },
+        if fin { "on" } else { "off" }
+    ));
 }
 
 #[cfg(test)]
