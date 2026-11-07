@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 
-use super::{patch, signatures};
+use super::{patch, roster, signatures};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -176,6 +176,74 @@ fn compare(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
+/// The server keeps the first part of the character (header, level, XP, progress); the last bytes of its copy are a trailer
+/// that the upload does not repeat.
+const COPY_TRAILER: usize = 5;
+
+/// The block of the character that holds time counters: it changes with every save, with or without play.
+const CLOCK_BLOCK: (usize, usize) = (512, 548);
+
+/// Progress rule: the uploaded character must start with the server's copy. `Err` carries the first differing byte.
+fn progress_rule(copy: &[u8], upload: &[u8]) -> Result<usize, usize> {
+    let n = copy.len().saturating_sub(COPY_TRAILER);
+    if upload.len() < n {
+        return Err(upload.len());
+    }
+    match (0..n).find(|i| copy[*i] != upload[*i] && !(CLOCK_BLOCK.0..CLOCK_BLOCK.1).contains(i)) {
+        Some(at) => Err(at),
+        None => Ok(n),
+    }
+}
+
+static ACCOUNTS: Mutex<Option<HashMap<String, [u8; 16]>>> = Mutex::new(None);
+
+fn accounts_path() -> Option<std::path::PathBuf> {
+    Some(guard_dir()?.join("accounts.txt"))
+}
+
+/// One character per account: `steamid:<digits> <character id>` per line.
+fn load_accounts() -> HashMap<String, [u8; 16]> {
+    let mut map = HashMap::new();
+    let Some(text) = accounts_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return map };
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(account), Some(id)) = (parts.next(), parts.next()) else { continue };
+        if id.len() == 32 {
+            let mut bytes = [0u8; 16];
+            let ok = (0..16).all(|i| u8::from_str_radix(&id[i * 2..i * 2 + 2], 16).map(|b| bytes[i] = b).is_ok());
+            if ok {
+                map.insert(account.to_string(), bytes);
+            }
+        }
+    }
+    map
+}
+
+/// Registers the account's character the first time and says whether a later join uses the same one.
+fn account_rule(account: &str, id: &[u8; 16]) -> String {
+    let Ok(mut guard) = ACCOUNTS.lock() else { return "account list busy".into() };
+    let map = guard.get_or_insert_with(load_accounts);
+    match map.get(account).copied() {
+        Some(known) if known == *id => format!("{account} uses its registered character"),
+        Some(known) => format!("WOULD REJECT: {account} is registered with character {} (second character)", hex(&known)),
+        None => {
+            map.insert(account.to_string(), *id);
+            if let Some(path) = accounts_path() {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(f, "{account} {}", hex(id));
+                }
+            }
+            format!("{account} registered with this character")
+        }
+    }
+}
+
+/// The platform id of the player the upload object belongs to.
+fn account_of(obj: usize) -> Option<String> {
+    let bytes = read_mem(obj, 0x400)?;
+    roster::guess_id(&bytes, &|p| read_mem(p, 0x40))
+}
+
 fn span(bytes: &[u8], at: usize) -> String {
     let from = at.saturating_sub(8);
     let to = (at + 16).min(bytes.len());
@@ -277,7 +345,7 @@ fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) {
     let before = server_copy(&id);
     remember(id, character, state);
     let changed = before.as_deref().map(|b| b != character).unwrap_or(true);
-    if changed && (before.is_none() || state >= FINAL_SAVE_STATE || before.as_deref().and_then(stats) != stats(character)) {
+    if changed && (before.is_none() || before.as_deref().and_then(stats) != stats(character)) {
         log(&format!("server copy: player {player}, state {state}, character {}, {}, {} bytes", hex(&id), describe(character), character.len()));
     }
 }
@@ -358,7 +426,18 @@ extern "win64" fn probe(_out: usize, obj: usize) {
             ),
         },
     };
-    log(&format!("join: player {player}, character {}, {}, {} bytes unpacked: {verdict} (header {header})", hex(&id), describe(character), character.len()));
+    let progress = match server_copy(&id) {
+        None => "progress: first time, accepted".to_string(),
+        Some(copy) => match progress_rule(&copy, character) {
+            Ok(n) => format!("progress: matches the server copy ({n} bytes)"),
+            Err(at) => format!("WOULD REJECT: progress differs from the server copy at byte {at} of {} (upload {})", copy.len().saturating_sub(COPY_TRAILER), describe(character)),
+        },
+    };
+    let account = match account_of(obj) {
+        Some(a) => account_rule(&a, &id),
+        None => "account: platform id not found".to_string(),
+    };
+    log(&format!("join: player {player}, character {}, {}, {} bytes unpacked: {verdict} (header {header}); {progress}; {account}", hex(&id), describe(character), character.len()));
 }
 
 macro_rules! entry_stub {
@@ -504,6 +583,22 @@ mod tests {
         assert_eq!((at, count), (16 + 16 + 20, 1));
         let longer = sample(22, 7).into_iter().chain([1]).collect::<Vec<u8>>();
         assert_eq!(compare(ca, character_bytes(&longer).unwrap()), Some((ca.len(), 1)));
+    }
+
+    #[test]
+    fn the_progress_rule_accepts_the_server_prefix_and_rejects_other_progress() {
+        let mut upload = sample(46, 7);
+        upload.resize(700, 3);
+        let mut copy = upload[..600].to_vec();
+        copy[596] = 9;
+        assert_eq!(progress_rule(&copy, &upload), Ok(595));
+        let mut richer = upload.clone();
+        richer[100] ^= 0xff;
+        assert_eq!(progress_rule(&copy, &richer), Err(100));
+        assert_eq!(progress_rule(&copy, &upload[..200]), Err(200));
+        let mut clock = upload.clone();
+        clock[520] ^= 0xff;
+        assert_eq!(progress_rule(&copy, &clock), Ok(595));
     }
 
     #[test]
