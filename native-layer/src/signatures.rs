@@ -95,6 +95,16 @@ pub static SAVE_DESERIALIZE: [u8; 35] = [
 
 pub const SAVE_DESERIALIZE_DISPLACED: usize = 15;
 
+/// The server's `setPlayerSave(slot, &{data, size}, state, player)`: it keeps the newest serialized copy of a
+/// connected character (`slot + 8` is the player number, `slot + 0xC` the save state: 4 final save sent, 5 acknowledged).
+/// The first 16 bytes are whole, position independent instructions.
+pub static SAVE_SET: [u8; 29] = [
+    0x44, 0x89, 0x4c, 0x24, 0x20, 0x55, 0x53, 0x41, 0x56, 0x48, 0x8b, 0xec, 0x48, 0x83, 0xec, 0x70, 0x48, 0x8b, 0xd9, 0x4d,
+    0x8b, 0xf0, 0x48, 0x83, 0xc1, 0x08, 0x44, 0x39, 0x09,
+];
+
+pub const SAVE_SET_DISPLACED: usize = 16;
+
 /// The server's and the game's building payment: `bool(context, costs, pay)`. The first byte of the
 /// context is the payment mode (0 = the player's inventory transaction at `+8`).
 pub static PAY_COSTS: [u8; 16] = [
