@@ -4682,6 +4682,23 @@ fn issue_spawn(rt: &SpawnerRt, need: u32) {
     PENDING.store(1, Ordering::SeqCst);
 }
 
+/// The character everything is placed next to is the first one that joined. When that player leaves
+/// while others stay, the next connected player takes over, so spawns keep working.
+pub fn keep_primary(manager: usize) {
+    if manager == 0 || manager != SERVER_MGR.load(Ordering::SeqCst) || TRANSFORM_INDEX.load(Ordering::SeqCst) < 0 {
+        return;
+    }
+    let current = PLAYER_ID.load(Ordering::SeqCst);
+    if current != 0 && transform_of(manager, current).is_some() {
+        return;
+    }
+    let candidates: Vec<u32> = TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default();
+    if let Some(next) = candidates.into_iter().find(|id| *id != current && transform_of(manager, *id).is_some()) {
+        PLAYER_ID.store(next, Ordering::SeqCst);
+        log(&format!("players: the main player (entity {current}) left, entity {next} takes over"));
+    }
+}
+
 fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
     let now = Instant::now();
     if set.last.map(|t| now.duration_since(t) < Duration::from_secs(1)).unwrap_or(false) {
@@ -4729,6 +4746,7 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
     }
 
     let manager = SERVER_MGR.load(Ordering::SeqCst);
+    keep_primary(manager);
     let ready_world = manager != 0 && player_transform().is_some();
     let positions = if manager != 0 { player_positions(manager) } else { Vec::new() };
     let busy = set.pending.is_some() || PENDING.load(Ordering::SeqCst) != 0 || REQUEST.lock().map(|r| r.is_some()).unwrap_or(true);
