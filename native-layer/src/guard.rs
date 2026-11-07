@@ -31,6 +31,9 @@ impl Default for GuardConfig {
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static SET_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static DUMPS: AtomicUsize = AtomicUsize::new(0);
+static SET_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// How many calls of the server-copy hook are described in detail in the log.
+const DIAG_CALLS: usize = 12;
 static MAX_DUMPS: AtomicUsize = AtomicUsize::new(20);
 
 const MAX_BLOB: usize = 8 * 1024 * 1024;
@@ -212,19 +215,43 @@ fn server_copy(id: &[u8; 16]) -> Option<Vec<u8>> {
 }
 
 /// The server updates the copy it keeps of a connected character: `(slot, &{data, size}, state, player)`.
-extern "win64" fn on_set_save(slot: usize, span_ptr: usize, _state: usize, _player: usize) {
+extern "win64" fn on_set_save(slot: usize, span_ptr: usize, extra: usize, player_arg: usize) {
+    let call = SET_CALLS.fetch_add(1, Ordering::SeqCst);
+    let diag = call < DIAG_CALLS;
     if slot == 0 || span_ptr == 0 {
+        if diag {
+            log(&format!("save call {call}: empty arguments (slot={slot:#x}, span={span_ptr:#x})"));
+        }
         return;
     }
     let Some(head) = read_mem(slot + 8, 8) else { return };
     let player = u32_le(&head, 0);
     let state = head[4];
-    let Some(pair) = read_mem(span_ptr, 16) else { return };
-    let (ptr, size) = (usize_le(&pair, 0), usize_le(&pair, 8));
-    if ptr == 0 || size < 0x30 || size > MAX_BLOB {
+    let Some(pair) = read_mem(span_ptr, 16) else {
+        if diag {
+            log(&format!("save call {call}: player {player}, state {state}, span {span_ptr:#x} not readable"));
+        }
         return;
+    };
+    let (a, b) = (usize_le(&pair, 0), usize_le(&pair, 8));
+    // The span can be {pointer, size}, {size, pointer} or {begin, end}; try each.
+    let blob = [(a, b), (b, a)]
+        .into_iter()
+        .filter(|(p, n)| *p > 0x10000 && *n >= 0x30 && *n <= MAX_BLOB)
+        .find_map(|(p, n)| read_mem(p, n))
+        .or_else(|| {
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            let n = hi.wrapping_sub(lo);
+            if lo > 0x10000 && (0x30..=MAX_BLOB).contains(&n) { read_mem(lo, n) } else { None }
+        });
+    if diag {
+        let first = blob.as_ref().map(|v| hex(&v[..v.len().min(24)])).unwrap_or_else(|| "none".into());
+        log(&format!(
+            "save call {call}: slot player {player}, state {state}, extra {extra:#x}, player arg {player_arg:#x}, span {a:#x} / {b:#x}, blob {}, starts {first}",
+            blob.as_ref().map(|v| v.len()).unwrap_or(0)
+        ));
     }
-    let Some(blob) = read_mem(ptr, size) else { return };
+    let Some(blob) = blob else { return };
     let hash = fnv1a(&blob);
     if let Ok(mut seen) = LAST_SEEN.lock() {
         if seen.get_or_insert_with(HashMap::new).insert(player, hash) == Some(hash) {
@@ -232,7 +259,12 @@ extern "win64" fn on_set_save(slot: usize, span_ptr: usize, _state: usize, _play
         }
     }
     let raw = unpack(&blob).unwrap_or(blob);
-    let Some(character) = character_bytes(&raw) else { return };
+    let Some(character) = character_bytes(&raw) else {
+        if diag {
+            log(&format!("save call {call}: player {player}, no S2BH header in {} bytes", raw.len()));
+        }
+        return;
+    };
     let Some(id) = character_id(character) else { return };
     let before = server_copy(&id);
     remember(id, character, state);
