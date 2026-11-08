@@ -4,7 +4,7 @@
 //! character: the upload a client sends when it joins, and the server's own update of the copy it keeps while the player
 //! plays. Configuration lives in its own file, `m182_guard.json`, so it never touches the panel or VFX.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Write;
 use std::sync::Mutex;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 
-use super::{patch, signatures, table};
+use super::{patch, signatures, spawner, table};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -229,6 +229,108 @@ fn account_rule(account: &str, id: &[u8; 16]) -> String {
     }
 }
 
+static CHAR_OF: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
+static CHECKED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+static INVENTORIES: Mutex<Option<HashMap<[u8; 16], Vec<(u32, u32, u32)>>>> = Mutex::new(None);
+
+fn set_character(player: u32, id: [u8; 16]) {
+    if let Ok(mut m) = CHAR_OF.lock() {
+        m.get_or_insert_with(HashMap::new).insert(player, id);
+    }
+}
+
+fn last_character(player: u32) -> Option<[u8; 16]> {
+    CHAR_OF.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&player).copied()))
+}
+
+/// Items summed per (item, instance): the same stacks in other slots are the same inventory.
+fn summed(items: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
+    let mut map: std::collections::BTreeMap<(u32, u32), u32> = std::collections::BTreeMap::new();
+    for (item, count, pide) in items {
+        *map.entry((*item, *pide)).or_insert(0) += *count;
+    }
+    map.into_iter().map(|((item, pide), count)| (item, count, pide)).collect()
+}
+
+/// What changed between two summed inventories, as text; empty when they are the same.
+fn inventory_diff(before: &[(u32, u32, u32)], now: &[(u32, u32, u32)]) -> String {
+    let value = |list: &[(u32, u32, u32)], item: u32, pide: u32| list.iter().find(|e| e.0 == item && e.2 == pide).map(|e| e.1 as i64).unwrap_or(0);
+    let mut keys: Vec<(u32, u32)> = before.iter().chain(now.iter()).map(|e| (e.0, e.2)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut parts = Vec::new();
+    for (item, pide) in keys {
+        let delta = value(now, item, pide) - value(before, item, pide);
+        if delta != 0 {
+            let tag = if pide != 0 { format!(" (instance {pide})") } else { String::new() };
+            parts.push(format!("{}{} x{}{}", if delta > 0 { "+" } else { "-" }, item, delta.abs(), tag));
+        }
+    }
+    let total = parts.len();
+    parts.truncate(10);
+    if total > 10 {
+        parts.push(format!("and {} more", total - 10));
+    }
+    parts.join(", ")
+}
+
+fn inventory_path(id: &[u8; 16]) -> Option<std::path::PathBuf> {
+    Some(guard_dir()?.join(format!("inv_{}.txt", hex(id))))
+}
+
+fn stored_inventory(id: &[u8; 16]) -> Option<Vec<(u32, u32, u32)>> {
+    if let Ok(m) = INVENTORIES.lock() {
+        if let Some(v) = m.as_ref().and_then(|m| m.get(id)) {
+            return Some(v.clone());
+        }
+    }
+    let text = std::fs::read_to_string(inventory_path(id)?).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|l| {
+                let mut p = l.split_whitespace().map(|x| x.parse::<u32>().ok());
+                Some((p.next()??, p.next()??, p.next()??))
+            })
+            .collect(),
+    )
+}
+
+fn store_inventory(id: &[u8; 16], items: &[(u32, u32, u32)]) {
+    if let Ok(mut m) = INVENTORIES.lock() {
+        m.get_or_insert_with(HashMap::new).insert(*id, items.to_vec());
+    }
+    if let Some(path) = inventory_path(id) {
+        let text: String = items.iter().map(|(i, c, p)| format!("{i} {c} {p}\n")).collect();
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// With every save the server sends: the first one of a session compares the inventory the server holds for the player
+/// with the one it held when the character last left; every one of them updates the stored inventory.
+fn inventory_check(player: u32, id: &[u8; 16]) {
+    let Some(entity) = table::entries().into_iter().find(|e| e.client == player).map(|e| e.entity()) else { return };
+    let Some(items) = spawner::inventory_items(entity) else { return };
+    let now = summed(&items);
+    let first = CHECKED.lock().map(|mut c| c.get_or_insert_with(HashSet::new).insert(player)).unwrap_or(false);
+    let before = stored_inventory(id);
+    if first {
+        match &before {
+            None => log(&format!("inventory: player {player}, character {}: first snapshot, {} kinds of item", hex(id), now.len())),
+            Some(prev) => {
+                let diff = inventory_diff(prev, &now);
+                if diff.is_empty() {
+                    log(&format!("inventory: player {player}, character {}: same as when it left ({} kinds of item)", hex(id), now.len()));
+                } else {
+                    log(&format!("inventory: WOULD REJECT: player {player}, character {} came back with a different inventory: {diff}", hex(id)));
+                }
+            }
+        }
+    }
+    if before.as_deref() != Some(&now) {
+        store_inventory(id, &now);
+    }
+}
+
 /// Joined players whose account was not known yet when they uploaded: player number -> character id.
 static PENDING: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
 
@@ -346,16 +448,16 @@ extern "win64" fn on_set_save(slot: usize, span_ptr: usize, extra: usize, player
         ));
     }
     let Some(blob) = blob else { return };
-    record_copy(player, state, blob, call);
+    let _ = record_copy(player, state, blob, call);
 }
 
 /// Stores the character found in a save blob as the server's copy.
-fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) {
+fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) -> Option<[u8; 16]> {
     let diag = call < DIAG_CALLS;
     let hash = fnv1a(&blob);
     if let Ok(mut seen) = LAST_SEEN.lock() {
         if seen.get_or_insert_with(HashMap::new).insert(player, hash) == Some(hash) {
-            return;
+            return None;
         }
     }
     let raw = unpack(&blob).unwrap_or(blob);
@@ -363,15 +465,17 @@ fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) {
         if diag {
             log(&format!("save call {call}: player {player}, no S2BH header in {} bytes", raw.len()));
         }
-        return;
+        return None;
     };
-    let Some(id) = character_id(character) else { return };
+    let Some(id) = character_id(character) else { return None };
+    set_character(player, id);
     let before = server_copy(&id);
     remember(id, character, state);
     let changed = before.as_deref().map(|b| b != character).unwrap_or(true);
     if changed && (before.is_none() || before.as_deref().and_then(stats) != stats(character)) {
         log(&format!("server copy: player {player}, state {state}, character {}, {}, {} bytes", hex(&id), describe(character), character.len()));
     }
+    Some(id)
 }
 
 /// The server sends the final save of a leaving player to the client: its first chunk.
@@ -396,7 +500,10 @@ extern "win64" fn on_final_chunk(player_obj: usize, offset: usize) {
         log(&format!("final save: player {player}, {size} bytes, starts {}", hex(&blob[..blob.len().min(16)])));
     }
     settle_account(player);
-    record_copy(player, FINAL_SAVE_STATE, blob, call);
+    let id = record_copy(player, FINAL_SAVE_STATE, blob, call).or_else(|| last_character(player));
+    if let Some(id) = id {
+        inventory_check(player, &id);
+    }
 }
 
 /// A client uploads its character when it joins.
@@ -435,6 +542,12 @@ extern "win64" fn probe(_out: usize, obj: usize) {
         log(&format!("upload: player {player}, character too short ({} bytes)", character.len()));
         return;
     };
+    set_character(player, id);
+    if let Ok(mut done) = CHECKED.lock() {
+        if let Some(set) = done.as_mut() {
+            set.remove(&player);
+        }
+    }
     let header = hex(&character[..character.len().min(32)]);
     let verdict = match server_copy(&id) {
         None => "no server copy yet (first time this server sees the character)".to_string(),
@@ -605,6 +718,16 @@ mod tests {
         assert_eq!((at, count), (16 + 16 + 20, 1));
         let longer = sample(22, 7).into_iter().chain([1]).collect::<Vec<u8>>();
         assert_eq!(compare(ca, character_bytes(&longer).unwrap()), Some((ca.len(), 1)));
+    }
+
+    #[test]
+    fn inventories_are_summed_and_compared_by_item() {
+        let a = summed(&[(7, 10, 0), (7, 5, 0), (9, 1, 40)]);
+        assert_eq!(a, vec![(7, 15, 0), (9, 1, 40)]);
+        let b = summed(&[(9, 1, 40), (7, 15, 0)]);
+        assert_eq!(inventory_diff(&a, &b), "");
+        let c = summed(&[(7, 75, 0)]);
+        assert_eq!(inventory_diff(&a, &c), "+7 x60, -9 x1 (instance 40)");
     }
 
     #[test]
