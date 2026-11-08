@@ -287,14 +287,15 @@ fn stored_inventory(id: &[u8; 16]) -> Option<Vec<(u32, u32, u32)>> {
         }
     }
     let text = std::fs::read_to_string(inventory_path(id)?).ok()?;
-    Some(
-        text.lines()
+    Some(summed(
+        &text
+            .lines()
             .filter_map(|l| {
                 let mut p = l.split_whitespace().map(|x| x.parse::<u32>().ok());
                 Some((p.next()??, p.next()??, p.next()??))
             })
-            .collect(),
-    )
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn store_inventory(id: &[u8; 16], items: &[(u32, u32, u32)]) {
@@ -338,8 +339,17 @@ static PENDING: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
 
 /// The platform id of a connected player, from the server's own player table.
 fn account_of(player: u32) -> Option<String> {
-    table::entries().into_iter().find(|e| e.client == player).and_then(|e| e.id)
+    if let Some(id) = table::entries().into_iter().find(|e| e.client == player).and_then(|e| e.id) {
+        return Some(id);
+    }
+    // No Steam id in the slot: the slot keeps a 32-byte value that is the same in every session of the same account.
+    let slot = table::slot_dump(player)?;
+    let uid = slot.get(ACCOUNT_AT..ACCOUNT_AT + 32)?;
+    uid.iter().any(|b| *b != 0).then(|| format!("uid:{}", hex(uid)))
 }
+
+/// Offset of the account value inside a player table slot.
+const ACCOUNT_AT: usize = 72;
 
 /// Applies the account rule now, or remembers the character until the account shows up in the table.
 fn check_account(player: u32, id: &[u8; 16]) -> String {
