@@ -85,6 +85,13 @@ pub fn entries() -> Vec<Entry> {
     out
 }
 
+/// The raw bytes of a connected player's slot, for finding out where an id is kept.
+pub fn slot_dump(client: u32) -> Option<Vec<u8>> {
+    let base = object()?;
+    let index = (client & 0x3f) as usize;
+    read_bytes(base + SLOTS_AT + index * SLOT_SIZE, SLOT_SIZE)
+}
+
 /// Entity number -> name, refreshed at most every two seconds.
 pub fn names() -> HashMap<u32, String> {
     static CACHE: Mutex<Option<(Instant, HashMap<u32, String>)>> = Mutex::new(None);

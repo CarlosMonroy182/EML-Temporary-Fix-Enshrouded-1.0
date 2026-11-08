@@ -230,6 +230,7 @@ fn account_rule(account: &str, id: &[u8; 16]) -> String {
 }
 
 static CHAR_OF: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
+static DUMPED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 static CHECKED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 static INVENTORIES: Mutex<Option<HashMap<[u8; 16], Vec<(u32, u32, u32)>>>> = Mutex::new(None);
 
@@ -243,13 +244,14 @@ fn last_character(player: u32) -> Option<[u8; 16]> {
     CHAR_OF.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&player).copied()))
 }
 
-/// Items summed per (item, instance): the same stacks in other slots are the same inventory.
+/// Items summed per item id. The instance number of weapons and armor is a world entity that changes every session, so it
+/// is left out.
 fn summed(items: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
-    let mut map: std::collections::BTreeMap<(u32, u32), u32> = std::collections::BTreeMap::new();
-    for (item, count, pide) in items {
-        *map.entry((*item, *pide)).or_insert(0) += *count;
+    let mut map: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for (item, count, _) in items {
+        *map.entry(*item).or_insert(0) += *count;
     }
-    map.into_iter().map(|((item, pide), count)| (item, count, pide)).collect()
+    map.into_iter().map(|(item, count)| (item, count, 0)).collect()
 }
 
 /// What changed between two summed inventories, as text; empty when they are the same.
@@ -361,7 +363,14 @@ fn settle_account(player: u32) {
         },
         Err(_) => return,
     };
-    let Some(account) = account_of(player) else { return };
+    let Some(account) = account_of(player) else {
+        if let Some(dump) = table::slot_dump(player) {
+            if DUMPED.lock().map(|mut d| d.get_or_insert_with(HashSet::new).insert(player)).unwrap_or(false) {
+                log(&format!("account: player {player} has no platform id in the player table; slot {}", hex(&dump)));
+            }
+        }
+        return;
+    };
     if let Ok(mut pending) = PENDING.lock() {
         if let Some(m) = pending.as_mut() {
             m.remove(&player);
@@ -723,11 +732,11 @@ mod tests {
     #[test]
     fn inventories_are_summed_and_compared_by_item() {
         let a = summed(&[(7, 10, 0), (7, 5, 0), (9, 1, 40)]);
-        assert_eq!(a, vec![(7, 15, 0), (9, 1, 40)]);
-        let b = summed(&[(9, 1, 40), (7, 15, 0)]);
+        assert_eq!(a, vec![(7, 15, 0), (9, 1, 0)]);
+        let b = summed(&[(9, 1, 8823), (7, 15, 0)]);
         assert_eq!(inventory_diff(&a, &b), "");
         let c = summed(&[(7, 75, 0)]);
-        assert_eq!(inventory_diff(&a, &c), "+7 x60, -9 x1 (instance 40)");
+        assert_eq!(inventory_diff(&a, &c), "+7 x60, -9 x1");
     }
 
     #[test]
