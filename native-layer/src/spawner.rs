@@ -4080,52 +4080,6 @@ pub(super) fn tracked_players(manager: usize) -> Vec<u32> {
         .collect()
 }
 
-/// The items in the inventory pages of a connected player, read from the server's world: `(item, count, instance)`.
-/// The player entity lists its pages in `keen::ecs::InventorySetup` (0x54 bytes: 16 page entities at +0, `isInitialized`
-/// at +0x53); each page entity holds `keen::ecs::Inventory` (0x60 bytes: eight stacks of item u32, count u32, instance u32).
-/// `None` while the inventory is not loaded yet.
-pub fn inventory_items(entity: u32) -> Option<Vec<(u32, u32, u32)>> {
-    const SETUP_SIZE: usize = 0x54;
-    const INVENTORY_SIZE: usize = 0x60;
-    let manager = SERVER_MGR.load(Ordering::SeqCst);
-    if manager == 0 || !tracked_ids().contains(&entity) {
-        return None;
-    }
-    let (_, _, slots) = entity_layout(manager, entity)?;
-    let setups: Vec<Vec<u8>> = slots
-        .iter()
-        .filter(|s| s.stride == SETUP_SIZE)
-        .filter_map(|s| read_bytes(s.addr, SETUP_SIZE))
-        .filter(|b| b.len() >= SETUP_SIZE && b[0x53] == 1)
-        .collect();
-    if setups.len() != 1 {
-        return None;
-    }
-    let mut out = Vec::new();
-    for i in 0..16 {
-        let page = u32_at(&setups[0], i * 4);
-        if page == 0 || page == entity {
-            continue;
-        }
-        let Some((_, _, page_slots)) = entity_layout(manager, page) else { continue };
-        let inv: Vec<&Slot> = page_slots.iter().filter(|s| s.stride == INVENTORY_SIZE).collect();
-        if inv.len() != 1 {
-            continue;
-        }
-        let Some(b) = read_bytes(inv[0].addr, INVENTORY_SIZE) else { continue };
-        if b.len() < INVENTORY_SIZE {
-            continue;
-        }
-        for k in 0..8 {
-            let (item, count, pide) = (u32_at(&b, k * 12), u32_at(&b, k * 12 + 4), u32_at(&b, k * 12 + 8));
-            if item != 0 && count > 0 && count < 1_000_000 {
-                out.push((item, count, pide));
-            }
-        }
-    }
-    Some(out)
-}
-
 pub fn tracked_ids() -> Vec<u32> {
     TRACKED.lock().map(|l| l.iter().map(|p| p.id).collect()).unwrap_or_default()
 }

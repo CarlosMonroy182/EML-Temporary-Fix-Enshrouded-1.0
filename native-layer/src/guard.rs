@@ -1,46 +1,61 @@
-//! M182 Guard (observe): follows the character copies the server keeps and compares every uploaded character with them.
+//! M182 Guard: the server-side character lock.
 //!
-//! Nothing here changes game behaviour and nothing runs on a timer. Two hooks fire only when the game itself handles a
-//! character: the upload a client sends when it joins, and the server's own update of the copy it keeps while the player
-//! plays. Configuration lives in its own file, `m182_guard.json`, so it never touches the panel or VFX.
+//! Nothing here runs on a timer. Two hooks fire only when the game itself handles a character: the upload a client sends
+//! when it joins, and the save the server sends to a playing client (which is the copy the server holds). A character is
+//! checked once, when it is uploaded:
+//!
+//! * one character per account (the account comes from the server's player table);
+//! * its level, XP and plain item stacks must be the ones in one of the last copies the server held;
+//! * optionally, a character that is new to the server may not start above a level.
+//!
+//! Administrators (kick/ban permission) and the entries of `m182_guard_allow.txt` skip every rule. A rejected upload is
+//! damaged before the game reads it, so the game itself refuses the character with its own "savegame corrupt" error.
+//! Configuration lives in `m182_guard.json`, so it never touches the panel or VFX.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::Write;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
-use super::{patch, signatures, spawner, table};
+use super::{patch, roster, signatures, table};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GuardConfig {
-    /// "off" (default) or "observe".
+    /// "off" (default), "observe" (only says what it would refuse) or "enforce".
     pub mode: String,
-    pub max_dumps: u32,
+    /// Players with the kick/ban permission are never refused.
+    pub admins_exempt: bool,
+    pub one_character_per_account: bool,
+    /// A character the server has not seen yet may not be above this level (0 = no limit).
+    pub new_character_max_level: u32,
+    /// Also write the normal decisions to the log, not only the refusals.
+    pub verbose: bool,
 }
 
 impl Default for GuardConfig {
     fn default() -> Self {
-        Self { mode: "off".into(), max_dumps: 20 }
+        Self { mode: "off".into(), admins_exempt: true, one_character_per_account: true, new_character_max_level: 0, verbose: false }
     }
 }
 
+static CONFIG: OnceLock<GuardConfig> = OnceLock::new();
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static SET_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static DUMPS: AtomicUsize = AtomicUsize::new(0);
-static SET_CALLS: AtomicUsize = AtomicUsize::new(0);
-static FINAL_CALLS: AtomicUsize = AtomicUsize::new(0);
 static FINAL_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-/// How many calls of the server-copy hook are described in detail in the log.
-const DIAG_CALLS: usize = 12;
-static MAX_DUMPS: AtomicUsize = AtomicUsize::new(20);
+/// Set when two players online at once turn out to share the same account value: the one-character rule is then unusable.
+static KEY_SHARED: AtomicBool = AtomicBool::new(false);
 
 const MAX_BLOB: usize = 8 * 1024 * 1024;
-const WRITE_EVERY_SECS: u64 = 20;
-const FINAL_SAVE_STATE: u8 = 4;
+const NOISE_WRITE_SECS: u64 = 20;
+/// How many different states of a character the server remembers (a client may hold an older one if a save got lost).
+const VERSIONS: usize = 3;
+/// The last bytes of the server's copy are a trailer the upload does not repeat.
+const COPY_TRAILER: usize = 5;
+/// Offsets of the two account parts inside a player table slot.
+const ACCOUNT_PARTS: [(usize, usize); 2] = [(72, 80), (96, 104)];
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -54,6 +69,10 @@ fn config(dir: &std::path::Path) -> GuardConfig {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
         Err(_) => GuardConfig::default(),
     }
+}
+
+fn cfg() -> &'static GuardConfig {
+    CONFIG.get_or_init(GuardConfig::default)
 }
 
 fn read_mem(addr: usize, len: usize) -> Option<Vec<u8>> {
@@ -98,6 +117,12 @@ fn log(msg: &str) {
     }
 }
 
+fn say(msg: &str) {
+    if cfg().verbose {
+        log(msg);
+    }
+}
+
 /// An uploaded character is `0x01` + a zstd frame.
 fn unpack(blob: &[u8]) -> Option<Vec<u8>> {
     if blob.len() < 8 || blob[0] != 1 || blob[1..5] != [0x28, 0xb5, 0x2f, 0xfd] {
@@ -118,6 +143,7 @@ fn character_id(character: &[u8]) -> Option<[u8; 16]> {
     character.get(16..32)?.try_into().ok()
 }
 
+/// Level, XP and next-level value: they follow the run of 1.0 floats in the header.
 fn stats(character: &[u8]) -> Option<(u32, u32, u32)> {
     let one = [0x00u8, 0x00, 0x80, 0x3f];
     let limit = character.len().min(1024);
@@ -138,17 +164,32 @@ fn stats(character: &[u8]) -> Option<(u32, u32, u32)> {
     None
 }
 
-struct Held {
-    bytes: Vec<u8>,
-    written_at: Option<std::time::Instant>,
-    saved: bool,
+/// The plain item stacks of the inventory pages: records of item id (4 bytes), count (3 bytes) and slot (1 byte), found
+/// where two neighbouring records have consecutive slots. Items with data of their own (weapons, armor) are not plain
+/// stacks and are not listed.
+fn stacks(bytes: &[u8]) -> Vec<(u32, u32)> {
+    let rec = |i: usize| -> Option<(u32, u32, u8)> {
+        let b = bytes.get(i..i + 8)?;
+        let item = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let count = b[4] as u32 | (b[5] as u32) << 8 | (b[6] as u32) << 16;
+        (item != 0 && count > 0 && count < 100_000).then_some((item, count, b[7]))
+    };
+    let mut out = Vec::new();
+    for i in 0..bytes.len().saturating_sub(7) {
+        let Some((item, count, slot)) = rec(i) else { continue };
+        let next = rec(i + 8).map(|r| r.2 == slot.wrapping_add(1)).unwrap_or(false);
+        let prev = i.checked_sub(8).and_then(rec).map(|r| r.2 == slot.wrapping_sub(1)).unwrap_or(false);
+        if next || prev {
+            out.push((item, count));
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
-static LAST_SEEN: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
-static COPIES: Mutex<Option<HashMap<[u8; 16], Held>>> = Mutex::new(None);
-
-fn copy_path(id: &[u8; 16]) -> Option<std::path::PathBuf> {
-    Some(guard_dir()?.join(format!("copy_{}.bin", hex(id))))
+/// What the server remembers of a character: the copy without its trailer.
+fn body(copy: &[u8]) -> &[u8] {
+    &copy[..copy.len().saturating_sub(COPY_TRAILER)]
 }
 
 fn describe(character: &[u8]) -> String {
@@ -158,33 +199,142 @@ fn describe(character: &[u8]) -> String {
     }
 }
 
-/// How two serialized characters differ: first differing byte and how many differ.
-fn compare(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
-    let common = a.len().min(b.len());
-    let mut first = None;
-    let mut count = a.len().abs_diff(b.len());
-    for i in 0..common {
-        if a[i] != b[i] {
-            first.get_or_insert(i);
-            count += 1;
+/// What changed between two item lists, as text.
+fn stack_diff(before: &[(u32, u32)], now: &[(u32, u32)]) -> String {
+    let total = |list: &[(u32, u32)], item: u32| list.iter().filter(|e| e.0 == item).map(|e| e.1 as i64).sum::<i64>();
+    let mut items: Vec<u32> = before.iter().chain(now.iter()).map(|e| e.0).collect();
+    items.sort_unstable();
+    items.dedup();
+    let mut parts: Vec<String> = items
+        .into_iter()
+        .filter_map(|item| {
+            let delta = total(now, item) - total(before, item);
+            (delta != 0).then(|| format!("{}{} x{}", if delta > 0 { "+" } else { "-" }, item, delta.abs()))
+        })
+        .collect();
+    let all = parts.len();
+    parts.truncate(8);
+    if all > 8 {
+        parts.push(format!("and {} more", all - 8));
+    }
+    parts.join(", ")
+}
+
+/// The upload must be one of the remembered states of the character: same level and XP, same plain item stacks.
+fn matches_copies(copies: &[Vec<u8>], upload: &[u8]) -> Result<(), String> {
+    let Some(sent) = stats(upload) else { return Ok(()) };
+    let mut why = String::new();
+    for (k, copy) in copies.iter().enumerate() {
+        let Some(have) = stats(copy) else { return Ok(()) };
+        if have != sent {
+            if k == 0 {
+                why = format!("progress differs from the server copy (server: level {} xp {}, upload: level {} xp {})", have.0, have.1, sent.0, sent.1);
+            }
+            continue;
+        }
+        let kept = stacks(body(copy));
+        let got = stacks(&upload[..body(copy).len().min(upload.len())]);
+        if got == kept {
+            return Ok(());
+        }
+        if k == 0 {
+            why = format!("items differ from the server copy ({})", stack_diff(&kept, &got));
         }
     }
-    match (first, count) {
-        (None, 0) => None,
-        (Some(f), c) => Some((f, c)),
-        (None, c) => Some((common, c)),
+    Err(why)
+}
+
+struct Held {
+    versions: Vec<Vec<u8>>,
+    written_at: Option<std::time::Instant>,
+    saved: bool,
+}
+
+static COPIES: Mutex<Option<HashMap<[u8; 16], Held>>> = Mutex::new(None);
+static LAST_SEEN: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
+
+fn copy_path(id: &[u8; 16]) -> Option<std::path::PathBuf> {
+    Some(guard_dir()?.join(format!("held_{}.bin", hex(id))))
+}
+
+fn encode_versions(versions: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for v in versions {
+        out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        out.extend_from_slice(v);
+    }
+    out
+}
+
+fn decode_versions(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 4 <= data.len() && out.len() < VERSIONS {
+        let len = u32_le(data, at) as usize;
+        at += 4;
+        let Some(v) = data.get(at..at + len) else { break };
+        out.push(v.to_vec());
+        at += len;
+    }
+    out
+}
+
+fn same_state(a: &[u8], b: &[u8]) -> bool {
+    stats(a) == stats(b) && stacks(body(a)) == stacks(body(b))
+}
+
+/// Records the copy the server sends to a playing client. A new state is written at once; changes that are only
+/// counters and timestamps replace the newest copy and are written at most every few seconds.
+fn remember(id: [u8; 16], character: &[u8]) {
+    let Ok(mut guard) = COPIES.lock() else { return };
+    let map = guard.get_or_insert_with(HashMap::new);
+    let entry = map.entry(id).or_insert_with(|| {
+        let versions = copy_path(&id).and_then(|p| std::fs::read(p).ok()).map(|d| decode_versions(&d)).unwrap_or_default();
+        Held { versions, written_at: None, saved: true }
+    });
+    let mut urgent = false;
+    match entry.versions.first() {
+        None => {
+            entry.versions.insert(0, character.to_vec());
+            urgent = true;
+        }
+        Some(newest) if newest == character => return,
+        Some(newest) if same_state(newest, character) => {
+            entry.versions[0] = character.to_vec();
+            entry.saved = false;
+        }
+        Some(_) => {
+            entry.versions.insert(0, character.to_vec());
+            entry.versions.truncate(VERSIONS);
+            entry.saved = false;
+            urgent = true;
+        }
+    }
+    let due = urgent || entry.written_at.map(|t| t.elapsed().as_secs() >= NOISE_WRITE_SECS).unwrap_or(true);
+    if entry.saved || !due {
+        return;
+    }
+    if let Some(path) = copy_path(&id) {
+        if std::fs::write(path, encode_versions(&entry.versions)).is_ok() {
+            entry.saved = true;
+            entry.written_at = Some(std::time::Instant::now());
+        }
+    }
+    if urgent {
+        say(&format!("copy: character {}, {}, {} bytes", hex(&id), describe(character), character.len()));
     }
 }
 
-/// Progress rule: level, XP and the next-level value of the upload must be the ones the server last saw. The rest of the
-/// character carries time counters that change with every save, so it is not compared byte by byte.
-fn progress_rule(copy: &[u8], upload: &[u8]) -> Result<(), String> {
-    match (stats(copy), stats(upload)) {
-        (Some(c), Some(u)) if c == u => Ok(()),
-        (Some(c), Some(u)) => Err(format!("server copy level {} xp {} next {}, upload level {} xp {} next {}", c.0, c.1, c.2, u.0, u.1, u.2)),
-        _ => Err("level and XP could not be read".to_string()),
+fn server_copies(id: &[u8; 16]) -> Vec<Vec<u8>> {
+    if let Ok(guard) = COPIES.lock() {
+        if let Some(c) = guard.as_ref().and_then(|m| m.get(id)) {
+            return c.versions.clone();
+        }
     }
+    copy_path(id).and_then(|p| std::fs::read(p).ok()).map(|d| decode_versions(&d)).unwrap_or_default()
 }
+
+// ------------------------------------------------------------------------------------------------ accounts
 
 static ACCOUNTS: Mutex<Option<HashMap<String, [u8; 16]>>> = Mutex::new(None);
 
@@ -192,337 +342,178 @@ fn accounts_path() -> Option<std::path::PathBuf> {
     Some(guard_dir()?.join("accounts.txt"))
 }
 
-/// One character per account: `steamid:<digits> <character id>` per line.
-fn load_accounts() -> HashMap<String, [u8; 16]> {
-    let mut map = HashMap::new();
-    let Some(text) = accounts_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return map };
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(account), Some(id)) = (parts.next(), parts.next()) else { continue };
-        if id.len() == 32 {
-            let mut bytes = [0u8; 16];
-            let ok = (0..16).all(|i| u8::from_str_radix(&id[i * 2..i * 2 + 2], 16).map(|b| bytes[i] = b).is_ok());
-            if ok {
-                map.insert(account.to_string(), bytes);
-            }
-        }
-    }
-    map
-}
-
-/// Registers the account's character the first time and says whether a later join uses the same one.
-fn account_rule(account: &str, id: &[u8; 16]) -> String {
-    let Ok(mut guard) = ACCOUNTS.lock() else { return "account list busy".into() };
-    let map = guard.get_or_insert_with(load_accounts);
-    match map.get(account).copied() {
-        Some(known) if known == *id => format!("{account} uses its registered character"),
-        Some(known) => format!("WOULD REJECT: {account} is registered with character {} (second character)", hex(&known)),
-        None => {
-            map.insert(account.to_string(), *id);
-            if let Some(path) = accounts_path() {
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(f, "{account} {}", hex(id));
-                }
-            }
-            format!("{account} registered with this character")
-        }
-    }
-}
-
-static CHAR_OF: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
-static DUMPED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
-static CHECKED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
-static INVENTORIES: Mutex<Option<HashMap<[u8; 16], Vec<(u32, u32, u32)>>>> = Mutex::new(None);
-
-fn set_character(player: u32, id: [u8; 16]) {
-    if let Ok(mut m) = CHAR_OF.lock() {
-        m.get_or_insert_with(HashMap::new).insert(player, id);
-    }
-}
-
-fn last_character(player: u32) -> Option<[u8; 16]> {
-    CHAR_OF.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&player).copied()))
-}
-
-/// Items summed per item id. The instance number of weapons and armor is a world entity that changes every session, so it
-/// is left out.
-fn summed(items: &[(u32, u32, u32)]) -> Vec<(u32, u32, u32)> {
-    let mut map: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
-    for (item, count, _) in items {
-        *map.entry(*item).or_insert(0) += *count;
-    }
-    map.into_iter().map(|(item, count)| (item, count, 0)).collect()
-}
-
-/// What changed between two summed inventories, as text; empty when they are the same.
-fn inventory_diff(before: &[(u32, u32, u32)], now: &[(u32, u32, u32)]) -> String {
-    let value = |list: &[(u32, u32, u32)], item: u32, pide: u32| list.iter().find(|e| e.0 == item && e.2 == pide).map(|e| e.1 as i64).unwrap_or(0);
-    let mut keys: Vec<(u32, u32)> = before.iter().chain(now.iter()).map(|e| (e.0, e.2)).collect();
-    keys.sort_unstable();
-    keys.dedup();
-    let mut parts = Vec::new();
-    for (item, pide) in keys {
-        let delta = value(now, item, pide) - value(before, item, pide);
-        if delta != 0 {
-            let tag = if pide != 0 { format!(" (instance {pide})") } else { String::new() };
-            parts.push(format!("{}{} x{}{}", if delta > 0 { "+" } else { "-" }, item, delta.abs(), tag));
-        }
-    }
-    let total = parts.len();
-    parts.truncate(10);
-    if total > 10 {
-        parts.push(format!("and {} more", total - 10));
-    }
-    parts.join(", ")
-}
-
-fn inventory_path(id: &[u8; 16]) -> Option<std::path::PathBuf> {
-    Some(guard_dir()?.join(format!("inv_{}.txt", hex(id))))
-}
-
-fn stored_inventory(id: &[u8; 16]) -> Option<Vec<(u32, u32, u32)>> {
-    if let Ok(m) = INVENTORIES.lock() {
-        if let Some(v) = m.as_ref().and_then(|m| m.get(id)) {
-            return Some(v.clone());
-        }
-    }
-    let text = std::fs::read_to_string(inventory_path(id)?).ok()?;
-    Some(summed(
-        &text
-            .lines()
-            .filter_map(|l| {
-                let mut p = l.split_whitespace().map(|x| x.parse::<u32>().ok());
-                Some((p.next()??, p.next()??, p.next()??))
-            })
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn store_inventory(id: &[u8; 16], items: &[(u32, u32, u32)]) {
-    if let Ok(mut m) = INVENTORIES.lock() {
-        m.get_or_insert_with(HashMap::new).insert(*id, items.to_vec());
-    }
-    if let Some(path) = inventory_path(id) {
-        let text: String = items.iter().map(|(i, c, p)| format!("{i} {c} {p}\n")).collect();
-        let _ = std::fs::write(path, text);
-    }
-}
-
-/// With every save the server sends: the first one of a session compares the inventory the server holds for the player
-/// with the one it held when the character last left; every one of them updates the stored inventory.
-fn inventory_check(player: u32, id: &[u8; 16]) {
-    let Some(entity) = table::entries().into_iter().find(|e| e.client == player).map(|e| e.entity()) else { return };
-    let Some(items) = spawner::inventory_items(entity) else { return };
-    let now = summed(&items);
-    let first = CHECKED.lock().map(|mut c| c.get_or_insert_with(HashSet::new).insert(player)).unwrap_or(false);
-    let before = stored_inventory(id);
-    if first {
-        match &before {
-            None => log(&format!("inventory: player {player}, character {}: first snapshot, {} kinds of item", hex(id), now.len())),
-            Some(prev) => {
-                let diff = inventory_diff(prev, &now);
-                if diff.is_empty() {
-                    log(&format!("inventory: player {player}, character {}: same as when it left ({} kinds of item)", hex(id), now.len()));
-                } else {
-                    log(&format!("inventory: WOULD REJECT: player {player}, character {} came back with a different inventory: {diff}", hex(id)));
-                }
-            }
-        }
-    }
-    if before.as_deref() != Some(&now) {
-        store_inventory(id, &now);
-    }
-}
-
-/// Joined players whose account was not known yet when they uploaded: player number -> character id.
-static PENDING: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
-
-/// The platform id of a connected player, from the server's own player table.
-fn account_of(player: u32) -> Option<String> {
-    if let Some(id) = table::entries().into_iter().find(|e| e.client == player).and_then(|e| e.id) {
-        return Some(id);
-    }
-    // No Steam id in the slot: the slot keeps a 32-byte value that is the same in every session of the same account.
-    let slot = table::slot_dump(player)?;
-    let uid = slot.get(ACCOUNT_AT..ACCOUNT_AT + 32)?;
-    uid.iter().any(|b| *b != 0).then(|| format!("uid:{}", hex(uid)))
-}
-
-/// Offset of the account value inside a player table slot.
-const ACCOUNT_AT: usize = 72;
-
-/// Applies the account rule now, or remembers the character until the account shows up in the table.
-fn check_account(player: u32, id: &[u8; 16]) -> String {
-    match account_of(player) {
-        Some(account) => account_rule(&account, id),
-        None => {
-            if let Ok(mut pending) = PENDING.lock() {
-                pending.get_or_insert_with(HashMap::new).insert(player, *id);
-            }
-            "account: not in the player table yet, checked on the next save".to_string()
-        }
-    }
-}
-
-/// Called with every save the server sends: settles the account rule of a player that was pending.
-fn settle_account(player: u32) {
-    let id = match PENDING.lock() {
-        Ok(mut pending) => match pending.as_mut().and_then(|m| m.get(&player).copied()) {
-            Some(id) => id,
-            None => return,
-        },
-        Err(_) => return,
-    };
-    let Some(account) = account_of(player) else {
-        if let Some(dump) = table::slot_dump(player) {
-            if DUMPED.lock().map(|mut d| d.get_or_insert_with(HashSet::new).insert(player)).unwrap_or(false) {
-                log(&format!("account: player {player} has no platform id in the player table; slot {}", hex(&dump)));
-            }
-        }
-        return;
-    };
-    if let Ok(mut pending) = PENDING.lock() {
-        if let Some(m) = pending.as_mut() {
-            m.remove(&player);
-        }
-    }
-    log(&format!("account: player {player}, character {}: {}", hex(&id), account_rule(&account, &id)));
-}
-
-fn span(bytes: &[u8], at: usize) -> String {
-    let from = at.saturating_sub(8);
-    let to = (at + 16).min(bytes.len());
-    hex(&bytes[from.min(to)..to])
-}
-
-fn remember(id: [u8; 16], character: &[u8], state: u8) {
-    let now = std::time::Instant::now();
-    let Ok(mut guard) = COPIES.lock() else { return };
-    let map = guard.get_or_insert_with(HashMap::new);
-    let entry = map.entry(id).or_insert_with(|| Held { bytes: Vec::new(), written_at: None, saved: true });
-    let changed = entry.bytes != character;
-    if changed {
-        entry.bytes = character.to_vec();
-        entry.saved = false;
-    }
-    if entry.saved {
-        return;
-    }
-    let due = state >= FINAL_SAVE_STATE || entry.written_at.map(|t| t.elapsed().as_secs() >= WRITE_EVERY_SECS).unwrap_or(true);
-    if !due {
-        return;
-    }
-    if let Some(path) = copy_path(&id) {
-        if std::fs::write(path, &entry.bytes).is_ok() {
-            entry.saved = true;
-            entry.written_at = Some(now);
-        }
-    }
-}
-
-fn server_copy(id: &[u8; 16]) -> Option<Vec<u8>> {
-    if let Ok(guard) = COPIES.lock() {
-        if let Some(c) = guard.as_ref().and_then(|m| m.get(id)) {
-            return Some(c.bytes.clone());
-        }
-    }
-    std::fs::read(copy_path(id)?).ok()
-}
-
-/// The server updates the copy it keeps of a connected character: `(slot, &{data, size}, state, player)`.
-extern "win64" fn on_set_save(slot: usize, span_ptr: usize, extra: usize, player_arg: usize) {
-    let call = SET_CALLS.fetch_add(1, Ordering::SeqCst);
-    let diag = call < DIAG_CALLS;
-    if slot == 0 || span_ptr == 0 {
-        if diag {
-            log(&format!("save call {call}: empty arguments (slot={slot:#x}, span={span_ptr:#x})"));
-        }
-        return;
-    }
-    let Some(head) = read_mem(slot + 8, 8) else { return };
-    let player = u32_le(&head, 0);
-    let state = head[4];
-    let Some(pair) = read_mem(span_ptr, 16) else {
-        if diag {
-            log(&format!("save call {call}: player {player}, state {state}, span {span_ptr:#x} not readable"));
-        }
-        return;
-    };
-    let (a, b) = (usize_le(&pair, 0), usize_le(&pair, 8));
-    // The span can be {pointer, size}, {size, pointer} or {begin, end}; try each.
-    let blob = [(a, b), (b, a)]
-        .into_iter()
-        .filter(|(p, n)| *p > 0x10000 && *n >= 0x30 && *n <= MAX_BLOB)
-        .find_map(|(p, n)| read_mem(p, n))
-        .or_else(|| {
-            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-            let n = hi.wrapping_sub(lo);
-            if lo > 0x10000 && (0x30..=MAX_BLOB).contains(&n) { read_mem(lo, n) } else { None }
-        });
-    if diag {
-        let first = blob.as_ref().map(|v| hex(&v[..v.len().min(24)])).unwrap_or_else(|| "none".into());
-        log(&format!(
-            "save call {call}: slot player {player}, state {state}, extra {extra:#x}, player arg {player_arg:#x}, span {a:#x} / {b:#x}, blob {}, starts {first}",
-            blob.as_ref().map(|v| v.len()).unwrap_or(0)
-        ));
-    }
-    let Some(blob) = blob else { return };
-    let _ = record_copy(player, state, blob, call);
-}
-
-/// Stores the character found in a save blob as the server's copy.
-fn record_copy(player: u32, state: u8, blob: Vec<u8>, call: usize) -> Option<[u8; 16]> {
-    let diag = call < DIAG_CALLS;
-    let hash = fnv1a(&blob);
-    if let Ok(mut seen) = LAST_SEEN.lock() {
-        if seen.get_or_insert_with(HashMap::new).insert(player, hash) == Some(hash) {
-            return None;
-        }
-    }
-    let raw = unpack(&blob).unwrap_or(blob);
-    let Some(character) = character_bytes(&raw) else {
-        if diag {
-            log(&format!("save call {call}: player {player}, no S2BH header in {} bytes", raw.len()));
-        }
+fn parse_id(text: &str) -> Option<[u8; 16]> {
+    if text.len() != 32 {
         return None;
-    };
-    let Some(id) = character_id(character) else { return None };
-    set_character(player, id);
-    let before = server_copy(&id);
-    remember(id, character, state);
-    let changed = before.as_deref().map(|b| b != character).unwrap_or(true);
-    if changed && (before.is_none() || before.as_deref().and_then(stats) != stats(character)) {
-        log(&format!("server copy: player {player}, state {state}, character {}, {}, {} bytes", hex(&id), describe(character), character.len()));
     }
-    Some(id)
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
 }
 
-/// The server sends the final save of a leaving player to the client: its first chunk.
+/// One character per account: `<account> <character id>` per line.
+fn load_accounts() -> HashMap<String, [u8; 16]> {
+    let Some(text) = accounts_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return HashMap::new() };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            Some((parts.next()?.to_string(), parse_id(parts.next()?)?))
+        })
+        .collect()
+}
+
+/// The character registered to an account, registering this one when the account has none yet.
+fn registered(account: &str, id: &[u8; 16], register: bool) -> [u8; 16] {
+    let Ok(mut guard) = ACCOUNTS.lock() else { return *id };
+    let map = guard.get_or_insert_with(load_accounts);
+    if let Some(known) = map.get(account) {
+        return *known;
+    }
+    if register {
+        map.insert(account.to_string(), *id);
+        if let Some(path) = accounts_path() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{account} {}", hex(id));
+            }
+        }
+    }
+    *id
+}
+
+/// The account value in a player table slot: the same in every session and for every character of one account.
+fn slot_key(slot: &[u8]) -> Option<String> {
+    let mut key = Vec::new();
+    for (a, b) in ACCOUNT_PARTS {
+        key.extend_from_slice(slot.get(a..b)?);
+    }
+    key.iter().any(|b| *b != 0).then(|| format!("uid:{}", hex(&key)))
+}
+
+struct Who {
+    account: Option<String>,
+    admin: bool,
+}
+
+fn who_is(player: u32) -> Who {
+    let slot = table::slot_dump(player);
+    let admin = slot.as_ref().and_then(|s| s.get(roster::SLOT_PERMISSIONS)).map(|p| roster::is_admin(*p)).unwrap_or(false);
+    let steam = table::entries().into_iter().find(|e| e.client == player).and_then(|e| e.id);
+    let account = steam.or_else(|| slot.as_deref().and_then(slot_key));
+    Who { account, admin }
+}
+
+/// Two players online at once with the same account value mean the value does not identify accounts.
+fn check_key_is_personal(player: u32, key: &str) {
+    if KEY_SHARED.load(Ordering::SeqCst) || !key.starts_with("uid:") {
+        return;
+    }
+    for e in table::entries() {
+        if e.client != player && table::slot_dump(e.client).as_deref().and_then(slot_key).as_deref() == Some(key) {
+            KEY_SHARED.store(true, Ordering::SeqCst);
+            log("ERROR: two different players share the same account value; the one-character-per-account rule is switched off");
+            return;
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ allow list
+
+fn allow_path() -> Option<std::path::PathBuf> {
+    Some(std::env::current_dir().ok()?.join("m182_guard_allow.txt"))
+}
+
+/// The allow list is read when a character joins: one account value or character id per line, `#` starts a comment.
+fn allowed(account: Option<&str>, id: &[u8; 16]) -> bool {
+    let Some(text) = allow_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return false };
+    let id = hex(id);
+    text.lines().filter_map(|l| l.split('#').next()?.split_whitespace().next()).any(|entry| {
+        entry.eq_ignore_ascii_case(&id) || account.map(|a| a.eq_ignore_ascii_case(entry)).unwrap_or(false)
+    })
+}
+
+// ------------------------------------------------------------------------------------------------ hooks
+
+/// The server sends a save to a playing (or leaving) client: its first chunk. This is the copy the server holds.
 extern "win64" fn on_final_chunk(player_obj: usize, offset: usize) {
     if offset != 0 || player_obj == 0 {
         return;
     }
-    let Some(head) = read_mem(player_obj + 8, 8) else { return };
+    let Some(head) = read_mem(player_obj + 8, 4) else { return };
     let player = u32_le(&head, 0);
     let Some(vec) = read_mem(player_obj + 0x110, 0x10) else { return };
     let (ptr, size) = (usize_le(&vec, 0), usize_le(&vec, 8));
-    let call = FINAL_CALLS.fetch_add(1, Ordering::SeqCst);
     if ptr < 0x10000 || size < 0x30 || size > MAX_BLOB {
-        log(&format!("final save: player {player}, unreadable blob (ptr={ptr:#x}, size={size})"));
         return;
     }
-    let Some(blob) = read_mem(ptr, size) else {
-        log(&format!("final save: player {player}, blob not readable (size {size})"));
-        return;
-    };
-    if call < DIAG_CALLS {
-        log(&format!("final save: player {player}, {size} bytes, starts {}", hex(&blob[..blob.len().min(16)])));
+    let Some(blob) = read_mem(ptr, size) else { return };
+    let hash = fnv1a(&blob);
+    if let Ok(mut seen) = LAST_SEEN.lock() {
+        if seen.get_or_insert_with(HashMap::new).insert(player, hash) == Some(hash) {
+            return;
+        }
     }
-    settle_account(player);
-    let id = record_copy(player, FINAL_SAVE_STATE, blob, call).or_else(|| last_character(player));
-    if let Some(id) = id {
-        inventory_check(player, &id);
+    let raw = unpack(&blob).unwrap_or(blob);
+    let Some(character) = character_bytes(&raw) else { return };
+    let Some(id) = character_id(character) else { return };
+    remember(id, character);
+}
+
+/// Damages the frame of the uploaded character so that the game refuses to read it.
+fn refuse_upload(ptr: usize) {
+    for i in 1..5 {
+        unsafe { std::ptr::write_volatile((ptr + i) as *mut u8, 0) };
     }
+}
+
+enum Decision {
+    Allow(String),
+    Refuse(String),
+}
+
+fn decide(player: u32, id: &[u8; 16], character: &[u8]) -> Decision {
+    let who = who_is(player);
+    let account = who.account.as_deref();
+    if allowed(account, id) {
+        return Decision::Allow("on the allow list".into());
+    }
+    if cfg().admins_exempt && who.admin {
+        return Decision::Allow("administrator".into());
+    }
+    if cfg().one_character_per_account && !KEY_SHARED.load(Ordering::SeqCst) {
+        match account {
+            Some(a) => {
+                check_key_is_personal(player, a);
+                if !KEY_SHARED.load(Ordering::SeqCst) {
+                    let owned = registered(a, id, false);
+                    if owned != *id {
+                        return Decision::Refuse(format!("this account already has the character {}", hex(&owned)));
+                    }
+                }
+            }
+            None => say(&format!("join: player {player}: account not found, one-character rule skipped")),
+        }
+    }
+    let copies = server_copies(id);
+    if copies.is_empty() {
+        let limit = cfg().new_character_max_level;
+        if limit > 0 {
+            if let Some((level, _, _)) = stats(character) {
+                if level > limit {
+                    return Decision::Refuse(format!("a new character may not start above level {limit} (this one is level {level})"));
+                }
+            }
+        }
+    } else if let Err(why) = matches_copies(&copies, character) {
+        return Decision::Refuse(why);
+    }
+    if let Some(a) = account {
+        if cfg().one_character_per_account && !KEY_SHARED.load(Ordering::SeqCst) {
+            registered(a, id, true);
+        }
+    }
+    Decision::Allow(if copies.is_empty() { "new to this server".into() } else { "matches the server copy".into() })
 }
 
 /// A client uploads its character when it joins.
@@ -535,63 +526,28 @@ extern "win64" fn probe(_out: usize, obj: usize) {
     let Some(vec) = read_mem(obj + 0x110, 0x10) else { return };
     let (ptr, size) = (usize_le(&vec, 0), usize_le(&vec, 8));
     if ptr == 0 || size < 0x30 || size > MAX_BLOB {
-        log(&format!("upload: player {player}, unreadable blob (ptr={ptr:#x}, size={size})"));
         return;
     }
-    let Some(blob) = read_mem(ptr, size) else {
-        log(&format!("upload: player {player}, blob not readable (size {size})"));
-        return;
-    };
-    let hash = fnv1a(&blob);
-    let Some(raw) = unpack(&blob) else {
-        log(&format!("upload: player {player}, {size} bytes, blob is not 0x01 + zstd"));
-        return;
-    };
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    if DUMPS.fetch_add(1, Ordering::SeqCst) < MAX_DUMPS.load(Ordering::SeqCst) {
-        if let Some(dir) = guard_dir() {
-            let _ = std::fs::write(dir.join(format!("{secs}_p{player}_{hash:08x}.raw")), &raw);
+    let Some(blob) = read_mem(ptr, size) else { return };
+    let Some(raw) = unpack(&blob) else { return };
+    let Some(character) = character_bytes(&raw) else { return };
+    let Some(id) = character_id(character) else { return };
+    let enforce = cfg().mode.eq_ignore_ascii_case("enforce");
+    match decide(player, &id, character) {
+        Decision::Allow(reason) => say(&format!("join: player {player}, character {}, {}: allowed ({reason})", hex(&id), describe(character))),
+        Decision::Refuse(why) => {
+            let who = who_is(player);
+            log(&format!(
+                "{}: player {player}, account {}, character {}: {why}. To let this player in, add the account or the character to m182_guard_allow.txt",
+                if enforce { "REFUSED" } else { "WOULD REFUSE" },
+                who.account.as_deref().unwrap_or("unknown"),
+                hex(&id)
+            ));
+            if enforce {
+                refuse_upload(ptr);
+            }
         }
     }
-    let Some(character) = character_bytes(&raw) else {
-        log(&format!("upload: player {player}, {size} bytes, no S2BH header"));
-        return;
-    };
-    let Some(id) = character_id(character) else {
-        log(&format!("upload: player {player}, character too short ({} bytes)", character.len()));
-        return;
-    };
-    set_character(player, id);
-    if let Ok(mut done) = CHECKED.lock() {
-        if let Some(set) = done.as_mut() {
-            set.remove(&player);
-        }
-    }
-    let header = hex(&character[..character.len().min(32)]);
-    let verdict = match server_copy(&id) {
-        None => "no server copy yet (first time this server sees the character)".to_string(),
-        Some(copy) => match compare(&copy, character) {
-            None => "identical to the server copy".to_string(),
-            Some((at, count)) => format!(
-                "differs from the server copy: first at byte {at}, {count} bytes differ, upload {} bytes vs copy {} bytes; upload {} | copy {}; around it upload {} vs copy {}",
-                character.len(),
-                copy.len(),
-                describe(character),
-                describe(&copy),
-                span(character, at),
-                span(&copy, at)
-            ),
-        },
-    };
-    let progress = match server_copy(&id) {
-        None => "progress: first time, accepted".to_string(),
-        Some(copy) => match progress_rule(&copy, character) {
-            Ok(()) => "progress: level and XP match the server copy".to_string(),
-            Err(why) => format!("WOULD REJECT: progress differs from the server copy ({why})"),
-        },
-    };
-    let account = check_account(player, &id);
-    log(&format!("join: player {player}, character {}, {}, {} bytes unpacked: {verdict} (header {header}); {progress}; {account}", hex(&id), describe(character), character.len()));
 }
 
 macro_rules! entry_stub {
@@ -616,7 +572,6 @@ macro_rules! entry_stub {
     };
 }
 entry_stub!(stub_probe, probe, TRAMPOLINE);
-entry_stub!(stub_set_save, on_set_save, SET_TRAMPOLINE);
 
 /// Hook in the middle of the per-player update: passes `rbx` and `r13` to the handler and keeps every register.
 #[unsafe(naked)]
@@ -684,93 +639,133 @@ fn hook(sections: &[&'static [u8]], signature: &[u8], displaced: usize, trampoli
 pub(super) fn install(sections: &[&'static [u8]]) {
     let Ok(dir) = std::env::current_dir() else { return };
     let cfg = config(&dir);
-    if !cfg.mode.eq_ignore_ascii_case("observe") {
+    if !(cfg.mode.eq_ignore_ascii_case("observe") || cfg.mode.eq_ignore_ascii_case("enforce")) {
         return;
     }
-    MAX_DUMPS.store(cfg.max_dumps as usize, Ordering::SeqCst);
+    let _ = CONFIG.set(cfg.clone());
     let upload = hook(sections, &signatures::SAVE_DESERIALIZE, signatures::SAVE_DESERIALIZE_DISPLACED, &TRAMPOLINE, stub_probe as usize, "upload");
-    let copy = hook(sections, &signatures::SAVE_SET, signatures::SAVE_SET_DISPLACED, &SET_TRAMPOLINE, stub_set_save as usize, "server copy");
-    let fin = hook(sections, &signatures::FINAL_CHUNK, signatures::FINAL_CHUNK_DISPLACED, &FINAL_TRAMPOLINE, stub_final_chunk as usize, "final save");
-    log(&format!(
-        "guard: observe mode (upload hook {}, server copy hook {}, final save hook {}); nothing is blocked",
-        if upload { "on" } else { "off" },
-        if copy { "on" } else { "off" },
-        if fin { "on" } else { "off" }
-    ));
+    let copy = hook(sections, &signatures::FINAL_CHUNK, signatures::FINAL_CHUNK_DISPLACED, &FINAL_TRAMPOLINE, stub_final_chunk as usize, "server copy");
+    if upload && copy {
+        log(&format!("guard: {} mode, admins exempt: {}, one character per account: {}", cfg.mode, cfg.admins_exempt, cfg.one_character_per_account));
+    } else {
+        log(&format!(
+            "ERROR: the character lock could not start (upload hook {}, server copy hook {}); nobody is refused",
+            if upload { "on" } else { "off" },
+            if copy { "on" } else { "off" }
+        ));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample(level: u32, tail: u8) -> Vec<u8> {
-        let mut v = vec![0u8, 1, 2, 3, 4];
-        v.extend_from_slice(b"S2BH");
-        v.extend_from_slice(&[2, 0, 0, 0, 9, 0, 5, 0, 0, 0, 0, 1]);
-        v.extend_from_slice(&[0xaa; 16]);
-        for _ in 0..5 {
-            v.extend_from_slice(&1.0f32.to_le_bytes());
+    fn character(level: u32, xp: u32, items: &[(u32, u32)]) -> Vec<u8> {
+        let mut c = b"S2BH".to_vec();
+        c.extend_from_slice(&[0u8; 12]);
+        c.extend_from_slice(&[7u8; 16]);
+        for _ in 0..4 {
+            c.extend_from_slice(&1.0f32.to_le_bytes());
         }
-        v.extend_from_slice(&level.to_le_bytes());
-        v.extend_from_slice(&100u32.to_le_bytes());
-        v.extend_from_slice(&200u32.to_le_bytes());
-        v.push(tail);
+        for v in [level, xp, 160] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c.extend_from_slice(&[0xAA; 24]);
+        for (slot, (item, count)) in items.iter().enumerate() {
+            c.extend_from_slice(&item.to_le_bytes());
+            c.extend_from_slice(&count.to_le_bytes()[..3]);
+            c.push(slot as u8);
+        }
+        c.extend_from_slice(&[0xBB; 40]);
+        c
+    }
+
+    /// What the server keeps: the character followed by its 5-byte trailer.
+    fn held(c: &[u8], trailer: u8) -> Vec<u8> {
+        let mut v = c.to_vec();
+        v.extend_from_slice(&[trailer; COPY_TRAILER]);
+        v
+    }
+
+    /// What a client uploads: the same prefix, noise in the counters, and a long static tail.
+    fn upload(c: &[u8]) -> Vec<u8> {
+        let mut v = c.to_vec();
+        v[5] = 0x55;
+        v.extend_from_slice(&[0xCC; 5000]);
         v
     }
 
     #[test]
-    fn the_character_id_and_progress_are_read_after_the_header() {
-        let raw = sample(22, 7);
-        let c = character_bytes(&raw).unwrap();
-        assert_eq!(&c[..4], b"S2BH");
-        assert_eq!(character_id(c), Some([0xaa; 16]));
-        assert_eq!(stats(c), Some((22, 100, 200)));
+    fn the_id_and_progress_are_read_after_the_header() {
+        let c = character(24, 1802, &[(100, 5)]);
+        assert_eq!(character_id(&c), Some([7u8; 16]));
+        assert_eq!(stats(&c), Some((24, 1802, 160)));
     }
 
     #[test]
-    fn a_changed_character_is_reported_with_where_and_how_much() {
-        let a = sample(22, 7);
-        let b = sample(23, 7);
-        let (ca, cb) = (character_bytes(&a).unwrap(), character_bytes(&b).unwrap());
-        assert_eq!(compare(ca, ca), None);
-        let (at, count) = compare(ca, cb).unwrap();
-        assert_eq!((at, count), (16 + 16 + 20, 1));
-        let longer = sample(22, 7).into_iter().chain([1]).collect::<Vec<u8>>();
-        assert_eq!(compare(ca, character_bytes(&longer).unwrap()), Some((ca.len(), 1)));
+    fn plain_stacks_are_found_only_in_chains() {
+        let c = character(1, 0, &[(100, 5), (200, 7), (300, 9)]);
+        assert_eq!(stacks(&c), vec![(100, 5), (200, 7), (300, 9)]);
+        let lone = character(1, 0, &[(100, 5)]);
+        assert!(stacks(&lone).is_empty());
     }
 
     #[test]
-    fn inventories_are_summed_and_compared_by_item() {
-        let a = summed(&[(7, 10, 0), (7, 5, 0), (9, 1, 40)]);
-        assert_eq!(a, vec![(7, 15, 0), (9, 1, 0)]);
-        let b = summed(&[(9, 1, 8823), (7, 15, 0)]);
-        assert_eq!(inventory_diff(&a, &b), "");
-        let c = summed(&[(7, 75, 0)]);
-        assert_eq!(inventory_diff(&a, &c), "+7 x60, -9 x1");
+    fn the_same_character_is_accepted_even_with_noise() {
+        let c = character(24, 1802, &[(100, 5), (200, 7), (300, 9)]);
+        assert!(matches_copies(&[held(&c, 1)], &upload(&c)).is_ok());
     }
 
     #[test]
-    fn the_progress_rule_compares_level_and_xp() {
-        let copy = sample(46, 7);
-        let mut same = sample(46, 9);
-        same.push(1);
-        assert_eq!(progress_rule(&copy, &same), Ok(()));
-        let richer = sample(47, 7);
-        assert!(progress_rule(&copy, &richer).is_err());
-        assert!(progress_rule(&copy, &[1, 2, 3]).is_err());
+    fn brought_items_and_progress_are_refused() {
+        let c = character(24, 1802, &[(100, 5), (200, 7), (300, 9)]);
+        let more_stone = character(24, 1802, &[(100, 5), (200, 21), (300, 9)]);
+        let why = matches_copies(&[held(&c, 1)], &upload(&more_stone)).unwrap_err();
+        assert!(why.contains("+200 x14"), "{why}");
+        let more_xp = character(24, 5764, &[(100, 5), (200, 7), (300, 9)]);
+        let why = matches_copies(&[held(&c, 1)], &upload(&more_xp)).unwrap_err();
+        assert!(why.contains("xp 5764"), "{why}");
     }
 
     #[test]
-    fn the_server_copy_survives_a_restart() {
-        let dir = std::env::temp_dir().join(format!("m182_guard_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        let raw = sample(30, 1);
-        let c = character_bytes(&raw).unwrap();
-        let id = character_id(c).unwrap();
-        remember(id, c, FINAL_SAVE_STATE);
-        COPIES.lock().unwrap().take();
-        assert_eq!(server_copy(&id).as_deref(), Some(c));
-        let _ = std::fs::remove_dir_all(dir);
+    fn an_older_remembered_state_is_still_accepted() {
+        let old = character(24, 1700, &[(100, 5), (200, 7), (300, 9)]);
+        let new = character(24, 1802, &[(100, 5), (200, 8), (300, 9)]);
+        assert!(matches_copies(&[held(&new, 2), held(&old, 1)], &upload(&old)).is_ok());
+    }
+
+    #[test]
+    fn a_blob_without_readable_progress_is_not_refused() {
+        let c = character(24, 1802, &[(100, 5)]);
+        assert!(matches_copies(&[held(&c, 1)], b"S2BH not a character").is_ok());
+    }
+
+    #[test]
+    fn the_account_value_ignores_the_character_part() {
+        let mut slot = vec![0u8; 0x148];
+        slot[72..80].copy_from_slice(&[1; 8]);
+        slot[96..104].copy_from_slice(&[2; 8]);
+        slot[80..96].copy_from_slice(&[3; 16]);
+        let key = slot_key(&slot).unwrap();
+        slot[80..96].copy_from_slice(&[9; 16]);
+        assert_eq!(slot_key(&slot).unwrap(), key);
+        slot[72] = 5;
+        assert_ne!(slot_key(&slot).unwrap(), key);
+        assert!(slot_key(&vec![0u8; 0x148]).is_none());
+    }
+
+    #[test]
+    fn remembered_states_survive_a_restart() {
+        let a = held(&character(24, 1700, &[(100, 5)]), 1);
+        let b = held(&character(24, 1802, &[(100, 6)]), 2);
+        assert_eq!(decode_versions(&encode_versions(&[b.clone(), a.clone()])), vec![b, a]);
+    }
+
+    #[test]
+    fn a_refused_upload_loses_its_zstd_magic() {
+        let mut blob = vec![1u8, 0x28, 0xb5, 0x2f, 0xfd, 9, 9, 9, 9, 9, 9, 9];
+        refuse_upload(blob.as_mut_ptr() as usize);
+        assert!(unpack(&blob).is_none());
+        assert_eq!(blob[0], 1);
     }
 }
