@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 
-use super::{patch, roster, signatures};
+use super::{patch, signatures, table};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -176,22 +176,13 @@ fn compare(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// The server keeps the first part of the character (header, level, XP, progress); the last bytes of its copy are a trailer
-/// that the upload does not repeat.
-const COPY_TRAILER: usize = 5;
-
-/// The block of the character that holds time counters: it changes with every save, with or without play.
-const CLOCK_BLOCK: (usize, usize) = (512, 548);
-
-/// Progress rule: the uploaded character must start with the server's copy. `Err` carries the first differing byte.
-fn progress_rule(copy: &[u8], upload: &[u8]) -> Result<usize, usize> {
-    let n = copy.len().saturating_sub(COPY_TRAILER);
-    if upload.len() < n {
-        return Err(upload.len());
-    }
-    match (0..n).find(|i| copy[*i] != upload[*i] && !(CLOCK_BLOCK.0..CLOCK_BLOCK.1).contains(i)) {
-        Some(at) => Err(at),
-        None => Ok(n),
+/// Progress rule: level, XP and the next-level value of the upload must be the ones the server last saw. The rest of the
+/// character carries time counters that change with every save, so it is not compared byte by byte.
+fn progress_rule(copy: &[u8], upload: &[u8]) -> Result<(), String> {
+    match (stats(copy), stats(upload)) {
+        (Some(c), Some(u)) if c == u => Ok(()),
+        (Some(c), Some(u)) => Err(format!("server copy level {} xp {} next {}, upload level {} xp {} next {}", c.0, c.1, c.2, u.0, u.1, u.2)),
+        _ => Err("level and XP could not be read".to_string()),
     }
 }
 
@@ -238,10 +229,43 @@ fn account_rule(account: &str, id: &[u8; 16]) -> String {
     }
 }
 
-/// The platform id of the player the upload object belongs to.
-fn account_of(obj: usize) -> Option<String> {
-    let bytes = read_mem(obj, 0x400)?;
-    roster::guess_id(&bytes, &|p| read_mem(p, 0x40))
+/// Joined players whose account was not known yet when they uploaded: player number -> character id.
+static PENDING: Mutex<Option<HashMap<u32, [u8; 16]>>> = Mutex::new(None);
+
+/// The platform id of a connected player, from the server's own player table.
+fn account_of(player: u32) -> Option<String> {
+    table::entries().into_iter().find(|e| e.client == player).and_then(|e| e.id)
+}
+
+/// Applies the account rule now, or remembers the character until the account shows up in the table.
+fn check_account(player: u32, id: &[u8; 16]) -> String {
+    match account_of(player) {
+        Some(account) => account_rule(&account, id),
+        None => {
+            if let Ok(mut pending) = PENDING.lock() {
+                pending.get_or_insert_with(HashMap::new).insert(player, *id);
+            }
+            "account: not in the player table yet, checked on the next save".to_string()
+        }
+    }
+}
+
+/// Called with every save the server sends: settles the account rule of a player that was pending.
+fn settle_account(player: u32) {
+    let id = match PENDING.lock() {
+        Ok(mut pending) => match pending.as_mut().and_then(|m| m.get(&player).copied()) {
+            Some(id) => id,
+            None => return,
+        },
+        Err(_) => return,
+    };
+    let Some(account) = account_of(player) else { return };
+    if let Ok(mut pending) = PENDING.lock() {
+        if let Some(m) = pending.as_mut() {
+            m.remove(&player);
+        }
+    }
+    log(&format!("account: player {player}, character {}: {}", hex(&id), account_rule(&account, &id)));
 }
 
 fn span(bytes: &[u8], at: usize) -> String {
@@ -371,6 +395,7 @@ extern "win64" fn on_final_chunk(player_obj: usize, offset: usize) {
     if call < DIAG_CALLS {
         log(&format!("final save: player {player}, {size} bytes, starts {}", hex(&blob[..blob.len().min(16)])));
     }
+    settle_account(player);
     record_copy(player, FINAL_SAVE_STATE, blob, call);
 }
 
@@ -429,14 +454,11 @@ extern "win64" fn probe(_out: usize, obj: usize) {
     let progress = match server_copy(&id) {
         None => "progress: first time, accepted".to_string(),
         Some(copy) => match progress_rule(&copy, character) {
-            Ok(n) => format!("progress: matches the server copy ({n} bytes)"),
-            Err(at) => format!("WOULD REJECT: progress differs from the server copy at byte {at} of {} (upload {})", copy.len().saturating_sub(COPY_TRAILER), describe(character)),
+            Ok(()) => "progress: level and XP match the server copy".to_string(),
+            Err(why) => format!("WOULD REJECT: progress differs from the server copy ({why})"),
         },
     };
-    let account = match account_of(obj) {
-        Some(a) => account_rule(&a, &id),
-        None => "account: platform id not found".to_string(),
-    };
+    let account = check_account(player, &id);
     log(&format!("join: player {player}, character {}, {}, {} bytes unpacked: {verdict} (header {header}); {progress}; {account}", hex(&id), describe(character), character.len()));
 }
 
@@ -586,19 +608,14 @@ mod tests {
     }
 
     #[test]
-    fn the_progress_rule_accepts_the_server_prefix_and_rejects_other_progress() {
-        let mut upload = sample(46, 7);
-        upload.resize(700, 3);
-        let mut copy = upload[..600].to_vec();
-        copy[596] = 9;
-        assert_eq!(progress_rule(&copy, &upload), Ok(595));
-        let mut richer = upload.clone();
-        richer[100] ^= 0xff;
-        assert_eq!(progress_rule(&copy, &richer), Err(100));
-        assert_eq!(progress_rule(&copy, &upload[..200]), Err(200));
-        let mut clock = upload.clone();
-        clock[520] ^= 0xff;
-        assert_eq!(progress_rule(&copy, &clock), Ok(595));
+    fn the_progress_rule_compares_level_and_xp() {
+        let copy = sample(46, 7);
+        let mut same = sample(46, 9);
+        same.push(1);
+        assert_eq!(progress_rule(&copy, &same), Ok(()));
+        let richer = sample(47, 7);
+        assert!(progress_rule(&copy, &richer).is_err());
+        assert!(progress_rule(&copy, &[1, 2, 3]).is_err());
     }
 
     #[test]
