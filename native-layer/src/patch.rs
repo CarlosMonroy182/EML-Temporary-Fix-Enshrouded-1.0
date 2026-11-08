@@ -66,9 +66,6 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     super::probe::hit(super::probe::ENEMY_PTRS);
     let (fa, fb) = (read_faction(a), read_faction(b));
     if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
-        if let Some(line) = groups::protected_report(a as usize, b as usize, fa, fb) {
-            super::spawner::log(&line);
-        }
         return 0;
     }
     let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));

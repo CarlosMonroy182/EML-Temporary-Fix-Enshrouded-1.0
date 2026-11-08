@@ -7,6 +7,7 @@ INSTALL
 3. Copy and paste ALL the contents of this "M182_Client" folder into the game folder. If Windows asks, choose "Replace".
    These get copied: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json and the mods folder. Your item settings (m182_item_stats.json and mods\zz_m182_item_stats\src\m182_data.lua) are not in this package: yours are kept.
 4. Start the game. Once you are inside the world, press the INSERT key: the M182 panel opens. Press INSERT again (or close the window) to hide it.
+   To use another key, put "panel_key" in m182_panel.json (for example "panel_key": "F8"). Accepted: F1 to F12, Insert, Home, End, Delete, PageUp, PageDown, Pause.
 
 IMPORTANT
 - Play in "Borderless window" (Options > Graphics > Display mode). The panel is its own window placed over the game; in exclusive fullscreen it will not show.

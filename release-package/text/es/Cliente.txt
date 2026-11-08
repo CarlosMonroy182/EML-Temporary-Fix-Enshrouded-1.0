@@ -7,6 +7,7 @@ INSTALAR
 3. Copia y pega TODO el contenido de esta carpeta "M182_Cliente" dentro de la carpeta del juego. Si Windows pregunta, elige "Reemplazar".
    Se copian: dbghelp.dll, M182_Panel.dll, eml.json, m182_native.json, m182_panel.json y la carpeta mods. Tus ajustes de items (m182_item_stats.json y mods\zz_m182_item_stats\src\m182_data.lua) no vienen en este paquete: se conservan los tuyos.
 4. Abre el juego. Cuando estes dentro del mundo, pulsa la tecla INSERT: se abre el panel M182. Vuelve a pulsar INSERT (o cierra la ventana) para esconderlo.
+   Para usar otra tecla, pon "panel_key" en m182_panel.json (por ejemplo "panel_key": "F8"). Valen: F1 a F12, Insert, Home, End, Delete, PageUp, PageDown, Pause.
 
 IMPORTANTE
 - Juega en "Ventana sin bordes" (Opciones > Graficos > Modo de pantalla). El panel es una ventana propia que se pone encima del juego; en pantalla completa exclusiva no se vera.

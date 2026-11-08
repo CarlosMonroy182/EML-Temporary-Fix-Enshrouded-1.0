@@ -369,15 +369,6 @@ pub fn is_protected(addr: usize) -> bool {
     p.contains(&addr)
 }
 
-static PROTECTED_REPORTS: AtomicU32 = AtomicU32::new(0);
-
-pub fn protected_report(a: usize, b: usize, fa: u8, fb: u8) -> Option<String> {
-    if PROTECTED_REPORTS.fetch_add(1, Ordering::Relaxed) >= 40 {
-        return None;
-    }
-    Some(format!("zones: hostile check blocked a={a:#x} faction={fa} protected={} b={b:#x} faction={fb} protected={}", is_protected(a), is_protected(b)))
-}
-
 static PAIR_REPORTS: AtomicU32 = AtomicU32::new(0);
 
 pub fn pair_report(a: usize, b: usize) -> Option<String> {
