@@ -59,7 +59,7 @@ const TRANSFORM_SIZE: usize = 56;
 pub(super) const COMPONENT_SLOTS: usize = 640;
 const METERS: f64 = 4_294_967_296.0;
 const MAX_CALIBRATION_TRIES: u32 = 400;
-const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
+pub(super) const HEALTH_SIGNATURE: u32 = 0x8eb8_4995;
 const DAMAGE_SIGNATURE: u32 = 0xb866_36b9;
 pub(super) const STAMINA_SIGNATURE: u32 = 0x04b6_aa8b;
 pub(super) const MANA_SIGNATURE: u32 = 0x6aa2_574e;
@@ -3233,12 +3233,18 @@ fn lock_records(manager: usize, id: u32, out: &mut Vec<usize>) {
     }
 }
 
+fn health_record(manager: usize, id: u32, out: &mut Vec<usize>) {
+    if let Some((addr, _)) = resource(manager, id, 0, HEALTH_SIGNATURE) {
+        out.push(addr);
+    }
+}
+
 static LOCK_STATE: std::sync::Mutex<(Option<Instant>, Vec<usize>)> = std::sync::Mutex::new((None, Vec::new()));
 
 /// Keeps the game's stamina and mana records of the protected players registered with the spend hook.
 /// The records only move when an entity changes chunk, so a refresh every ~30 ms is plenty.
-fn refresh_resource_lock(st: &PowerState, manager: usize, id: u32, client: Option<(usize, u32)>, hosting: bool) {
-    let wanted = st.powers.stamina || (hosting && client_stamina_on(st));
+fn refresh_resource_lock(st: &PowerState, manager: usize, id: u32, client: Option<(usize, u32)>, hosting: bool, shielded: &[(usize, u32)]) {
+    let wanted = st.powers.stamina || (hosting && client_stamina_on(st)) || !shielded.is_empty();
     let Ok(mut state) = LOCK_STATE.lock() else { return };
     if !wanted {
         if !state.1.is_empty() {
@@ -3270,6 +3276,9 @@ fn refresh_resource_lock(st: &PowerState, manager: usize, id: u32, client: Optio
                 lock_records(server, (number & 0x3f) + 1, &mut records);
             }
         }
+    }
+    for &(m, e) in shielded {
+        health_record(m, e, &mut records);
     }
     if records != state.1 {
         log(&format!("resource lock: protecting records {records:x?}"));
@@ -3370,7 +3379,6 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         spawners_tick(&mut st.spawners, dir);
     }
     let client = client_pair();
-    refresh_resource_lock(st, manager, id, client, hosting);
     let protected = st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
     let mut want: Vec<(usize, u32)> = Vec::new();
     if st.powers.god || protected {
@@ -3398,6 +3406,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
             }
         }
     }
+    refresh_resource_lock(st, manager, id, client, hosting, &want);
     shield_tick(st, &want);
     if hosting {
         apply_client_powers(st, SERVER_MGR.load(Ordering::SeqCst), tick, poll);
@@ -4988,6 +4997,41 @@ fn spawners_tick(set: &mut SpawnerSet, dir: &std::path::Path) {
     }
 }
 
+struct PauseInputs {
+    fly: bool,
+    clients_busy: bool,
+    urgent: bool,
+    only_shield: bool,
+    shield_idle: bool,
+    stamina: bool,
+    hosting: bool,
+    health_hook: bool,
+}
+
+/// How long the power loop sleeps before looking again. God mode no longer needs a tight loop once the spend
+/// hook has shown it stops the health losses itself, and a game that only joins a server (the server owns
+/// the health) never needs one.
+fn power_pause(i: &PauseInputs) -> u64 {
+    if i.fly {
+        1
+    } else if i.clients_busy {
+        if i.health_hook { 8 } else { 1 }
+    } else if i.urgent && i.only_shield && i.shield_idle {
+        50
+    } else if i.urgent {
+        match (i.hosting, i.health_hook) {
+            (true, true) => 8,
+            (true, false) => 4,
+            (false, true) => 50,
+            (false, false) => 16,
+        }
+    } else if i.stamina {
+        16
+    } else {
+        25
+    }
+}
+
 fn powers_loop() {
     let Ok(dir) = std::env::current_dir() else { return };
     unsafe {
@@ -5012,18 +5056,16 @@ fn powers_loop() {
             && st.zone_ids.is_empty()
             && st.groups.zones.is_empty()
             && !st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
-        let pause = if st.powers.fly || client_powers_busy(&st) {
-            1
-        } else if urgent && only_shield && shield_idle() {
-            // god mode is on but there is nothing to protect on this machine right now: look again slowly
-            50
-        } else if urgent {
-            4
-        } else if st.powers.stamina || client_stamina_on(&st) {
-            16
-        } else {
-            25
-        };
+        let pause = power_pause(&PauseInputs {
+            fly: st.powers.fly,
+            clients_busy: client_powers_busy(&st),
+            urgent,
+            only_shield,
+            shield_idle: shield_idle(),
+            stamina: st.powers.stamina || client_stamina_on(&st),
+            hosting: SERVER_MGR.load(Ordering::SeqCst) != 0,
+            health_hook: super::patch::health_hook_proven(),
+        });
         super::chat::wait_for_work(Duration::from_millis(pause));
         tick = tick.wrapping_add(1);
         let poll = polled.elapsed() >= Duration::from_millis(250);
@@ -5031,6 +5073,45 @@ fn powers_loop() {
             polled = Instant::now();
         }
         power_tick(&mut st, &dir, tick, poll);
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    fn base() -> PauseInputs {
+        PauseInputs { fly: false, clients_busy: false, urgent: false, only_shield: true, shield_idle: false, stamina: false, hosting: false, health_hook: false }
+    }
+
+    #[test]
+    fn nothing_on_sleeps_long() {
+        assert_eq!(power_pause(&base()), 25);
+        assert_eq!(power_pause(&PauseInputs { stamina: true, ..base() }), 16);
+    }
+
+    #[test]
+    fn fly_keeps_the_tight_loop() {
+        assert_eq!(power_pause(&PauseInputs { fly: true, health_hook: true, ..base() }), 1);
+    }
+
+    #[test]
+    fn god_on_a_joined_game_never_runs_every_few_milliseconds() {
+        assert_eq!(power_pause(&PauseInputs { urgent: true, ..base() }), 16);
+        assert_eq!(power_pause(&PauseInputs { urgent: true, health_hook: true, ..base() }), 50);
+    }
+
+    #[test]
+    fn the_host_keeps_the_old_pace_until_the_hook_proves_itself() {
+        assert_eq!(power_pause(&PauseInputs { urgent: true, hosting: true, ..base() }), 4);
+        assert_eq!(power_pause(&PauseInputs { urgent: true, hosting: true, health_hook: true, ..base() }), 8);
+        assert_eq!(power_pause(&PauseInputs { clients_busy: true, hosting: true, ..base() }), 1);
+        assert_eq!(power_pause(&PauseInputs { clients_busy: true, hosting: true, health_hook: true, ..base() }), 8);
+    }
+
+    #[test]
+    fn nothing_to_protect_slows_down() {
+        assert_eq!(power_pause(&PauseInputs { urgent: true, shield_idle: true, ..base() }), 50);
     }
 }
 

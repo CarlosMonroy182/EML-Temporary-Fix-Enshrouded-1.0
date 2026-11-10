@@ -857,11 +857,32 @@ pub fn protected_records() -> Vec<usize> {
     RESOURCE_LOCK.iter().map(|s| s.load(Ordering::Relaxed)).filter(|a| *a != 0).collect()
 }
 
+static HEALTH_BLOCKED: AtomicU64 = AtomicU64::new(0);
+const HEALTH_PROOF: u64 = 3;
+
+/// True once the spend hook has itself stopped a few health losses of a protected player: from then on the
+/// power loop does not have to top the health up every few milliseconds.
+pub fn health_hook_proven() -> bool {
+    HEALTH_BLOCKED.load(Ordering::Relaxed) >= HEALTH_PROOF
+}
+
+/// Which losses the hook stops for a locked record: stamina and mana (the power) and health (god mode).
+pub(super) fn lock_applies(kind: u32, delta: i32) -> bool {
+    delta < 0
+        && (kind == super::spawner::STAMINA_SIGNATURE
+            || kind == super::spawner::MANA_SIGNATURE
+            || kind == super::spawner::HEALTH_SIGNATURE)
+}
+
 extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usize, delta: i32, kind: u32) -> usize {
     super::probe::hit(super::probe::RESOURCE);
-    if delta < 0 && (kind == super::spawner::STAMINA_SIGNATURE || kind == super::spawner::MANA_SIGNATURE) {
+    if lock_applies(kind, delta) {
         let locked = chunk != 0 && RESOURCE_LOCK.iter().any(|slot| slot.load(Ordering::Relaxed) == chunk);
-        if !locked && RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
+        if locked && kind == super::spawner::HEALTH_SIGNATURE {
+            HEALTH_BLOCKED.fetch_add(1, Ordering::Relaxed);
+            return 0;
+        }
+        if !locked && kind != super::spawner::HEALTH_SIGNATURE && RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {
             let known: Vec<usize> = RESOURCE_LOCK.iter().map(|s| s.load(Ordering::Relaxed)).filter(|a| *a != 0).collect();
             super::spawner::log(&format!(
                 "resource lock: copy {N} record {chunk:#x} type {kind:#x} delta {delta} was spent (locked records {known:x?})"
@@ -1597,5 +1618,31 @@ mod gather_site_tests {
         other[0] = 0x4d;
         let caller = other.as_ptr() as usize + GATHER_BEFORE.len() + 4;
         assert!(!is_gather_site(caller));
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use super::super::spawner::{HEALTH_SIGNATURE, MANA_SIGNATURE, STAMINA_SIGNATURE};
+
+    #[test]
+    fn only_losses_of_the_three_locked_resources_are_stopped() {
+        assert!(lock_applies(HEALTH_SIGNATURE, -5));
+        assert!(lock_applies(STAMINA_SIGNATURE, -1));
+        assert!(lock_applies(MANA_SIGNATURE, -1));
+        assert!(!lock_applies(HEALTH_SIGNATURE, 5));
+        assert!(!lock_applies(HEALTH_SIGNATURE, 0));
+        assert!(!lock_applies(0x1234_5678, -5));
+    }
+
+    #[test]
+    fn the_health_hook_is_trusted_only_after_it_has_worked_a_few_times() {
+        assert!(!health_hook_proven() || HEALTH_BLOCKED.load(Ordering::Relaxed) >= HEALTH_PROOF);
+        HEALTH_BLOCKED.store(HEALTH_PROOF - 1, Ordering::Relaxed);
+        assert!(!health_hook_proven());
+        HEALTH_BLOCKED.store(HEALTH_PROOF, Ordering::Relaxed);
+        assert!(health_hook_proven());
+        HEALTH_BLOCKED.store(0, Ordering::Relaxed);
     }
 }
