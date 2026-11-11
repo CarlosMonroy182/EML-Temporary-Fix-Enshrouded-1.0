@@ -126,21 +126,22 @@ jobs:
             if grep -q "client_build_anywhere" $file; then echo "$file must not contain client_build_anywhere"; exit 1; fi
           done
           if grep -rail "build_anywhere\|build anywhere" dist; then echo "a packaged file still mentions build anywhere"; exit 1; fi
-          if grep -rIl "7dde183b" dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "private key found in the public packages"; exit 1; fi
+          if grep -rIlE '"(chat_key|remote_key)": "[^"]' dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "the public packages must ship without a key"; exit 1; fi
+          client_key=$(grep -o '"remote_key": "[^"]*"' dist/M182_Client/m182_native.json | cut -d'"' -f4)
+          for folder in M182_Cliente M182_Client; do
+            grep -q "\"remote_key\": \"$client_key\"" dist/$folder/m182_native.json || { echo "$folder: remote_key differs"; exit 1; }
+          done
+          for folder in M182_Servidor M182_Server; do
+            grep -q "\"chat_key\": \"$client_key\"" dist/$folder/m182_native.json || { echo "$folder: chat_key does not match the client remote_key"; exit 1; }
+          done
+          echo "$client_key" | grep -qE '^m182-[0-9a-f]{8}$' || { echo "packaged key has the wrong format"; exit 1; }
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src
           cp artifacts/native/dbghelp.dll dist/M182_PvP/
           cp nexus-package/m182_native.json nexus-package/eml.json nexus-package/README.txt dist/M182_PvP/
           cp eml-fork/LICENSE dist/M182_PvP/
           cp spawner-mods/m182_spawn_variants/mod.json dist/M182_PvP/mods/m182_spawn_variants/
           cp spawner-mods/m182_spawn_variants/src/mod.lua dist/M182_PvP/mods/m182_spawn_variants/src/
-          mkdir -p dist/M182_Inferno_Magic
-          cp artifacts/native/dbghelp.dll dist/M182_Inferno_Magic/
-          cp nexus-package/inferno/m182_native.json nexus-package/inferno/m182_pillar.json nexus-package/inferno/eml.json nexus-package/inferno/README.txt dist/M182_Inferno_Magic/
-          cp eml-fork/LICENSE dist/M182_Inferno_Magic/
-          mkdir -p dist/M182_Inferno_Magic/mods
-          cp -r spawner-mods/m182_inferno_beam dist/M182_Inferno_Magic/mods/
-          if grep -rIl "7dde183b" dist/M182_Inferno_Magic; then echo "private key found in the Inferno package"; exit 1; fi
-          (cd dist && zip -r M182_Inferno_Magic.zip M182_Inferno_Magic && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server && zip -r M182_Nexus_Client.zip M182_Nexus_Client && zip -r M182_Nexus_Server.zip M182_Nexus_Server)
+          (cd dist && zip -r M182_PvP_Nexus.zip M182_PvP && zip -r M182_Cliente_ES.zip M182_Cliente && zip -r M182_Servidor_ES.zip M182_Servidor && zip -r M182_Client_EN.zip M182_Client && zip -r M182_Server_EN.zip M182_Server && zip -r M182_Nexus_Client.zip M182_Nexus_Client && zip -r M182_Nexus_Server.zip M182_Nexus_Server)
           (cd dist && sha256sum M182_*.zip > SHA256.txt)
       - name: Publish release
         env:
@@ -148,4 +149,4 @@ jobs:
         run: |
           tag=admin-pannel-latest
           gh release delete "$tag" --cleanup-tag --yes || true
-          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/M182_Inferno_Magic.zip dist/M182_Nexus_Client.zip dist/M182_Nexus_Server.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."
+          gh release create "$tag" dist/M182_Cliente_ES.zip dist/M182_Servidor_ES.zip dist/M182_Client_EN.zip dist/M182_Server_EN.zip dist/M182_PvP_Nexus.zip dist/M182_Nexus_Client.zip dist/M182_Nexus_Server.zip dist/SHA256.txt --target "${{ github.sha }}" --title "M182 latest build" --notes "Automatic build: M182 Client and Server folders in Spanish and English (in-game panel, Insert) and the M182 PvP package for Nexus."

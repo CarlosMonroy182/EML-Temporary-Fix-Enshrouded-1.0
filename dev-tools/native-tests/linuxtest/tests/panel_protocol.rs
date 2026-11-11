@@ -6,7 +6,7 @@ use std::time::Instant;
 #[allow(dead_code)]
 mod proto;
 
-const KEY: &str = "m182-7dde183b";
+const KEY: &str = "m182-fa70566e";
 
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
