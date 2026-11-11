@@ -19,7 +19,7 @@ local SLOTS = {
 
 local function patch_items()
     local items = try(function() return game.assets.get_resources_by_type("keen::ItemInfo") end)
-    local seen, zone, reach, materials, gathering = {}, 0, 0, 0, 0
+    local seen, reach, materials, gathering = {}, 0, 0, 0
     if type(items) ~= "table" then return end
     local reach_limit = tonumber(config.build_reach) or 0
     for _, resource in ipairs(items) do
@@ -35,10 +35,6 @@ local function patch_items()
             local cursor = equipment.cursorConfig
             local builds = slot ~= "Tool" or cursor.checkRequiredMaterialsOnPrimaryAction == true or cursor.checkRequiredMaterialsOnSecondaryAction == true
             seen[slot] = (seen[slot] or 0) + 1
-            if config.build_anywhere ~= false and equipment.buildZoneRequired == true then
-                equipment.buildZoneRequired = false
-                zone = zone + 1
-            end
             if not builds then return end
             if config.free_materials_check ~= false then
                 if cursor.checkRequiredMaterialsOnPrimaryAction == true then
@@ -62,7 +58,7 @@ local function patch_items()
     end
     local total = 0
     for _, n in pairs(seen) do total = total + n end
-    print(string.format("%s build items %d: build zone not required %d, material check off %d, reach raised %d, gathering tools left alone %d", TAG, total, zone, materials, reach, gathering))
+    print(string.format("%s build items %d: material check off %d, reach raised %d, gathering tools left alone %d", TAG, total, materials, reach, gathering))
 end
 
 local function placed_entities()

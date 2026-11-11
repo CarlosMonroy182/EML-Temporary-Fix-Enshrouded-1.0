@@ -35,7 +35,6 @@ pub const CREATE: usize = 5;
 pub const PUMP: usize = 6;
 pub const PERMISSIONS: usize = 7;
 pub const PAY: usize = 8;
-pub const WORLD_QUERY: usize = 9;
 pub const CHAT: usize = 10;
 const SLOTS: usize = 11;
 const NAMES: [&str; SLOTS] = [
@@ -48,7 +47,7 @@ const NAMES: [&str; SLOTS] = [
     "players pump",
     "permissions",
     "pay costs",
-    "world query",
+    "unused",
     "chat enqueue",
 ];
 const THREADS: usize = 4;

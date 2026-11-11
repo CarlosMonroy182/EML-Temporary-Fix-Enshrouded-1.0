@@ -23,7 +23,6 @@ CONFIG (m182_native.json) - reloaded while you play
   "pvp": true                 players can damage each other
   "pvp_friend_checks": true   needed for teams to protect their members
   "spawner": true             enables the creature spawner used by the panel
-  "client_build_anywhere": false   true lets the hammer work away from any Flame Altar in a world you host (restart the game)
 
 UNINSTALL
 Delete dbghelp.dll, m182_native.json, the mods\m182_spawn_variants folder (and mods\zz_m182_item_stats if it exists).

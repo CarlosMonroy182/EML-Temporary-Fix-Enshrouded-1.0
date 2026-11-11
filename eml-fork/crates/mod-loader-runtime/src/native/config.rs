@@ -42,8 +42,6 @@ pub struct NativeConfig {
     pub chat_admin_only: bool,
     /// Administrators build without spending materials.
     pub free_building: bool,
-    /// On the game client, the hammer works away from any Flame Altar.
-    pub client_build_anywhere: bool,
     /// Diagnostic: logs which thread calls each hooked game function and how often (off by default).
     pub thread_probe: bool,
     /// Sends the lines the panel leaves in `m182_chat_out.txt` through the game's own chat function (no typing).
@@ -55,7 +53,6 @@ impl Default for NativeConfig {
         Self {
             enabled: true,
             free_building: true,
-            client_build_anywhere: false,
             thread_probe: false,
             chat_inject: true,
             pvp: false,
@@ -102,7 +99,6 @@ pub struct LiveState {
     pub force_client: AtomicBool,
     pub chat_admin_only: AtomicBool,
     pub free_building: AtomicBool,
-    pub client_build_anywhere: AtomicBool,
     pub chat_key: std::sync::Mutex<String>,
 }
 
@@ -180,7 +176,6 @@ pub static LIVE: LiveState = LiveState {
     force_client: AtomicBool::new(false),
     chat_admin_only: AtomicBool::new(true),
     free_building: AtomicBool::new(true),
-    client_build_anywhere: AtomicBool::new(false),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
@@ -196,7 +191,6 @@ impl LiveState {
         self.force_client.store(cfg.enabled && cfg.force_client, Ordering::Relaxed);
         self.chat_admin_only.store(cfg.chat_admin_only, Ordering::Relaxed);
         self.free_building.store(cfg.enabled && cfg.free_building, Ordering::Relaxed);
-        self.client_build_anywhere.store(cfg.enabled && cfg.client_build_anywhere, Ordering::Relaxed);
         super::probe::set(cfg.enabled && cfg.thread_probe);
         super::probe::set_inject(cfg.enabled && cfg.chat_inject);
 
@@ -243,11 +237,6 @@ impl LiveState {
     }
 
     #[inline]
-    pub fn client_build_anywhere(&self) -> bool {
-        self.client_build_anywhere.load(Ordering::Relaxed)
-    }
-
-    #[inline]
     pub fn free_building(&self) -> bool {
         self.free_building.load(Ordering::Relaxed)
     }
@@ -280,4 +269,20 @@ impl LiveState {
 
 pub fn config_path(dir: &Path) -> PathBuf {
     dir.join(CONFIG_FILE)
+}
+
+#[cfg(test)]
+mod old_config_tests {
+    use super::NativeConfig;
+
+    #[test]
+    fn a_config_that_still_has_the_removed_building_key_loads_and_changes_nothing() {
+        for value in ["true", "false"] {
+            let text = format!(r#"{{"enabled": true, "pvp": true, "free_building": true, "client_build_anywhere": {value}, "chat_key": "abcdefgh1234"}}"#);
+            let old: NativeConfig = serde_json::from_str(&text).expect("old config must load");
+            let new: NativeConfig = serde_json::from_str(r#"{"enabled": true, "pvp": true, "free_building": true, "chat_key": "abcdefgh1234"}"#).unwrap();
+            assert_eq!(format!("{old:?}"), format!("{new:?}"));
+            assert!(old.free_building && old.pvp && old.chat_key == "abcdefgh1234");
+        }
+    }
 }

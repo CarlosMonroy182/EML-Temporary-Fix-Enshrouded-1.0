@@ -16,6 +16,5 @@
   "watch_key": "F5",
   "chat_key": "",
   "remote_key": "",
-  "panel": true,
-  "client_build_anywhere": false
+  "panel": true
 }

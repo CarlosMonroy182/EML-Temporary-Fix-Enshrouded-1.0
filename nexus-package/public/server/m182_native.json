@@ -15,6 +15,5 @@
   "dump_spawned_key": "F6",
   "watch_key": "F5",
   "chat_key": "",
-  "chat_admin_only": true,
-  "client_build_anywhere": false
+  "chat_admin_only": true
 }

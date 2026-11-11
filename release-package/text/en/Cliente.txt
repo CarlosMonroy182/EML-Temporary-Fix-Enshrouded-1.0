@@ -52,9 +52,8 @@ NOTES
 - Skills without cost and item/player levels are applied when the game or the server starts: after changing them in Settings the panel also saves them on the server (mods\zz_m182_item_stats\src\m182_data.lua) and you only have to restart the server. Nothing needs to be uploaded by FTP.
 
 BUILDING (M182 Building, folder mods\m182_diag_build)
-- Administrators build without materials and away from altars; doors and crafting stations placed by players stay private to the base team. Pickaxes, axes and the gold sieve work as in the game. Install the folder in the game and on the server.
+- Administrators build without materials; doors and crafting stations placed by players stay private to the base team. Pickaxes, axes and the gold sieve work as in the game. Install the folder in the game and on the server.
 - Its settings are in mods\m182_diag_build\src\m182_diag_build_config.lua; restart the game or the server after changing them.
-- Building away from any Flame Altar in a world you host from the game is off. To turn it on, put "client_build_anywhere": true in m182_native.json and restart the game.
 
 IF THE GAME WILL NOT START
 - This package loads through dbghelp.dll. Another mod loader that also uses dbghelp.dll (for example the original EML) cannot run at the same time: keep only one dbghelp.dll in the game folder.

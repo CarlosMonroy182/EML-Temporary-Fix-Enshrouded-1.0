@@ -5,6 +5,5 @@
   "spawn_probe": false,
   "spawner": false,
   "panel": false,
-  "chat_key": "",
-  "client_build_anywhere": false
+  "chat_key": ""
 }

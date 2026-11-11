@@ -50,9 +50,8 @@ NOTAS
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. No hay que subir nada por FTP.
 
 CONSTRUCCION (M182 Building, carpeta mods\m182_diag_build)
-- Los administradores construyen sin materiales y lejos de los altares; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Picos, hachas y el tamiz de oro funcionan como en el juego. Instala la carpeta en el juego y en el servidor.
+- Los administradores construyen sin materiales; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Picos, hachas y el tamiz de oro funcionan como en el juego. Instala la carpeta en el juego y en el servidor.
 - Sus ajustes estan en mods\m182_diag_build\src\m182_diag_build_config.lua; reinicia el juego o el servidor despues de cambiarlos.
-- Construir lejos de cualquier Altar de la Llama en un mundo que alojas desde el juego viene apagado. Para encenderlo, pon "client_build_anywhere": true en m182_native.json y reinicia el juego.
 
 SI EL JUEGO NO ABRE
 - Este paquete carga mediante dbghelp.dll. Otro cargador de mods que tambien use dbghelp.dll (por ejemplo el EML original) no puede funcionar a la vez: deja un solo dbghelp.dll en la carpeta del juego.

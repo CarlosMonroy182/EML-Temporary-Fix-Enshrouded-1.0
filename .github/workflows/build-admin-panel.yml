@@ -123,8 +123,9 @@ jobs:
             test -f dist/$folder/mods/m182_diag_build/src/mod.lua || { echo "$folder is missing m182_diag_build"; exit 1; }
           done
           for file in dist/*/m182_native.json; do
-            grep -q '"client_build_anywhere": false' $file || { echo "$file must set client_build_anywhere to false"; exit 1; }
+            if grep -q "client_build_anywhere" $file; then echo "$file must not contain client_build_anywhere"; exit 1; fi
           done
+          if grep -rail "build_anywhere\|build anywhere" dist; then echo "a packaged file still mentions build anywhere"; exit 1; fi
           if grep -rIl "7dde183b" dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "private key found in the public packages"; exit 1; fi
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src
           cp artifacts/native/dbghelp.dll dist/M182_PvP/

@@ -31,6 +31,6 @@ Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta
 
 MODS
 - Aura divina (opción del panel «Admin del jugador»): necesita la carpeta mods\m182_divine, que viene en este paquete. Sin ella el brillo no se puede quitar y el log m182_spawner.log lo marca como ERROR.
-- M182 Building (carpeta mods\m182_diag_build, viene en este paquete): los administradores construyen sin materiales y lejos de los altares; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Sus ajustes estan en mods\m182_diag_build\src\m182_diag_build_config.lua.
+- M182 Building (carpeta mods\m182_diag_build, viene en este paquete): los administradores construyen sin materiales; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Sus ajustes estan en mods\m182_diag_build\src\m182_diag_build_config.lua.
 
 Hecho por M182.

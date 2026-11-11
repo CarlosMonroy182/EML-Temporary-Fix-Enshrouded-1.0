@@ -31,6 +31,6 @@ Personal powers (god mode, energy) only last while that player is connected.
 
 MODS
 - God aura (panel option in the player admin tab): needs the folder mods\m182_divine, which is part of this package. Without it the glow cannot be removed and m182_spawner.log reports an ERROR.
-- M182 Building (folder mods\m182_diag_build, part of this package): administrators build without materials and away from altars; doors and crafting stations placed by players stay private to the base team. Its settings are in mods\m182_diag_build\src\m182_diag_build_config.lua.
+- M182 Building (folder mods\m182_diag_build, part of this package): administrators build without materials; doors and crafting stations placed by players stay private to the base team. Its settings are in mods\m182_diag_build\src\m182_diag_build_config.lua.
 
 Made by M182.

@@ -1,7 +1,7 @@
 {
     "id": "m182_diag_build",
     "name": "M182 Building",
-    "description": "Administrators build without materials and away from altars; player doors and crafting stations stay private to the base team.",
+    "description": "Administrators build without materials; player doors and crafting stations stay private to the base team.",
     "version": "1.0.0",
     "capabilities": [
         "patch"
