@@ -84,7 +84,7 @@ vx=ffi.sub(lambda m:'pub static KEY_DOWN: std::sync::atomic::AtomicBool = std::s
 wr('vfx.rs',vx)
 shutil.copy(S+'vfx_items.csv',D+'vfx_items.csv')
 
-for f in ['pillar.rs','pillar_cfg.rs','veil_beam.rs']:
+for f in ['pillar.rs','pillar_cfg.rs','veil_beam.rs','shield.rs']:
     wr(f,rd(f))
 g=rd('guard.rs')
 g=ffi.sub(lambda m:'unsafe fn GetCurrentProcess() -> *mut c_void { 1 as *mut c_void }\nunsafe fn ReadProcessMemory(_p: *mut c_void, addr: *const c_void, buf: *mut c_void, size: usize, read: *mut usize) -> i32 { unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, buf as *mut u8, size); *read = size; } 1 }\nunsafe fn VirtualAlloc(_a: *mut c_void, size: usize, _k: u32, _p: u32) -> *mut c_void { unsafe { libc::mmap(std::ptr::null_mut(), size, 7, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) } }\n',g,count=1)

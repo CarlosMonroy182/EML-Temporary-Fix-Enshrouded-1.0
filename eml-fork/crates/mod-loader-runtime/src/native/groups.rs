@@ -25,6 +25,8 @@ pub struct Zone {
     pub lock_admins: Option<bool>,
     /// Players can always hurt each other inside, even when PvP is off for the rest of the world.
     pub pvp: Option<bool>,
+    /// Decoration built inside cannot be broken by hits (the hammer still removes it).
+    pub shield: Option<bool>,
 }
 
 impl Zone {
@@ -42,6 +44,10 @@ impl Zone {
 
     pub fn locks(&self) -> bool {
         self.lock.unwrap_or(false)
+    }
+
+    pub fn shields(&self) -> bool {
+        self.shield.unwrap_or(false)
     }
 }
 

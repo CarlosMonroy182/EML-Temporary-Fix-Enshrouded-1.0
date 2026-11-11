@@ -327,6 +327,22 @@ fn entity_layout(manager: usize, id: u32) -> Option<(usize, Placement, Vec<Slot>
     Some((record, p, slots))
 }
 
+/// Every component of an entity as `index:size`, with the bytes of the small ones.
+pub(super) fn component_summary(manager: usize, id: u32) -> Option<String> {
+    let (_, _, slots) = entity_layout(manager, id)?;
+    let parts: Vec<String> = slots
+        .iter()
+        .map(|s| {
+            if s.stride <= 12 {
+                format!("{}:{}={}", s.index, s.stride, read_bytes(s.addr, s.stride).map(|b| hex(&b)).unwrap_or_default())
+            } else {
+                format!("{}:{}", s.index, s.stride)
+            }
+        })
+        .collect();
+    Some(format!("{} components [{}]", parts.len(), parts.join(" ")))
+}
+
 pub fn dump_entity(label: &str, manager: usize, id: u32) {
     let n = DUMP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     let Some((record, p, slots)) = entity_layout(manager, id) else {
@@ -1082,98 +1098,6 @@ fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
     Some(out)
 }
 
-const DAMAGE_ATTEMPTS_MAX: u32 = 300;
-const DAMAGE_IN_ZONE_MAX: u32 = 30;
-const DAMAGE_OUTSIDE_MAX: u32 = 6;
-const DAMAGE_RAW_MAX: u32 = 10;
-const DAMAGE_GAP: Duration = Duration::from_millis(1500);
-static DAMAGE_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
-static DAMAGE_IN_ZONE: AtomicU32 = AtomicU32::new(0);
-static DAMAGE_OUTSIDE: AtomicU32 = AtomicU32::new(0);
-static DAMAGE_RAW: AtomicU32 = AtomicU32::new(0);
-static DAMAGE_SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-static DAMAGE_LAST: Mutex<Option<Instant>> = Mutex::new(None);
-
-fn damage_budget_left(attempts: u32, in_zone: u32, outside: u32) -> bool {
-    attempts < DAMAGE_ATTEMPTS_MAX && (in_zone < DAMAGE_IN_ZONE_MAX || outside < DAMAGE_OUTSIDE_MAX)
-}
-
-/// Diagnostic only, never changes the damage: called by the health-loss hook for records that are not
-/// protected. It writes a few lines about WHICH entities take damage (and whether they stand in a zone)
-/// so it can be decided how to protect objects without touching creatures. Work happens only when damage
-/// arrives, at most once per 1.5 s, and stops after a fixed number of lines.
-pub(super) fn damage_seen(record: usize, arg: usize, delta: i32) {
-    if !damage_budget_left(DAMAGE_ATTEMPTS.load(Ordering::Relaxed), DAMAGE_IN_ZONE.load(Ordering::Relaxed), DAMAGE_OUTSIDE.load(Ordering::Relaxed)) {
-        return;
-    }
-    if DAMAGE_RAW.fetch_add(1, Ordering::Relaxed) < DAMAGE_RAW_MAX {
-        let around = if arg >= 0x10000 { read_bytes(arg, 32).map(|b| hex(&b)).unwrap_or_default() } else { String::new() };
-        log(&format!("damage diag: record {record:#x} second argument {arg:#x} delta {delta} bytes there [{around}]"));
-    }
-    let Ok(mut last) = DAMAGE_LAST.try_lock() else { return };
-    if matches!(*last, Some(t) if t.elapsed() < DAMAGE_GAP) {
-        return;
-    }
-    let Ok(mut seen) = DAMAGE_SEEN.try_lock() else { return };
-    if seen.contains(&record) || seen.len() >= 400 {
-        return;
-    }
-    seen.push(record);
-    *last = Some(Instant::now());
-    drop(seen);
-    drop(last);
-    DAMAGE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-    let _ = std::thread::Builder::new().name("m182-damage-diag".into()).spawn(move || damage_resolve(record, delta));
-}
-
-fn damage_resolve(record: usize, delta: i32) {
-    for (label, manager) in [("server", SERVER_MGR.load(Ordering::SeqCst)), ("client", CLIENT_MGR.load(Ordering::SeqCst))] {
-        let Some(ids) = entity_ids(manager) else { continue };
-        for id in ids {
-            let Some(entry) = find_record(manager, id) else { continue };
-            let Some(p) = placement(entry) else { continue };
-            if p.chunk > record || record - p.chunk > 0x20_0000 {
-                continue;
-            }
-            let Some(slots) = layout(&p) else { continue };
-            if slots.iter().any(|s| s.stride == 40 && s.addr == record) {
-                damage_report(label, manager, id, &slots, record, delta);
-                return;
-            }
-        }
-    }
-    log(&format!("damage diag: record {record:#x} (delta {delta}) belongs to no known entity"));
-}
-
-fn damage_report(label: &str, manager: usize, id: u32, slots: &[Slot], record: usize, delta: i32) {
-    let pos = entity_position(manager, id);
-    let zones = std::env::current_dir()
-        .ok()
-        .and_then(|d| std::fs::read_to_string(d.join("m182_zones.json")).ok())
-        .map(|t| groups::parse_zones(&t))
-        .unwrap_or_default();
-    let zone = pos.and_then(|p| zones.iter().find(|z| groups::inside(std::slice::from_ref(z), p[0], p[2])).map(|z| z.name.clone()));
-    let counter = if zone.is_some() { &DAMAGE_IN_ZONE } else { &DAMAGE_OUTSIDE };
-    let limit = if zone.is_some() { DAMAGE_IN_ZONE_MAX } else { DAMAGE_OUTSIDE_MAX };
-    if counter.fetch_add(1, Ordering::Relaxed) >= limit {
-        return;
-    }
-    let faction = slots
-        .iter()
-        .find(|s| s.index == FACTION_COMPONENT && s.stride == 1)
-        .and_then(|s| read_bytes(s.addr, 1))
-        .and_then(|b| b.first().copied());
-    let health = read_bytes(record, 40).map(|b| hex(&b)).unwrap_or_default();
-    let comps: Vec<String> = slots.iter().map(|s| format!("{}:{}", s.index, s.stride)).collect();
-    let at = pos.map(|p| format!("{:.1},{:.1},{:.1}", p[0], p[1], p[2])).unwrap_or_else(|| "?".into());
-    log(&format!(
-        "damage diag: {label} entity {id} at {at} zone={} delta {delta} faction={faction:?} health record [{health}] {} components [{}]",
-        zone.as_deref().unwrap_or("none"),
-        comps.len(),
-        comps.join(" ")
-    ));
-}
-
 static CENSUS: Mutex<Option<(HashSet<u32>, HashSet<u32>)>> = Mutex::new(None);
 
 pub fn census() {
@@ -1205,7 +1129,7 @@ fn le_i64(b: &[u8], off: usize) -> i64 {
     u64_at(b, off) as i64
 }
 
-fn is_server(manager: usize) -> bool {
+pub(super) fn is_server(manager: usize) -> bool {
     matches!(read_bytes(manager + 8, 1), Some(b) if b[0] == 0)
 }
 
@@ -1602,7 +1526,7 @@ fn calibration_done() -> bool {
     TRANSFORM_INDEX.load(Ordering::Relaxed) >= 0 || CALIBRATION_TRIES.load(Ordering::Relaxed) >= MAX_CALIBRATION_TRIES
 }
 
-fn guid_text(b: &[u8]) -> String {
+pub(super) fn guid_text(b: &[u8]) -> String {
     if b.len() < 16 {
         return String::new();
     }
@@ -2807,6 +2731,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             st.groups.zones.iter().filter(|z| z.is_safe()).count(),
             st.groups.zones.iter().filter(|z| z.locks()).count()
         ));
+        super::shield::set_zones(dir, &st.groups.zones);
     }
     let teams_path = dir.join(groups::TEAMS_FILE);
     let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
@@ -5258,15 +5183,6 @@ mod raid_tests {
         assert_eq!(v["spawners"][0]["id"], "b");
         let _ = std::fs::remove_dir_all(dir);
     }
-    #[test]
-    fn damage_diagnostic_stops_after_its_budget() {
-        assert!(damage_budget_left(0, 0, 0));
-        assert!(damage_budget_left(5, DAMAGE_IN_ZONE_MAX, 0));
-        assert!(damage_budget_left(5, 0, DAMAGE_OUTSIDE_MAX));
-        assert!(!damage_budget_left(5, DAMAGE_IN_ZONE_MAX, DAMAGE_OUTSIDE_MAX));
-        assert!(!damage_budget_left(DAMAGE_ATTEMPTS_MAX, 0, 0));
-    }
-
     #[test]
     fn automatic_raids_pick_a_template_and_a_point_inside_the_area() {
         let def: SpawnerDef = serde_json::from_str(r#"{"id":"z1","at":[100.0,20.0,-50.0],"area":40.0,"every":3600,

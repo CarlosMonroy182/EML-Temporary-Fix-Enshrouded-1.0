@@ -39,6 +39,9 @@ mod patch;
 mod probe;
 
 #[cfg(windows)]
+mod shield;
+
+#[cfg(windows)]
 mod spawn_probe;
 
 #[cfg(windows)]

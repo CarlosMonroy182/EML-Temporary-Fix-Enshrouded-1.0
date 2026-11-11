@@ -30,11 +30,13 @@ pub struct Zone {
     pub lock_admins: bool,
     /// Players can always hurt each other inside, even when PvP is off elsewhere.
     pub pvp: bool,
+    /// Decoration built inside cannot be broken by hits; the hammer still removes it.
+    pub shield: bool,
 }
 
 impl Zone {
     pub fn new(name: String, x: f64, z: f64, radius: f64) -> Self {
-        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false }
+        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false, shield: false }
     }
 }
 
@@ -353,6 +355,7 @@ pub fn parse_zones(text: &str) -> Vec<Zone> {
                 lock: v.get("lock").and_then(|e| e.as_bool()).unwrap_or(false),
                 lock_admins: v.get("lock_admins").and_then(|e| e.as_bool()).unwrap_or(false),
                 pvp: v.get("pvp").and_then(|e| e.as_bool()).unwrap_or(false),
+                shield: v.get("shield").and_then(|e| e.as_bool()).unwrap_or(false),
             })
         })
         .collect()
@@ -360,7 +363,16 @@ pub fn parse_zones(text: &str) -> Vec<Zone> {
 
 pub fn zones_json(zones: &[Zone]) -> Value {
     json!({
-        "zones": zones.iter().map(|z| json!({"name": z.name, "x": z.x, "z": z.z, "radius": z.radius, "enabled": z.enabled, "safe": z.safe, "team": z.team, "lock": z.lock && z.team != 0, "lock_admins": z.lock_admins, "pvp": z.pvp})).collect::<Vec<_>>()
+        "zones": zones
+            .iter()
+            .map(|z| {
+                let mut v = json!({"name": z.name, "x": z.x, "z": z.z, "radius": z.radius, "enabled": z.enabled, "safe": z.safe, "team": z.team, "lock": z.lock && z.team != 0, "lock_admins": z.lock_admins, "pvp": z.pvp});
+                if z.shield {
+                    v["shield"] = json!(true);
+                }
+                v
+            })
+            .collect::<Vec<_>>()
     })
 }
 
@@ -811,6 +823,10 @@ impl App {
                             }
                         });
                     });
+                    changed |= ui
+                        .checkbox(&mut z.shield, "Objetos irrompibles: lo construido aquí no se rompe a golpes")
+                        .on_hover_text("Antorchas, lámparas, muebles y decoración colocados dentro de la zona no se rompen con armas. Se siguen quitando con el martillo. Se aplica a lo que se coloque o se cargue a partir de ahora.")
+                        .changed();
                     if z.team != 0 {
                         ui.horizontal_wrapped(|ui| {
                             changed |= ui.checkbox(&mut z.lock, "Base protegida").changed();
@@ -1242,6 +1258,20 @@ mod tests {
         let back = parse_zones(&text);
         assert!(back[0].pvp && !back[0].safe);
         assert!(!back[1].pvp && back[1].safe);
+    }
+
+    #[test]
+    fn shield_zone_flag_is_saved_only_when_on_and_read_back() {
+        let mut town = Zone::new("Town".into(), 5.0, 6.0, 30.0);
+        town.shield = true;
+        let value = zones_json(&[town, Zone::new("Field".into(), 0.0, 0.0, 20.0)]);
+        assert_eq!(value["zones"][0]["shield"], true);
+        assert!(value["zones"][1].get("shield").is_none());
+        let back = parse_zones(&value.to_string());
+        assert!(back[0].shield && !back[1].shield);
+        let old = parse_zones(r#"{"zones":[{"name":"Old","x":1.0,"z":2.0,"radius":30.0}]}"#);
+        assert!(!old[0].shield);
+        assert_eq!(zones_json(&old)["zones"][0], zones_json(&[Zone::new("Old".into(), 1.0, 2.0, 30.0)])["zones"][0]);
     }
 
     #[test]
