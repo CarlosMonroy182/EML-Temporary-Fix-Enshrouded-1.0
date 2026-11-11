@@ -17,6 +17,7 @@ SI VIENES DE UNA VERSION ANTERIOR
 - Las armas "unicas" (copias) y el teletransporte del panel ya no existen: el viaje se hace como siempre en el juego.
 - Para tener un arma distinta basta con cambiar su nivel (y sus stats) al entregarla.
 - En mods\zz_m182_item_stats puedes borrar estos archivos si existen: m182_custom.txt, m182_custom_items.csv, m182_custom.skipped y m182_custom.running. Ya no se usan.
+- Borra mods\m182_vfx, mods\m182_inferno_beam y el archivo m182_pillar.json si existen de una version anterior.
 
 USARLO EN TU PARTIDA (local) Y EN TU SERVIDOR
 El panel detecta solo si estas en tu partida o en el servidor. No hay casillas que marcar.
@@ -48,10 +49,10 @@ NOTAS
 - Botin: las criaturas invocadas sueltan su botin normal del juego.
 - Habilidades sin costo y niveles de items/jugador se aplican al iniciar el juego o el servidor: tras cambiarlos en Ajustes el panel los guarda tambien en el servidor (mods\zz_m182_item_stats\src\m182_data.lua) y solo tienes que reiniciar el servidor. No hay que subir nada por FTP.
 
-VFX (efectos)
-- El paquete incluye los efectos M182 VFX (carpeta mods\m182_vfx). Arrancan solos: brillos mientras cargas un hechizo de bastón o un ataque cuerpo a cuerpo pesado y una explosión al soltarlo. No hace falta el panel ni ajustes. Su registro es m182_vfx.log en la carpeta del juego.
-- Si alojas un mundo en local, tambien hay auras al caminar: el gesto de saludo enciende y apaga el aura y el gesto de victoria pasa a la siguiente. En un servidor dedicado solo funcionan los efectos de carga de bastón.
-- Para apagar los efectos, borra la carpeta mods\m182_vfx (o crea m182_vfx.json con {"enabled": false}).
+CONSTRUCCION (M182 Building, carpeta mods\m182_diag_build)
+- Los administradores construyen sin materiales y lejos de los altares; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Picos, hachas y el tamiz de oro funcionan como en el juego. Instala la carpeta en el juego y en el servidor.
+- Sus ajustes estan en mods\m182_diag_build\src\m182_diag_build_config.lua; reinicia el juego o el servidor despues de cambiarlos.
+- Construir lejos de cualquier Altar de la Llama en un mundo que alojas desde el juego viene apagado. Para encenderlo, pon "client_build_anywhere": true en m182_native.json y reinicia el juego.
 
 SI EL JUEGO NO ABRE
 - Este paquete carga mediante dbghelp.dll. Otro cargador de mods que tambien use dbghelp.dll (por ejemplo el EML original) no puede funcionar a la vez: deja un solo dbghelp.dll en la carpeta del juego.
@@ -59,6 +60,6 @@ SI EL JUEGO NO ABRE
 - Si aun dice "Could not find core resource package": cierra el juego, borra dbghelp.dll y en Steam: clic derecho en Enshrouded > Propiedades > Archivos instalados > Verificar integridad de los archivos del juego. Despues vuelve a copiar los archivos del mod.
 
 DESINSTALAR
-Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json, m182_events.json y las carpetas mods\m182_spawn_variants, mods\m182_vfx, mods\m182_divine y mods\zz_m182_item_stats.
+Borra dbghelp.dll, M182_Panel.dll, m182_native.json, m182_panel.json, m182_panel.log, m182_mode.json, m182_item_stats.json, m182_sent.json, m182_events.json y las carpetas mods\m182_spawn_variants, mods\m182_diag_build, mods\m182_divine y mods\zz_m182_item_stats.
 
 Hecho por M182.

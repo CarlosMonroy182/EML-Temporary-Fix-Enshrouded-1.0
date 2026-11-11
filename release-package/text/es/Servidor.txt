@@ -10,6 +10,7 @@ INSTALAR
 ACTUALIZAR
 Al subir esta carpeta de nuevo no se tocan tus zonas, equipos, apariciones ni tus ajustes de items (no vienen en el paquete). Si ya cambiaste el PvP desde el panel y no quieres perderlo, no reemplaces m182_native.json.
 Si vienes de una version anterior, en mods\zz_m182_item_stats puedes borrar m182_custom.txt, m182_custom_items.csv, m182_custom.skipped y m182_custom.running: las armas "unicas" (copias) ya no existen.
+Borra mods\m182_vfx, mods\m182_inferno_beam y el archivo m182_pillar.json si existen de una version anterior.
 
 SOLO ADMINISTRADORES
 Solo los jugadores con permiso de expulsar/banear en el servidor pueden mandar comandos desde el panel; los demas se ignoran (m182_spawner.log dice "is not an admin"). Para desactivarlo agrega "chat_admin_only": false a m182_native.json.
@@ -28,9 +29,8 @@ Eventos y raids (pestaña "Eventos" del panel): todo se configura en esa pestañ
 Los poderes personales (modo dios, energia) solo duran mientras ese jugador esta conectado.
 
 
-VFX
-- La carpeta mods\m182_vfx forma parte de este paquete. En un servidor dedicado hace que los efectos de carga de bastón los vea todo el mundo; no hace falta nada mas. Sube la carpeta junto con el resto. Para apagarlo, borra mods\m182_vfx. Su registro es m182_vfx.log.
+MODS
 - Aura divina (opción del panel «Admin del jugador»): necesita la carpeta mods\m182_divine, que viene en este paquete. Sin ella el brillo no se puede quitar y el log m182_spawner.log lo marca como ERROR.
-- Modo ligero: en un servidor dedicado los efectos son mas ligeros por defecto (un efecto por carga, como maximo uno cada 0.4 s, vigilancia mas lenta mientras nadie carga). Para usar los efectos completos, crea m182_vfx.json en la carpeta del servidor con {"server_light": false}.
+- M182 Building (carpeta mods\m182_diag_build, viene en este paquete): los administradores construyen sin materiales y lejos de los altares; las puertas y mesas de trabajo que colocan los jugadores quedan privadas para el equipo de la base. Sus ajustes estan en mods\m182_diag_build\src\m182_diag_build_config.lua.
 
 Hecho por M182.

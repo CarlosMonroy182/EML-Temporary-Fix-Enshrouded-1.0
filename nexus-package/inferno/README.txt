@@ -41,6 +41,9 @@ DAMAGE AREA OF THE VEIL BEAM (mods/m182_inferno_beam/src/mod.lua) - value at the
   HIT_RADIUS = 1.5        radius of the damaging beam, in meters (original 0.2)
   Delete the folder m182_inferno_beam to get the original damage area back.
 
+BUILDING AWAY FROM ALTARS (m182_native.json)
+  "client_build_anywhere": false   true lets the hammer work away from any Flame Altar in a world you host (restart the game)
+
 If you already use other mods that install their own dbghelp.dll, keep only one dbghelp.dll in the folder. This one loads the mods of the "mods" folder like EML does.
 
 UNINSTALL

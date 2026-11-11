@@ -88,7 +88,7 @@ jobs:
           pack() {
             side=$1; folder=$2; panel=$3; readme=$4; text=$5
             out=dist/$folder
-            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src $out/mods/m182_vfx/src
+            mkdir -p $out/mods/m182_spawn_variants/src $out/mods/zz_m182_item_stats/src $out/mods/m182_diag_build/src
             cp release-package/$side/* $out/
             cp release-package/text/$text $out/$readme
             cp artifacts/native/dbghelp.dll $out/
@@ -96,14 +96,11 @@ jobs:
             cp spawner-mods/m182_spawn_variants/src/mod.lua $out/mods/m182_spawn_variants/src/
             cp spawner-mods/zz_m182_item_stats/mod.json $out/mods/zz_m182_item_stats/
             cp spawner-mods/zz_m182_item_stats/src/mod.lua $out/mods/zz_m182_item_stats/src/
-            cp spawner-mods/m182_vfx/mod.json $out/mods/m182_vfx/
-            cp spawner-mods/m182_vfx/src/mod.lua $out/mods/m182_vfx/src/
+            cp spawner-mods/m182_diag_build/mod.json $out/mods/m182_diag_build/
+            cp spawner-mods/m182_diag_build/src/mod.lua spawner-mods/m182_diag_build/src/m182_diag_build_config.lua $out/mods/m182_diag_build/src/
             mkdir -p $out/mods/m182_divine/src
             cp spawner-mods/m182_divine/mod.json $out/mods/m182_divine/
             cp spawner-mods/m182_divine/src/mod.lua $out/mods/m182_divine/src/
-            mkdir -p $out/mods/m182_inferno_beam/src
-            cp spawner-mods/m182_inferno_beam/mod.json $out/mods/m182_inferno_beam/
-            cp spawner-mods/m182_inferno_beam/src/mod.lua $out/mods/m182_inferno_beam/src/
             if [ "$side" = Cliente ]; then
               cp artifacts/$panel/m182_spawner_panel.dll $out/M182_Panel.dll
               cp eml-fork/LICENSE $out/ || true
@@ -120,7 +117,13 @@ jobs:
             cp nexus-package/public/$lower/* dist/M182_Nexus_$side/
             cp nexus-package/public/text/$side.txt dist/M182_Nexus_$side/README.txt
             cp eml-fork/LICENSE dist/M182_Nexus_$side/ || true
-            rm -rf dist/M182_Nexus_$side/m182_pillar.json dist/M182_Nexus_$side/mods/m182_inferno_beam
+          done
+          for folder in M182_Cliente M182_Servidor M182_Client M182_Server M182_Nexus_Client M182_Nexus_Server; do
+            if find dist/$folder | grep -iE "pillar|inferno|m182_vfx"; then echo "$folder must not ship the pillar, the beam or the VFX mod"; exit 1; fi
+            test -f dist/$folder/mods/m182_diag_build/src/mod.lua || { echo "$folder is missing m182_diag_build"; exit 1; }
+          done
+          for file in dist/*/m182_native.json; do
+            grep -q '"client_build_anywhere": false' $file || { echo "$file must set client_build_anywhere to false"; exit 1; }
           done
           if grep -rIl "7dde183b" dist/M182_Nexus_Client dist/M182_Nexus_Server; then echo "private key found in the public packages"; exit 1; fi
           mkdir -p dist/M182_PvP/mods/m182_spawn_variants/src

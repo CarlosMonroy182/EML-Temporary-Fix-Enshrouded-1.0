@@ -8,7 +8,7 @@ Repo: CarlosMonroy182/EML-Temporary-Fix-Enshrouded-1.0, branch `m182-native-laye
 - `spawner-mods/` - Lua mods: `m182_spawn_variants` (creature/item lists export) and `zz_m182_item_stats` (applies stats, levels, balance from `m182_data.lua`).
 - `release-package/{Cliente,Servidor}` - json files shipped in the zips. `release-package/text/{es,en}` - LEEME/README texts.
 - `dev-tools/native-tests` - Linux test harness for the native layer.
-- `.github/workflows/build-admin-panel.yml` - builds panel (ES and EN), native `dbghelp.dll`, packages and publishes release `admin-pannel-latest` with `M182_Cliente_ES.zip`, `M182_Servidor_ES.zip`, `M182_Client_EN.zip`, `M182_Server_EN.zip`, `M182_PvP_Nexus.zip`.
+- `.github/workflows/build-admin-panel.yml` - builds panel (ES and EN), native `dbghelp.dll`, packages and publishes release `admin-pannel-latest` with `M182_Cliente_ES.zip`, `M182_Servidor_ES.zip`, `M182_Client_EN.zip`, `M182_Server_EN.zip`, `M182_PvP_Nexus.zip`. Also `M182_Nexus_Client.zip`, `M182_Nexus_Server.zip` (public, no key) and `M182_Inferno_Magic.zip`.
 
 ## Panel <-> game protocol
 - Panel and DLL talk through files in the game folder (`m182_powers.json`, `m182_zones.json`, `m182_teams.json`, `m182_spawners.json`, `m182_player.json`, `m182_online.json`) and logs `m182_panel.log`, `m182_spawner.log`.
@@ -237,3 +237,9 @@ Account id (Nov 8): the Dathost server's player table has no Steam id; each slot
 - Decoration = template of `export/m182_objects.csv` with `Destructible` and none of the components in `shield::NOT_DECORATION` (creatures, spawners, resource nodes, loot containers). World props of those templates inside the zone are shielded too.
 - Switching the flag off (or moving/resizing/deleting the zone) records the old circle as released in `m182_shield_state.json`; objects that load there with the component get it stripped from the descriptor. Objects already loaded keep their state until they are created again.
 - Not proven: that hits are no longer felt (the hit is still simulated; only the destruction is skipped), that placed objects and objects loaded from the save pass through the create hook with a position, that the component is saved with the object. Trial switch on the server: `m182_shield.json` `{"immune": true}` also adds `CombatFlags` with `immune` (read when the zones change). Log lines start with `object shield:` (first 8 shielded, 4 released, 6 skipped, 4 comparison objects, with the given component hashes and the entity's component list).
+
+## Packaging rules (Nov 11)
+- Client/server zips (ES, EN and Nexus) ship: `dbghelp.dll`, `M182_Panel.dll` (client), the json configs and the mods `m182_spawn_variants`, `zz_m182_item_stats`, `m182_divine`, `m182_diag_build` (M182 Building, with its config file).
+- They never ship the flame pillar (`m182_pillar.json`, `m182_inferno_pillar`), `m182_inferno_beam` or `m182_vfx`. The workflow fails if one of those names appears in these folders, if `m182_diag_build` is missing, or if a packaged `m182_native.json` lacks `"client_build_anywhere": false`.
+- The pillar is for the owner's own server only. Its code stays in the native layer (off without `m182_pillar.json`); the config that used to be in `release-package` now lives in `spawner-mods/m182_inferno_pillar/m182_pillar.json` and is not packaged. `M182_Inferno_Magic.zip` is still built by the workflow from `nexus-package/inferno`.
+- `client_build_anywhere` defaults to false (code and every packaged `m182_native.json`). With it on by default, people who hosted a world from the game got a whole-map building area and reported a world without trees or resources. Turn on: `"client_build_anywhere": true` in the client `m182_native.json`, restart the game.

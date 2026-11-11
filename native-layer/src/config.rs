@@ -55,7 +55,7 @@ impl Default for NativeConfig {
         Self {
             enabled: true,
             free_building: true,
-            client_build_anywhere: true,
+            client_build_anywhere: false,
             thread_probe: false,
             chat_inject: true,
             pvp: false,
@@ -180,7 +180,7 @@ pub static LIVE: LiveState = LiveState {
     force_client: AtomicBool::new(false),
     chat_admin_only: AtomicBool::new(true),
     free_building: AtomicBool::new(true),
-    client_build_anywhere: AtomicBool::new(true),
+    client_build_anywhere: AtomicBool::new(false),
     chat_key: std::sync::Mutex::new(String::new()),
 };
 
