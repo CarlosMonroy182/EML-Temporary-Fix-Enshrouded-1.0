@@ -891,6 +891,9 @@ extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usiz
         if locked {
             return 0;
         }
+        if kind == super::spawner::HEALTH_SIGNATURE {
+            super::spawner::damage_seen(chunk, entity, delta);
+        }
     }
     let original = RESOURCE_TRAMPOLINE[N].load(Ordering::SeqCst);
     let call: extern "win64" fn(usize, usize, i32, u32) -> usize = unsafe { std::mem::transmute(original) };
