@@ -1,12 +1,11 @@
-//! Reinforced objects: inside a zone whose `shield` flag is on, what players built with the hammer takes
-//! 40 times more to break, and wooden objects 120 times more. A hit takes `Destructible.maxHealth` points off an object that has no `Health`
-//! yet and creates the `Health` it keeps afterwards, so damage adds up. The object's own numbers are
-//! multiplied once (`Destructible.maxHealth`, and `Health` maximum and current where there is one) and
-//! divided again when the zone stops reinforcing. A reinforced number has the form `n * 40 + 39` (other
-//! objects) or `n * 120 + 117` (wood), or is one of a few fixed codes for numbers too large for 16 bits;
-//! no original number has any of those forms and the two forms exclude each other, so a number is never
-//! changed twice and is always undone exactly. Work happens only when the game creates an entity or the
-//! zones change: no timers, no hook on damage.
+//! Protected objects: inside a zone whose `shield` flag is on, what players built with the hammer cannot be
+//! broken by hits, by anybody. Every object created or loaded there carries `DisableDestructible` (the game's
+//! switch for "Destroy entity if Health reaches 0") and `CombatFlags.immune`, added to the creation request
+//! the game is about to run. The hammer's own removal does not go through either component and still works.
+//! Objects the game already created before the zone protected them cannot get a component afterwards; they are
+//! counted and named in the log, and get it when the game creates them again (server start). Numbers an
+//! earlier version multiplied (`n * 40 + 39`, `n * 120 + 117`, a few fixed codes) are divided back. Work
+//! happens only when the game creates an entity or the zones change: no timers, no hook on damage.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -24,7 +23,11 @@ const HASH_DESTRUCTIBLE: u32 = 0x6cb1_eacd;
 const HASH_USED_ITEM: u32 = 0x0b02_361d;
 const HASH_HEALTH: u32 = 0xdc10_1091;
 const HASH_COMBAT_FLAGS: u32 = 0x8cf9_8906;
+const HASH_DISABLE_DESTRUCTIBLE: u32 = 0xd169_6237;
 static COMBAT_FLAGS_IMMUNE: [u8; 12] = [1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+static DISABLE_DESTRUCTIBLE: [u8; 1] = [0];
+const COMBAT_FLAGS_SIZE: usize = 12;
+const IMMUNE_MAX: usize = 50_000;
 const TRANSFORM_SIZE: usize = 56;
 const DESTRUCTIBLE_SIZE: usize = 2;
 const USED_ITEM_SIZE: usize = 4;
@@ -33,7 +36,9 @@ const FACTOR: u32 = 40;
 const MARK: u32 = FACTOR - 1;
 const WOOD_FACTOR: u32 = 120;
 const WOOD_MARK: u32 = WOOD_FACTOR - 3;
+#[cfg(test)]
 const SMALL_MAX: u16 = ((u16::MAX as u32 - MARK) / FACTOR) as u16;
+#[cfg(test)]
 const WOOD_SMALL_MAX: u16 = ((u16::MAX as u32 - WOOD_MARK) / WOOD_FACTOR) as u16;
 /// Originals too large to be multiplied inside 16 bits, and the fixed codes they are stored as.
 const LARGE: [(u16, u16); 4] = [(1000, 65398), (2000, 65518), (4000, 65478), (10000, 65438)];
@@ -42,6 +47,7 @@ const WOOD_WORDS: [&str; 7] = ["wood", "wooden", "timber", "plank", "log", "bamb
 const HEALTH_SIZE: usize = 40;
 const HEALTH_CURRENT_AT: usize = 8;
 const HEALTH_MAX_AT: usize = 36;
+#[cfg(test)]
 const HEALTH_MAX_LIMIT: u32 = 100_000_000;
 const ENTRY: usize = 24;
 const MAX_ENTRIES: usize = 0x80;
@@ -83,11 +89,19 @@ pub struct Areas {
     pub released: Vec<Area>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Options {
-    /// Trial: objects built in a shielded zone are also created with `CombatFlags.immune`.
+    /// Objects built in a protected zone are created with `CombatFlags.immune`.
     pub immune: bool,
+    /// Objects built in a protected zone are created with `DisableDestructible`.
+    pub disable: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { immune: true, disable: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +118,8 @@ pub struct Slots {
     pub destructible: usize,
     pub used_item: usize,
     pub health: Option<usize>,
+    pub disable: Option<usize>,
+    pub combat: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,9 +130,8 @@ pub enum Outcome {
     NoDestructible(u32),
     NoPosition(u32),
     Outside,
-    Already,
-    Unusual(u32),
-    Reinforced { zone: String, item: u32, edit: Edit },
+    Protected { zone: String, item: u32, disable: bool, immune: bool },
+    Unprotected { zone: String, item: u32, shared: bool },
     Released { zone: String, item: u32, edit: Edit },
     Failed(String),
 }
@@ -136,6 +151,7 @@ pub struct Edit {
     pub threshold: Option<(u16, u16)>,
     pub health_max: Option<(u32, u32)>,
     pub health_current: Option<(u32, u32)>,
+    pub immune_off: bool,
 }
 
 impl Edit {
@@ -150,23 +166,25 @@ impl Edit {
         if let Some((a, b)) = self.health_current {
             parts.push(format!("health now {a} -> {b}"));
         }
+        if self.immune_off {
+            parts.push("immunity to hits removed".to_string());
+        }
         parts.join(", ")
     }
 
     fn is_empty(&self) -> bool {
-        self.threshold.is_none() && self.health_max.is_none()
+        self.threshold.is_none() && self.health_max.is_none() && !self.immune_off
     }
 }
 
 #[derive(Default)]
 struct Tally {
     checked: u32,
-    reinforced: u32,
-    already: u32,
+    protected: u32,
+    unprotected: u32,
+    shared: u32,
     released: u32,
-    with_health: u32,
     nothing_to_break: u32,
-    unusual: u32,
 }
 
 struct Sweep {
@@ -181,7 +199,12 @@ struct Work {
 }
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static IMMUNE: AtomicBool = AtomicBool::new(false);
+static IMMUNE: AtomicBool = AtomicBool::new(true);
+static DISABLE: AtomicBool = AtomicBool::new(true);
+static EARLY: AtomicBool = AtomicBool::new(false);
+static IMMUNE_SET: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+static PROTECTED_NOW: AtomicU32 = AtomicU32::new(0);
+static UNPROTECTED_NOW: AtomicU32 = AtomicU32::new(0);
 static LOADED: AtomicBool = AtomicBool::new(false);
 static SWEEP_WANTED: AtomicBool = AtomicBool::new(false);
 static HAS_WORK: AtomicBool = AtomicBool::new(false);
@@ -206,16 +229,15 @@ impl Budget {
 
 static SAY_PLACED: Budget = Budget::new(8);
 static SAY_PLACED_OUTSIDE: Budget = Budget::new(3);
-static SAY_SHIELDED: Budget = Budget::new(12);
-static SAY_ALREADY: Budget = Budget::new(3);
+static SAY_PROTECTED: Budget = Budget::new(12);
+static SAY_UNPROTECTED: Budget = Budget::new(8);
+static SAY_LOADED: Budget = Budget::new(4);
+static SAY_REFUSED: Budget = Budget::new(2);
 static SAY_RELEASED: Budget = Budget::new(6);
-static SAY_HEALTH: Budget = Budget::new(6);
 static SAY_NO_DESTRUCTIBLE: Budget = Budget::new(3);
 static SAY_OTHER_ITEM: Budget = Budget::new(4);
 static SAY_NO_POSITION: Budget = Budget::new(2);
-static SAY_UNUSUAL: Budget = Budget::new(4);
 static SAY_FAILED: Budget = Budget::new(6);
-static SAY_LIMITED: Budget = Budget::new(3);
 static SAY_TABLE: Budget = Budget::new(4);
 static SLOT_TRIES: AtomicU32 = AtomicU32::new(1);
 const SLOT_RETRY_EVERY: u32 = 64;
@@ -262,6 +284,7 @@ pub fn decide(areas: &Areas, x: f64, z: f64) -> Decision {
 }
 
 /// The break threshold of a reinforced object, or `None` when the value cannot be reinforced.
+#[cfg(test)]
 pub fn reinforced_value(value: u16, wood: bool) -> Option<u16> {
     if value == 0 || is_reinforced(value) {
         return None;
@@ -290,6 +313,7 @@ pub fn original_value(value: u16) -> Option<u16> {
 }
 
 /// Health maximum and current after the object was reinforced. A full object stays full.
+#[cfg(test)]
 pub fn reinforced_health(current: u32, max: u32, wood: bool) -> Option<(u32, u32)> {
     if max == 0 || max > HEALTH_MAX_LIMIT || is_reinforced_max(max) {
         return None;
@@ -427,6 +451,12 @@ pub fn component_index(manager: usize, hash: u32) -> Option<usize> {
     TYPE_MAPS.iter().find_map(|at| index_in(world + at, hash))
 }
 
+/// Whether a creation request can carry this component: only the request table (`+0x88`) says so.
+fn request_has(manager: usize, hash: u32) -> bool {
+    let Some(world) = read_bytes(manager, 8).map(|b| u64_at(&b, 0) as usize).filter(|w| *w >= 0x10000) else { return false };
+    index_in(world + TYPE_MAPS[0], hash).is_some()
+}
+
 fn index_in(map: usize, hash: u32) -> Option<usize> {
     let head = read_bytes(map, 0x58)?;
     if head.len() < 0x58 {
@@ -459,6 +489,8 @@ fn find_slots(manager: usize) -> Option<Slots> {
         destructible: component_index(manager, HASH_DESTRUCTIBLE)?,
         used_item: component_index(manager, HASH_USED_ITEM)?,
         health: component_index(manager, HASH_HEALTH),
+        disable: component_index(manager, HASH_DISABLE_DESTRUCTIBLE),
+        combat: component_index(manager, HASH_COMBAT_FLAGS),
     };
     let distinct = slots.transform != slots.destructible && slots.transform != slots.used_item && slots.destructible != slots.used_item;
     distinct.then_some(slots)
@@ -474,7 +506,10 @@ fn slots(manager: usize) -> Option<Slots> {
     }
     let found = find_slots(manager);
     match found {
-        Some(s) => log(&format!("object shield: component slots: position {}, destructible {}, used item {}, health {:?}", s.transform, s.destructible, s.used_item, s.health)),
+        Some(s) => log(&format!(
+            "object shield: component slots: position {}, destructible {}, used item {}, health {:?}, DisableDestructible {:?}, CombatFlags {:?}",
+            s.transform, s.destructible, s.used_item, s.health, s.disable, s.combat
+        )),
         None => {
             if SAY_TABLE.take() {
                 log(&format!(
@@ -514,8 +549,35 @@ fn health_of(p: &spawner::Placement, slots: &Slots) -> Option<(usize, [u8; HEALT
     (u32_at(&out, 0) == spawner::HEALTH_SIGNATURE).then_some((addr, out))
 }
 
-/// Looks at one entity and, when it is a built object inside a reinforced or released place, switches its
-/// numbers: the break threshold and the health, in one write each.
+/// Whether the entity carries `DisableDestructible` and whether its `CombatFlags` say immune.
+fn protection(p: &spawner::Placement, slots: &Slots) -> (bool, bool) {
+    let disable = slots.disable.is_some_and(|index| spawner::component_address(p, index).is_some());
+    let immune = slots
+        .combat
+        .and_then(|index| spawner::component_address(p, index))
+        .filter(|(_, size)| *size == COMBAT_FLAGS_SIZE)
+        .and_then(|(addr, _)| read_bytes(addr, 1))
+        .is_some_and(|b| b.first() == Some(&1));
+    (disable, immune)
+}
+
+fn immune_set<R>(f: impl FnOnce(&mut HashSet<u32>) -> R) -> Option<R> {
+    let mut guard = IMMUNE_SET.lock().ok()?;
+    Some(f(guard.get_or_insert_with(HashSet::new)))
+}
+
+/// Puts the `CombatFlags` of an entity this module made immune back to not immune.
+fn take_immunity_off(p: &spawner::Placement, slots: &Slots, id: u32) -> bool {
+    if !immune_set(|set| set.remove(&id)).unwrap_or(false) {
+        return false;
+    }
+    let Some((addr, size)) = slots.combat.and_then(|index| spawner::component_address(p, index)) else { return false };
+    size == COMBAT_FLAGS_SIZE && spawner::write_bytes(addr, &[0])
+}
+
+/// Looks at one built object inside a protected or released place. Numbers an earlier version multiplied are
+/// divided back, immunity this module gave is taken off in a released place, and inside a protected zone the
+/// object is reported as protected or not.
 pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome {
     let Some(p) = spawner::find_record(manager, id).and_then(spawner::placement) else { return Outcome::Gone };
     let Some((item_at, item_size)) = spawner::component_address(&p, slots.used_item) else { return Outcome::NotBuilt };
@@ -529,66 +591,54 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
         .and_then(|(addr, _)| read_bytes(addr, 24))
         .and_then(|b| meters(&b));
     let Some((x, z)) = at else { return Outcome::NoPosition(item) };
-    let decision = decide(areas, x, z);
-    let (zone, release) = match decision {
+    let (zone, protecting) = match decide(areas, x, z) {
         Decision::Leave => return Outcome::Outside,
-        Decision::Shield(zone) => (zone, class == Class::Skip),
-        Decision::Release(zone) => (zone, true),
+        Decision::Shield(zone) => (zone, true),
+        Decision::Release(zone) => (zone, false),
     };
-    let wood = class == Class::Wood;
-    let threshold = spawner::component_address(&p, slots.destructible);
-    if let Some((_, size)) = threshold.filter(|(_, size)| *size != DESTRUCTIBLE_SIZE) {
-        return Outcome::Failed(format!("item {item}: the break-threshold component is {size} bytes, expected {DESTRUCTIBLE_SIZE}"));
-    }
+    let own = spawner::component_address(&p, slots.destructible);
+    let shared = own.is_some_and(|(_, size)| size != DESTRUCTIBLE_SIZE);
+    let threshold = own.filter(|(_, size)| *size == DESTRUCTIBLE_SIZE);
     let health = health_of(&p, slots);
-    if threshold.is_none() && health.is_none() {
-        return Outcome::NoDestructible(item);
-    }
     let mut edit = Edit::default();
-    let mut already = false;
-    let mut unusual = None;
     if let Some((addr, _)) = threshold {
         let Some(from) = read_bytes(addr, 2).filter(|b| b.len() == 2).map(|b| u16::from_le_bytes([b[0], b[1]])) else { return Outcome::Gone };
-        let to = if release { original_value(from) } else { reinforced_value(from, wood) };
-        match to {
-            Some(to) => {
-                if !spawner::write_bytes(addr, &to.to_le_bytes()) {
-                    return Outcome::Failed(format!("item {item}: the write of the break threshold at {addr:#x} was refused"));
-                }
-                edit.threshold = Some((from, to));
+        if let Some(to) = original_value(from) {
+            if !spawner::write_bytes(addr, &to.to_le_bytes()) {
+                return Outcome::Failed(format!("item {item}: the write of the break threshold at {addr:#x} was refused"));
             }
-            None if release => {}
-            None if is_reinforced(from) => already = true,
-            None => unusual = Some(from as u32),
+            edit.threshold = Some((from, to));
         }
     }
     if let Some((addr, bytes)) = health {
         let (current, max) = (u32_at(&bytes, HEALTH_CURRENT_AT), u32_at(&bytes, HEALTH_MAX_AT));
-        let to = if release { released_health(current, max) } else { reinforced_health(current, max, wood) };
-        match to {
-            Some((now, top)) => {
-                let mut span = [0u8; HEALTH_SIZE - HEALTH_CURRENT_AT];
-                span.copy_from_slice(&bytes[HEALTH_CURRENT_AT..]);
-                span[0..4].copy_from_slice(&now.to_le_bytes());
-                span[HEALTH_MAX_AT - HEALTH_CURRENT_AT..].copy_from_slice(&top.to_le_bytes());
-                if !spawner::write_bytes(addr + HEALTH_CURRENT_AT, &span) {
-                    return Outcome::Failed(format!("item {item}: the write of the health at {addr:#x} was refused"));
-                }
-                edit.health_max = Some((max, top));
-                edit.health_current = Some((current, now));
+        if let Some((now, top)) = released_health(current, max) {
+            let mut span = [0u8; HEALTH_SIZE - HEALTH_CURRENT_AT];
+            span.copy_from_slice(&bytes[HEALTH_CURRENT_AT..]);
+            span[0..4].copy_from_slice(&now.to_le_bytes());
+            span[HEALTH_MAX_AT - HEALTH_CURRENT_AT..].copy_from_slice(&top.to_le_bytes());
+            if !spawner::write_bytes(addr + HEALTH_CURRENT_AT, &span) {
+                return Outcome::Failed(format!("item {item}: the write of the health at {addr:#x} was refused"));
             }
-            None if release => {}
-            None if is_reinforced_max(max) => already = true,
-            None => unusual = Some(max),
+            edit.health_max = Some((max, top));
+            edit.health_current = Some((current, now));
         }
     }
-    if !edit.is_empty() {
-        return if release { Outcome::Released { zone, item, edit } } else { Outcome::Reinforced { zone, item, edit } };
+    if !protecting {
+        edit.immune_off = take_immunity_off(&p, slots, id);
     }
-    match (already, unusual) {
-        (true, _) => Outcome::Already,
-        (false, Some(value)) => Outcome::Unusual(value),
-        (false, None) => Outcome::Outside,
+    if !edit.is_empty() {
+        return Outcome::Released { zone, item, edit };
+    }
+    if !protecting || class == Class::Skip {
+        return Outcome::Outside;
+    }
+    if own.is_none() && health.is_none() {
+        return Outcome::NoDestructible(item);
+    }
+    match protection(&p, slots) {
+        (false, false) => Outcome::Unprotected { zone, item, shared },
+        (disable, immune) => Outcome::Protected { zone, item, disable, immune },
     }
 }
 
@@ -596,37 +646,42 @@ fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>
     if let Some(t) = tally {
         t.checked += 1;
         match outcome {
-            Outcome::Reinforced { edit, .. } => {
-                t.reinforced += 1;
-                t.with_health += edit.health_max.is_some() as u32;
+            Outcome::Protected { .. } => t.protected += 1,
+            Outcome::Unprotected { shared, .. } => {
+                t.unprotected += 1;
+                t.shared += *shared as u32;
             }
-            Outcome::Already => t.already += 1,
             Outcome::Released { .. } => t.released += 1,
             Outcome::NoDestructible(_) => t.nothing_to_break += 1,
-            Outcome::Unusual(_) => t.unusual += 1,
             _ => {}
         }
     }
     match outcome {
-        Outcome::Reinforced { zone, item, edit } => {
-            if SAY_SHIELDED.take() {
-                log(&format!("object shield: entity {id} (item {item}) in '{zone}' reinforced: {}", edit.describe()));
-            }
-            if edit.health_max.is_some() && SAY_HEALTH.take() {
-                log(&format!("object shield: entity {id} (item {item}) also has health of its own; its maximum and current health were multiplied too"));
-            }
-            if edit.threshold.is_some_and(|(from, to)| from > WOOD_SMALL_MAX && LARGE.iter().any(|(o, c)| *o == from && *c == to)) && SAY_LIMITED.take() {
-                log(&format!("object shield: entity {id} has a break threshold of {}; the full multiple does not fit in 16 bits, so it got the fixed value {} that can be undone exactly", edit.threshold.map_or(0, |t| t.0), edit.threshold.map_or(0, |t| t.1)));
+        Outcome::Protected { zone, item, disable, immune } => {
+            PROTECTED_NOW.fetch_add(1, Ordering::Relaxed);
+            if SAY_PROTECTED.take() {
+                let how = match (disable, immune) {
+                    (true, true) => "cannot be destroyed, immune to hits",
+                    (true, false) => "cannot be destroyed",
+                    _ => "immune to hits",
+                };
+                log(&format!("object shield: entity {id} (item {item}) protected in '{zone}': {how}"));
             }
         }
-        Outcome::Already => {
-            if SAY_ALREADY.take() {
-                log(&format!("object shield: entity {id} was already reinforced"));
+        Outcome::Unprotected { zone, item, shared } => {
+            UNPROTECTED_NOW.fetch_add(1, Ordering::Relaxed);
+            if SAY_UNPROTECTED.take() {
+                let why = if *shared {
+                    "its break threshold is shared by every object of its kind, so only creating it again can protect it"
+                } else {
+                    "it was created before the zone protected it, so only creating it again can protect it"
+                };
+                log(&format!("object shield: entity {id} (item {item}) in '{zone}' is not protected: {why}"));
             }
         }
         Outcome::Released { zone, item, edit } => {
             if SAY_RELEASED.take() {
-                log(&format!("object shield: entity {id} (item {item}) in released place '{zone}': back to normal, {}", edit.describe()));
+                log(&format!("object shield: entity {id} (item {item}) in '{zone}' back to normal: {}", edit.describe()));
             }
         }
         Outcome::NoDestructible(item) => {
@@ -642,11 +697,6 @@ fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>
         Outcome::NoPosition(item) => {
             if SAY_NO_POSITION.take() {
                 log(&format!("object shield: entity {id} (item {item}) has no position of its own (a tool or item lying around); left as it is"));
-            }
-        }
-        Outcome::Unusual(value) => {
-            if SAY_UNUSUAL.take() {
-                log(&format!("object shield: entity {id} has a break threshold or health maximum of {value} that cannot be multiplied exactly; left as it is"));
             }
         }
         Outcome::Failed(why) => fail(&format!("entity {id} could not be switched: {why}")),
@@ -696,8 +746,8 @@ fn work(manager: usize) {
         if done {
             let t = &sweep.tally;
             log(&format!(
-                "object shield: checked {} loaded entities: {} reinforced now, {} were reinforced already, {} released, {} of them have health of their own, {} built objects have nothing to break, {} left as they are",
-                t.checked, t.reinforced, t.already, t.released, t.with_health, t.nothing_to_break, t.unusual
+                "object shield: checked {} loaded entities: {} protected, {} not protected yet ({} of them share their break threshold), {} back to normal, {} built objects have nothing to break",
+                t.checked, t.protected, t.unprotected, t.shared, t.released, t.nothing_to_break
             ));
         }
     }
@@ -736,7 +786,7 @@ pub fn set_zones(dir: &std::path::Path, zones: &[Zone]) {
     let first = !LOADED.swap(true, Ordering::SeqCst);
     let stored: Option<Areas> = first.then(|| std::fs::read_to_string(dir.join(STATE_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok())).flatten();
     let options: Options = std::fs::read_to_string(dir.join(OPTIONS_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    let immune_changed = IMMUNE.swap(options.immune, Ordering::SeqCst) != options.immune;
+    let immune_changed = IMMUNE.swap(options.immune, Ordering::SeqCst) != options.immune || DISABLE.swap(options.disable, Ordering::SeqCst) != options.disable;
 
     let (changed, active, next) = {
         let Ok(mut areas) = AREAS.lock() else { return };
@@ -751,11 +801,12 @@ pub fn set_zones(dir: &std::path::Path, zones: &[Zone]) {
     if changed || immune_changed {
         let names: Vec<&str> = next.shielded.iter().map(|a| a.name.as_str()).collect();
         log(&format!(
-            "object shield: {} zone(s) shield what is built inside {:?}, {} place(s) released{}",
+            "object shield: {} zone(s) protect what is built inside {:?}, {} place(s) released; new objects get DisableDestructible: {}, immunity to hits: {}",
             next.shielded.len(),
             names,
             next.released.len(),
-            if options.immune { ", trial: immune to hits" } else { "" }
+            options.disable,
+            options.immune
         ));
     }
     if changed {
@@ -765,8 +816,8 @@ pub fn set_zones(dir: &std::path::Path, zones: &[Zone]) {
         if ITEMS.lock().is_ok_and(|i| i.is_none()) {
             match read_table(dir, ITEMS_FILE, parse_build_items, |m| m.is_empty()) {
                 Some(set) => {
-                    let count = |class: Class| set.values().filter(|c| **c == class).count();
-                    log(&format!("object shield: {} items are placed with the hammer: {} wooden (x{WOOD_FACTOR}), {} other (x{FACTOR}), {} never reinforced (creatures, tools)", set.len(), count(Class::Wood), count(Class::Normal), count(Class::Skip)));
+                    let skipped = set.values().filter(|c| **c == Class::Skip).count();
+                    log(&format!("object shield: {} items are placed with the hammer, {skipped} of them never protected (creatures, tools)", set.len()));
                     ITEMS_MISSING.store(false, Ordering::SeqCst);
                     if let Ok(mut items) = ITEMS.lock() {
                         *items = Some(set);
@@ -799,13 +850,49 @@ pub struct Seen {
     carried: bool,
     built: Option<u32>,
     breakable: bool,
+    immune_added: bool,
     desc: usize,
     original: [u8; 16],
     entries: Vec<u8>,
 }
 
+/// Reads the zones once, when the game creates its first entity, so that what loads with the world is already
+/// looked at before the first player joins.
+fn early() {
+    if LOADED.load(Ordering::SeqCst) || EARLY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(dir) = std::env::current_dir() else { return };
+    let zones = std::fs::read_to_string(dir.join(super::groups::ZONES_FILE)).map(|t| super::groups::parse_zones(&t)).unwrap_or_default();
+    set_zones(&dir, &zones);
+    SWEEP_WANTED.store(false, Ordering::SeqCst);
+}
+
+/// The components a protected object is created with, when the creation request can carry them.
+fn protection_entries(manager: usize, entries: &[u8], count: usize) -> Vec<(u32, usize, usize)> {
+    let mut extra = Vec::new();
+    let wanted = [
+        (DISABLE.load(Ordering::Relaxed), HASH_DISABLE_DESTRUCTIBLE, DISABLE_DESTRUCTIBLE.as_ptr() as usize, DISABLE_DESTRUCTIBLE.len()),
+        (IMMUNE.load(Ordering::Relaxed), HASH_COMBAT_FLAGS, COMBAT_FLAGS_IMMUNE.as_ptr() as usize, COMBAT_FLAGS_IMMUNE.len()),
+    ];
+    for (on, hash, data, size) in wanted {
+        if !on || entry(entries, hash, 0).is_some() || count + extra.len() >= MAX_ENTRIES {
+            continue;
+        }
+        if request_has(manager, hash) {
+            extra.push((hash, data, size));
+        } else if SAY_REFUSED.take() {
+            log(&format!("object shield: ERROR the game does not list component {hash:#010x} among those a new object can be created with; new objects cannot get it"));
+        }
+    }
+    extra
+}
+
 /// Called before the game creates an entity from `desc`.
 pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
+    if !LOADED.load(Ordering::Relaxed) && desc >= 0x10000 && spawner::is_server(manager) {
+        early();
+    }
     if !ACTIVE.load(Ordering::Relaxed) || desc < 0x10000 || !spawner::is_server(manager) {
         return None;
     }
@@ -821,28 +908,47 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     }
     let entries = if count == 0 { Vec::new() } else { read_bytes(array, count * ENTRY).filter(|e| e.len() == count * ENTRY)? };
     let carried = entry(&entries, HASH_USED_ITEM, USED_ITEM_SIZE).and_then(|at| read_bytes(at, 4)).map(|b| u32_at(&b, 0));
-    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable: may_break(&head[4..20]), desc, original: [0; 16], entries: Vec::new() };
-    let Some(item) = seen.built else { return Some(seen) };
+    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable: may_break(&head[4..20]), immune_added: false, desc, original: [0; 16], entries: Vec::new() };
+    let Some(item) = seen.built else {
+        if seen.breakable && SAY_LOADED.take() {
+            let inside = entry(&entries, HASH_CURRENT_TRANSFORM, 24)
+                .and_then(|at| read_bytes(at, 24))
+                .and_then(|b| meters(&b))
+                .and_then(|(x, z)| AREAS.lock().ok().and_then(|a| a.shielded.iter().find(|s| s.holds(x, z)).map(|s| s.name.clone())));
+            if let Some(zone) = inside {
+                log(&format!("object shield: created in '{zone}' without a hammer item: template {} given [{}]", spawner::guid_text(&head[4..20]), describe(&entries)));
+            }
+        }
+        return Some(seen);
+    };
 
     let at = entry(&entries, HASH_CURRENT_TRANSFORM, 24).and_then(|at| read_bytes(at, 24)).and_then(|b| meters(&b));
     let zone = at.and_then(|(x, z)| AREAS.lock().ok().and_then(|a| a.shielded.iter().find(|s| s.holds(x, z)).map(|s| s.name.clone())));
     let place = at.map(|(x, z)| format!("x={x:.1} z={z:.1}")).unwrap_or_else(|| "no position given".into());
     let template = spawner::guid_text(&head[4..20]);
     match &zone {
-        Some(zone) if SAY_PLACED.take() => log(&format!("object shield: placed in '{zone}': template {template} item {item} (id {kind:#x}) at {place}; given [{}]", describe(&entries))),
-        None if SAY_PLACED_OUTSIDE.take() => log(&format!("object shield: placed outside every shielded zone: template {template} item {item} at {place}; given [{}]", describe(&entries))),
+        Some(zone) if SAY_PLACED.take() => log(&format!("object shield: created in '{zone}': template {template} item {item} (id {kind:#x}) at {place}; given [{}]", describe(&entries))),
+        None if SAY_PLACED_OUTSIDE.take() => log(&format!("object shield: created outside every protected zone: template {template} item {item} at {place}; given [{}]", describe(&entries))),
         _ => {}
     }
-    if zone.is_some() && IMMUNE.load(Ordering::Relaxed) && entry(&entries, HASH_COMBAT_FLAGS, 0).is_none() && count < MAX_ENTRIES {
-        let list = with_entry(&entries, HASH_COMBAT_FLAGS, COMBAT_FLAGS_IMMUNE.as_ptr() as usize, COMBAT_FLAGS_IMMUNE.len());
-        let mut patched = [0u8; 16];
-        patched[..8].copy_from_slice(&(list.as_ptr() as u64).to_le_bytes());
-        patched[8..].copy_from_slice(&((list.len() / ENTRY) as u64).to_le_bytes());
-        if spawner::write_bytes(desc + 0x18, &patched) {
-            seen.original.copy_from_slice(&head[0x18..0x28]);
-            seen.entries = list;
-        } else {
-            fail(&format!("the component list of template {template} could not be replaced for the immune trial"));
+    let protect = zone.is_some() && seen.breakable && item_class(item) != Some(Class::Skip);
+    if protect {
+        let extra = protection_entries(manager, &entries, count);
+        if !extra.is_empty() {
+            let mut list = entries.clone();
+            for (hash, data, size) in &extra {
+                list = with_entry(&list, *hash, *data, *size);
+            }
+            let mut patched = [0u8; 16];
+            patched[..8].copy_from_slice(&(list.as_ptr() as u64).to_le_bytes());
+            patched[8..].copy_from_slice(&((list.len() / ENTRY) as u64).to_le_bytes());
+            if spawner::write_bytes(desc + 0x18, &patched) {
+                seen.original.copy_from_slice(&head[0x18..0x28]);
+                seen.entries = list;
+                seen.immune_added = extra.iter().any(|(hash, _, _)| *hash == HASH_COMBAT_FLAGS);
+            } else {
+                fail(&format!("the component list of template {template} could not be extended"));
+            }
         }
     }
     Some(seen)
@@ -856,6 +962,13 @@ pub fn after(seen: Option<Seen>, manager: usize, entity: u32) {
     }
     if entity == 0 {
         return;
+    }
+    if seen.immune_added {
+        immune_set(|set| {
+            if set.len() < IMMUNE_MAX {
+                set.insert(entity);
+            }
+        });
     }
     if !seen.carried {
         if seen.breakable {
@@ -1078,14 +1191,17 @@ mod tests {
         let text = serde_json::to_string(&areas).unwrap();
         assert_eq!(serde_json::from_str::<Areas>(&text).unwrap(), areas);
         assert_eq!(serde_json::from_str::<Areas>("{}").unwrap(), Areas::default());
-        assert_eq!(serde_json::from_str::<Options>(r#"{"immune":true}"#).unwrap(), Options { immune: true });
-        assert_eq!(serde_json::from_str::<Options>("{}").unwrap(), Options::default());
+        assert_eq!(serde_json::from_str::<Options>(r#"{"immune":false}"#).unwrap(), Options { immune: false, disable: true });
+        assert_eq!(serde_json::from_str::<Options>(r#"{"disable":false}"#).unwrap(), Options { immune: true, disable: false });
+        assert_eq!(serde_json::from_str::<Options>("{}").unwrap(), Options { immune: true, disable: true });
     }
 
     const T: usize = 133;
     const D: usize = 301;
     const U: usize = 412;
     const H: usize = 77;
+    const DIS: usize = 500;
+    const CB: usize = 600;
 
     /// A stand-in for the game's memory: the component table, the entity table and one chunk per entity.
     struct World {
@@ -1100,7 +1216,7 @@ mod tests {
             w.manager[8] = kind;
             let world = w.block(vec![0u8; 0x100]);
             w.manager[..8].copy_from_slice(&(world as u64).to_le_bytes());
-            for (map_at, table) in [(TYPE_MAPS[0], vec![(HASH_CURRENT_TRANSFORM, T), (HASH_USED_ITEM, U)]), (TYPE_MAPS[1], vec![(HASH_DESTRUCTIBLE, D), (HASH_HEALTH, H)])] {
+            for (map_at, table) in [(TYPE_MAPS[0], vec![(HASH_CURRENT_TRANSFORM, T), (HASH_USED_ITEM, U), (HASH_DISABLE_DESTRUCTIBLE, DIS), (HASH_COMBAT_FLAGS, CB)]), (TYPE_MAPS[1], vec![(HASH_DESTRUCTIBLE, D), (HASH_HEALTH, H)])] {
                 let capacity = 16usize;
                 let mut bitmap = vec![0u8; 8];
                 let mut keys = vec![0u8; capacity * 4];
@@ -1135,6 +1251,11 @@ mod tests {
 
         /// Adds an entity with the given components and returns where its break threshold and its health sit.
         fn entity(&mut self, id: u32, at: Option<(f64, f64)>, item: Option<u32>, threshold: Option<u16>, health: Option<(u32, u32)>) -> (usize, usize) {
+            self.entity_with(id, at, item, threshold, health, false, None)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn entity_with(&mut self, id: u32, at: Option<(f64, f64)>, item: Option<u32>, threshold: Option<u16>, health: Option<(u32, u32)>, disable: bool, combat: Option<u8>) -> (usize, usize) {
             let mut def = vec![0u8; 0xf90];
             let mut chunk = vec![0u8; 0x200];
             let mut offset = 0x10usize;
@@ -1166,6 +1287,14 @@ mod tests {
                 h[8..12].copy_from_slice(&current.to_le_bytes());
                 h[36..40].copy_from_slice(&max.to_le_bytes());
                 health_at = put(H, &h, &mut def, &mut chunk);
+            }
+            if disable {
+                put(DIS, &[0u8], &mut def, &mut chunk);
+            }
+            if let Some(immune) = combat {
+                let mut flags = COMBAT_FLAGS_IMMUNE;
+                flags[0] = immune;
+                put(CB, &flags, &mut def, &mut chunk);
             }
             let (def, chunk) = (self.block(def), self.block(chunk));
             let mut record = vec![0u8; 0x40];
@@ -1212,10 +1341,6 @@ mod tests {
         (u32_at(&b, 8), u32_at(&b, 36))
     }
 
-    fn reinforced(zone: &str, threshold: Option<(u16, u16)>, health: Option<((u32, u32), (u32, u32))>) -> Outcome {
-        Outcome::Reinforced { zone: zone.into(), item: TORCH, edit: edit_of(threshold, health) }
-    }
-
     fn released(zone: &str, threshold: Option<(u16, u16)>, health: Option<((u32, u32), (u32, u32))>) -> Outcome {
         Outcome::Released { zone: zone.into(), item: TORCH, edit: edit_of(threshold, health) }
     }
@@ -1225,6 +1350,7 @@ mod tests {
             threshold,
             health_max: health.map(|(_, max)| max),
             health_current: health.map(|(current, _)| current),
+            immune_off: false,
         }
     }
 
@@ -1235,7 +1361,7 @@ mod tests {
     const PET: u32 = 1003;
 
     fn slots_for_tests() -> Slots {
-        Slots { transform: T, destructible: D, used_item: U, health: Some(H) }
+        Slots { transform: T, destructible: D, used_item: U, health: Some(H), disable: Some(DIS), combat: Some(CB) }
     }
 
     fn descriptor(template: &[u8; 16], entries: &[u8]) -> Box<[u8; 0x30]> {
@@ -1253,11 +1379,20 @@ mod tests {
         t
     }
 
+    fn protected(item: u32, disable: bool, immune: bool) -> Outcome {
+        Outcome::Protected { zone: "Town".into(), item, disable, immune }
+    }
+
+    fn read_flag(at: usize) -> u8 {
+        read_bytes(at, 1).unwrap()[0]
+    }
+
     #[test]
     fn the_whole_switch_against_a_stand_in_for_the_game() {
         *ITEMS.lock().unwrap() = Some(HashMap::from([(TORCH, Class::Normal), (DOOR, Class::Wood), (LADDER, Class::Wood), (PET, Class::Skip)]));
         *CATALOG.lock().unwrap() = None;
         *SLOTS.lock().unwrap() = None;
+        *IMMUNE_SET.lock().unwrap() = None;
         let town = Areas { shielded: vec![area("Town", 100.0, 100.0, 30.0)], released: Vec::new() };
         let off = next_areas(&town, Vec::new());
         let slots = slots_for_tests();
@@ -1267,6 +1402,8 @@ mod tests {
         assert_eq!(component_index(w.at(), HASH_DESTRUCTIBLE), Some(D));
         assert_eq!(component_index(w.at(), HASH_USED_ITEM), Some(U));
         assert_eq!(component_index(w.at(), 0x1234_5678), None);
+        assert!(request_has(w.at(), HASH_DISABLE_DESTRUCTIBLE) && request_has(w.at(), HASH_COMBAT_FLAGS));
+        assert!(!request_has(w.at(), HASH_DESTRUCTIBLE));
         assert_eq!(find_slots(w.at()), Some(slots));
 
         let torch = w.entity(10, Some((110.0, 95.0)), Some(TORCH), Some(10), None);
@@ -1274,130 +1411,177 @@ mod tests {
         let world_prop = w.entity(12, Some((101.0, 101.0)), None, Some(10), None);
         let impact = w.entity(13, Some((101.0, 101.0)), Some(SWORD), Some(10), None);
         w.entity(14, Some((101.0, 101.0)), Some(TORCH), None, None);
-        let bed = w.entity(15, Some((99.0, 101.0)), Some(TORCH), Some(25), Some((25, 25)));
-        let odd = w.entity(16, Some((99.0, 99.0)), Some(TORCH), Some(3000), None);
         w.entity(17, None, Some(TORCH), Some(10), None);
-        let oven = w.entity(18, Some((98.0, 98.0)), Some(TORCH), None, Some((60, 120)));
-        let hurt = w.entity(19, Some((97.0, 97.0)), Some(TORCH), Some(200), Some((50, 200)));
-        let huge = w.entity(21, Some((96.0, 96.0)), Some(TORCH), Some(10000), None);
+        w.entity_with(26, Some((100.0, 100.0)), Some(TORCH), Some(10), None, true, Some(1));
+        w.entity_with(27, Some((100.0, 100.0)), Some(TORCH), Some(10), None, false, Some(1));
+        w.entity_with(28, Some((100.0, 100.0)), Some(TORCH), Some(10), None, true, None);
+        let shared = w.entity(29, Some((100.0, 100.0)), Some(TORCH), None, None);
+        let _ = shared;
 
-        assert_eq!(settle(w.at(), 10, &slots, &town), reinforced("Town", Some((10, 439)), None));
-        assert_eq!(threshold(torch), 439);
-        assert_eq!(settle(w.at(), 10, &slots, &town), Outcome::Already);
-        assert_eq!(threshold(torch), 439);
+        assert_eq!(settle(w.at(), 10, &slots, &town), Outcome::Unprotected { zone: "Town".into(), item: TORCH, shared: false });
+        assert_eq!(threshold(torch), 10);
         assert_eq!(settle(w.at(), 11, &slots, &town), Outcome::Outside);
         assert_eq!(settle(w.at(), 12, &slots, &town), Outcome::NotBuilt);
         assert_eq!(settle(w.at(), 13, &slots, &town), Outcome::OtherItem(SWORD));
         assert_eq!(settle(w.at(), 14, &slots, &town), Outcome::NoDestructible(TORCH));
-        assert_eq!(settle(w.at(), 15, &slots, &town), reinforced("Town", Some((25, 1039)), Some(((25, 1039), (25, 1039)))));
-        assert_eq!(health(bed), (1039, 1039));
-        assert_eq!(settle(w.at(), 15, &slots, &town), Outcome::Already);
-        assert_eq!(settle(w.at(), 16, &slots, &town), Outcome::Unusual(3000));
         assert_eq!(settle(w.at(), 17, &slots, &town), Outcome::NoPosition(TORCH));
         assert_eq!(settle(w.at(), 99, &slots, &town), Outcome::Gone);
-        assert_eq!(settle(w.at(), 18, &slots, &town), reinforced("Town", None, Some(((60, 2420), (120, 4839)))));
-        assert_eq!(health(oven), (2420, 4839));
-        assert_eq!(settle(w.at(), 19, &slots, &town), reinforced("Town", Some((200, 8039)), Some(((50, 2010), (200, 8039)))));
-        assert_eq!(settle(w.at(), 21, &slots, &town), reinforced("Town", Some((10000, 65438)), None));
-        assert_eq!((threshold(far), threshold(world_prop), threshold(impact), threshold(odd)), (10, 10, 10, 3000));
+        assert_eq!(settle(w.at(), 26, &slots, &town), protected(TORCH, true, true));
+        assert_eq!(settle(w.at(), 27, &slots, &town), protected(TORCH, false, true));
+        assert_eq!(settle(w.at(), 28, &slots, &town), protected(TORCH, true, false));
+        assert_eq!((threshold(far), threshold(world_prop), threshold(impact)), (10, 10, 10));
 
-        let door = w.entity(22, Some((100.0, 99.0)), Some(DOOR), Some(100), Some((100, 100)));
-        let ladder = w.entity(23, Some((100.0, 98.0)), Some(LADDER), Some(1000), None);
+        let mut z = World::new(0);
+        let zero = {
+            let mut def = vec![0u8; 0xf90];
+            let mut chunk = vec![0u8; 0x200];
+            let mut put = |index: usize, bytes: &[u8], offset: usize, stride: usize| {
+                def[index / 8] |= 1 << (index % 8);
+                def[0x84 + index * 2..0x86 + index * 2].copy_from_slice(&(offset as u16).to_le_bytes());
+                def[0xa84 + index * 2..0xa86 + index * 2].copy_from_slice(&(stride as u16).to_le_bytes());
+                chunk[offset..offset + bytes.len()].copy_from_slice(bytes);
+            };
+            let mut t = [0u8; 56];
+            t[..8].copy_from_slice(&((100.0 * METERS) as i64).to_le_bytes());
+            t[16..24].copy_from_slice(&((100.0 * METERS) as i64).to_le_bytes());
+            put(T, &t, 0x10, 56);
+            put(U, &TORCH.to_le_bytes(), 0x80, 4);
+            put(D, &[0, 0], 0x90, 0);
+            (z.block(def), z.block(chunk))
+        };
+        let mut record = vec![0u8; 0x40];
+        record[0x10..0x14].copy_from_slice(&40u32.to_le_bytes());
+        record[0x18..0x20].copy_from_slice(&(zero.0 as u64).to_le_bytes());
+        record[0x20..0x28].copy_from_slice(&(zero.1 as u64).to_le_bytes());
+        let record = z.block(record);
+        z.records.push((40, record));
+        z.publish();
+        assert_eq!(settle(z.at(), 40, &slots, &town), Outcome::Unprotected { zone: "Town".into(), item: TORCH, shared: true });
+
+        let bed = w.entity(15, Some((99.0, 101.0)), Some(TORCH), Some(1039), Some((1039, 1039)));
+        let hurt = w.entity(19, Some((97.0, 97.0)), Some(TORCH), Some(8039), Some((2010, 8039)));
+        let huge = w.entity(21, Some((96.0, 96.0)), Some(TORCH), Some(65438), None);
+        let door = w.entity(22, Some((100.0, 99.0)), Some(DOOR), Some(12117), Some((12117, 12117)));
+        let ladder = w.entity(23, Some((100.0, 98.0)), Some(LADDER), Some(65398), None);
         let pet = w.entity(24, Some((100.0, 97.0)), Some(PET), None, Some((22279, 22279)));
         let fresh_pet = w.entity(25, Some((100.0, 96.0)), Some(PET), None, Some((556, 556)));
-        let wood = |item, edit| Outcome::Reinforced { zone: "Town".into(), item, edit };
-        assert_eq!(settle(w.at(), 22, &slots, &town), wood(DOOR, edit_of(Some((100, 12117)), Some(((100, 12117), (100, 12117))))));
-        assert_eq!((threshold(door), health(door)), (12117, (12117, 12117)));
-        assert_eq!(settle(w.at(), 22, &slots, &town), Outcome::Already);
-        assert_eq!(settle(w.at(), 23, &slots, &town), wood(LADDER, edit_of(Some((1000, 65398)), None)));
+        assert_eq!(settle(w.at(), 15, &slots, &town), Outcome::Released { zone: "Town".into(), item: TORCH, edit: edit_of(Some((1039, 25)), Some(((1039, 25), (1039, 25)))) });
+        assert_eq!((threshold(bed), health(bed)), (25, (25, 25)));
+        assert_eq!(settle(w.at(), 19, &slots, &town), Outcome::Released { zone: "Town".into(), item: TORCH, edit: edit_of(Some((8039, 200)), Some(((2010, 50), (8039, 200)))) });
+        assert_eq!((threshold(hurt), health(hurt)), (200, (50, 200)));
+        assert_eq!(settle(w.at(), 21, &slots, &town), Outcome::Released { zone: "Town".into(), item: TORCH, edit: edit_of(Some((65438, 10000)), None) });
+        assert_eq!(threshold(huge), 10000);
+        assert_eq!(settle(w.at(), 22, &slots, &town), Outcome::Released { zone: "Town".into(), item: DOOR, edit: edit_of(Some((12117, 100)), Some(((12117, 100), (12117, 100)))) });
+        assert_eq!((threshold(door), health(door)), (100, (100, 100)));
+        assert_eq!(settle(w.at(), 23, &slots, &town), Outcome::Released { zone: "Town".into(), item: LADDER, edit: edit_of(Some((65398, 1000)), None) });
+        assert_eq!(threshold(ladder), 1000);
         assert_eq!(settle(w.at(), 24, &slots, &town), Outcome::Released { zone: "Town".into(), item: PET, edit: edit_of(None, Some(((22279, 556), (22279, 556)))) });
         assert_eq!(health(pet), (556, 556));
         assert_eq!(settle(w.at(), 25, &slots, &town), Outcome::Outside);
         assert_eq!(health(fresh_pet), (556, 556));
-        assert_eq!(settle(w.at(), 22, &slots, &off), Outcome::Released { zone: "Town".into(), item: DOOR, edit: edit_of(Some((12117, 100)), Some(((12117, 100), (12117, 100)))) });
-        assert_eq!(settle(w.at(), 23, &slots, &off), Outcome::Released { zone: "Town".into(), item: LADDER, edit: edit_of(Some((65398, 1000)), None) });
-        assert_eq!((threshold(door), health(door), threshold(ladder)), (100, (100, 100), 1000));
-
-        assert_eq!(settle(w.at(), 10, &slots, &off), released("Town", Some((439, 10)), None));
-        assert_eq!(threshold(torch), 10);
         assert_eq!(settle(w.at(), 10, &slots, &off), Outcome::Outside);
-        assert_eq!(settle(w.at(), 15, &slots, &off), released("Town", Some((1039, 25)), Some(((1039, 25), (1039, 25)))));
-        assert_eq!((threshold(bed), health(bed)), (25, (25, 25)));
-        assert_eq!(settle(w.at(), 18, &slots, &off), released("Town", None, Some(((2420, 60), (4839, 120)))));
-        assert_eq!(health(oven), (60, 120));
-        assert_eq!(settle(w.at(), 19, &slots, &off), released("Town", Some((8039, 200)), Some(((2010, 50), (8039, 200)))));
-        assert_eq!((threshold(hurt), health(hurt)), (200, (50, 200)));
-        assert_eq!(settle(w.at(), 21, &slots, &off), released("Town", Some((65438, 10000)), None));
-        assert_eq!(threshold(huge), 10000);
 
         *AREAS.lock().unwrap() = town.clone();
         LOADED.store(true, Ordering::SeqCst);
-        IMMUNE.store(false, Ordering::SeqCst);
+        IMMUNE.store(true, Ordering::SeqCst);
+        DISABLE.store(true, Ordering::SeqCst);
         ACTIVE.store(true, Ordering::SeqCst);
         SWEEP_WANTED.store(true, Ordering::SeqCst);
         let guid = super::super::config::parse_guid("11111111-1111-1111-1111-111111111111").unwrap();
         let empty = descriptor(&guid, &[]);
         let seen = before(w.at(), 0, empty.as_ptr() as usize).expect("an object from the save is looked at");
-        assert_eq!((threshold(torch), threshold(bed), health(bed), health(oven)), (439, 1039, (1039, 1039), (2420, 4839)));
-        assert_eq!((threshold(far), threshold(world_prop), threshold(impact)), (10, 10, 10));
         assert!(WORK.lock().unwrap().sweep.is_none());
-
-        let loaded = w.entity(20, Some((105.0, 105.0)), Some(TORCH), Some(40), None);
-        after(Some(seen), w.at(), 20);
-        assert_eq!(threshold(loaded), 40);
-        assert!(HAS_WORK.load(Ordering::SeqCst));
-        std::thread::sleep(SETTLE + Duration::from_millis(50));
-        let seen = before(w.at(), 0, empty.as_ptr() as usize);
-        assert_eq!(threshold(loaded), 1639);
-        after(seen, w.at(), 0);
-        assert!(!HAS_WORK.load(Ordering::SeqCst));
+        assert_eq!((threshold(bed), health(bed)), (25, (25, 25)));
 
         let item = TORCH.to_le_bytes();
         let inside = transform(110.0, 110.0);
         let entries = with_entry(&with_entry(&[], HASH_CURRENT_TRANSFORM, inside.as_ptr() as usize, 56), HASH_USED_ITEM, item.as_ptr() as usize, 4);
         let placed = descriptor(&guid, &entries);
         let placed_bytes = *placed;
-        let seen = before(w.at(), 0x30, placed.as_ptr() as usize).unwrap();
+        let seen2 = before(w.at(), 0x31, placed.as_ptr() as usize).unwrap();
+        let head = read_bytes(placed.as_ptr() as usize, 0x28).unwrap();
+        assert_eq!(u64_at(&head, 0x20), 4);
+        let list = read_bytes(u64_at(&head, 0x18) as usize, 4 * ENTRY).unwrap();
+        assert_eq!(&list[..2 * ENTRY], &entries[..]);
+        assert_eq!((u32_at(&list, 2 * ENTRY), u64_at(&list, 2 * ENTRY + 16)), (HASH_DISABLE_DESTRUCTIBLE, 1));
+        assert_eq!((u32_at(&list, 3 * ENTRY), u64_at(&list, 3 * ENTRY + 16)), (HASH_COMBAT_FLAGS, 12));
+        assert_eq!(read_bytes(u64_at(&list, 3 * ENTRY + 8) as usize, 12).unwrap(), COMBAT_FLAGS_IMMUNE.to_vec());
+        let fresh = w.entity_with(30, Some((110.0, 110.0)), Some(TORCH), Some(10), None, true, Some(1));
+        let before_count = PROTECTED_NOW.load(Ordering::Relaxed);
+        after(Some(seen2), w.at(), 30);
         assert_eq!(*placed, placed_bytes);
-        let fresh = w.entity(30, Some((110.0, 110.0)), Some(TORCH), Some(10), None);
-        after(Some(seen), w.at(), 30);
-        assert_eq!(threshold(fresh), 439);
+        assert_eq!(PROTECTED_NOW.load(Ordering::Relaxed), before_count + 1);
+        assert_eq!(threshold(fresh), 10);
+        assert!(IMMUNE_SET.lock().unwrap().as_ref().unwrap().contains(&30));
 
-        IMMUNE.store(true, Ordering::SeqCst);
-        let seen = before(w.at(), 0x31, placed.as_ptr() as usize).unwrap();
+        IMMUNE.store(false, Ordering::SeqCst);
+        let seen3 = before(w.at(), 0x32, placed.as_ptr() as usize).unwrap();
         let head = read_bytes(placed.as_ptr() as usize, 0x28).unwrap();
         assert_eq!(u64_at(&head, 0x20), 3);
-        let list = read_bytes(u64_at(&head, 0x18) as usize, 3 * ENTRY).unwrap();
-        assert_eq!(&list[..2 * ENTRY], &entries[..]);
-        assert_eq!((u32_at(&list, 2 * ENTRY), u64_at(&list, 2 * ENTRY + 16)), (HASH_COMBAT_FLAGS, 12));
-        assert_eq!(read_bytes(u64_at(&list, 2 * ENTRY + 8) as usize, 12).unwrap(), COMBAT_FLAGS_IMMUNE.to_vec());
-        after(Some(seen), w.at(), 0);
+        after(Some(seen3), w.at(), 0);
         assert_eq!(*placed, placed_bytes);
-        IMMUNE.store(false, Ordering::SeqCst);
+        IMMUNE.store(true, Ordering::SeqCst);
+        DISABLE.store(false, Ordering::SeqCst);
+        let seen4 = before(w.at(), 0x33, placed.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(placed.as_ptr() as usize, 0x28).unwrap(), 0x20), 3);
+        after(Some(seen4), w.at(), 0);
+        DISABLE.store(true, Ordering::SeqCst);
 
         let sword = SWORD.to_le_bytes();
         let hit = with_entry(&with_entry(&[], HASH_CURRENT_TRANSFORM, inside.as_ptr() as usize, 56), HASH_USED_ITEM, sword.as_ptr() as usize, 4);
         let hit_desc = descriptor(&guid, &hit);
-        let seen = before(w.at(), 0x32, hit_desc.as_ptr() as usize).unwrap();
-        after(Some(seen), w.at(), 13);
-        assert_eq!(threshold(impact), 10);
-        assert!(!HAS_WORK.load(Ordering::SeqCst));
+        let seen5 = before(w.at(), 0x34, hit_desc.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(hit_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 2);
+        after(Some(seen5), w.at(), 13);
+
+        let pet_item = PET.to_le_bytes();
+        let pet_entries = with_entry(&with_entry(&[], HASH_CURRENT_TRANSFORM, inside.as_ptr() as usize, 56), HASH_USED_ITEM, pet_item.as_ptr() as usize, 4);
+        let pet_desc = descriptor(&guid, &pet_entries);
+        let seen6 = before(w.at(), 0x35, pet_desc.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(pet_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 2);
+        after(Some(seen6), w.at(), 0);
+
+        let outside = transform(400.0, 400.0);
+        let far_entries = with_entry(&with_entry(&[], HASH_CURRENT_TRANSFORM, outside.as_ptr() as usize, 56), HASH_USED_ITEM, item.as_ptr() as usize, 4);
+        let far_desc = descriptor(&guid, &far_entries);
+        let seen7 = before(w.at(), 0x36, far_desc.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(far_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 2);
+        after(Some(seen7), w.at(), 0);
 
         let client = World::new(1);
         assert!(before(client.at(), 0, placed.as_ptr() as usize).is_none());
 
-        *AREAS.lock().unwrap() = off;
-        SWEEP_WANTED.store(true, Ordering::SeqCst);
-        let seen = before(w.at(), 0, empty.as_ptr() as usize);
-        after(seen, w.at(), 0);
-        assert_eq!((threshold(torch), threshold(bed), threshold(loaded), threshold(fresh)), (10, 25, 40, 10));
-        assert_eq!((health(bed), health(oven), health(hurt)), ((25, 25), (60, 120), (50, 200)));
+        let mut plain = World::new(0);
+        let world = u64_at(&read_bytes(plain.at(), 8).unwrap(), 0) as usize;
+        spawner::write_bytes(world + TYPE_MAPS[0] + 0x10, &0u64.to_le_bytes());
+        assert!(!request_has(plain.at(), HASH_DISABLE_DESTRUCTIBLE));
+        assert!(protection_entries(plain.at(), &[], 0).is_empty());
+        plain.keep.clear();
+
+        *AREAS.lock().unwrap() = off.clone();
+        let released_flag = w.entity_with(31, Some((100.0, 100.0)), Some(TORCH), Some(10), None, true, Some(1));
+        immune_set(|set| set.insert(31));
+        let flag_at = |entity: usize| {
+            let p = spawner::find_record(w.at(), entity as u32).and_then(spawner::placement).unwrap();
+            spawner::component_address(&p, CB).unwrap().0
+        };
+        let at = flag_at(31);
+        let _ = released_flag;
+        assert_eq!(read_flag(at), 1);
+        assert_eq!(settle(w.at(), 31, &slots, &off), Outcome::Released { zone: "Town".into(), item: TORCH, edit: Edit { immune_off: true, ..Edit::default() } });
+        assert_eq!(read_flag(at), 0);
+        assert_eq!(settle(w.at(), 31, &slots, &off), Outcome::Outside);
+        let own = flag_at(27);
+        assert_eq!(settle(w.at(), 27, &slots, &off), Outcome::Outside);
+        assert_eq!(read_flag(own), 1);
 
         ACTIVE.store(false, Ordering::SeqCst);
         assert!(before(w.at(), 0, placed.as_ptr() as usize).is_none());
         *AREAS.lock().unwrap() = Areas::default();
         *ITEMS.lock().unwrap() = None;
         *SLOTS.lock().unwrap() = None;
+        *IMMUNE_SET.lock().unwrap() = None;
+        let _ = seen;
     }
 
     #[test]

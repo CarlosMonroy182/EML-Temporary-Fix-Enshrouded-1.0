@@ -30,7 +30,7 @@ pub struct Zone {
     pub lock_admins: bool,
     /// Players can always hurt each other inside, even when PvP is off elsewhere.
     pub pvp: bool,
-    /// Decoration built inside cannot be broken by hits; the hammer still removes it.
+    /// Nothing built inside can be broken by hits, by anybody; the hammer still removes it.
     pub shield: bool,
     /// Creature (position in `GUARDIANS`) and level of this zone's base guardian.
     pub guardian: usize,
@@ -851,8 +851,8 @@ impl App {
                         });
                     });
                     changed |= ui
-                        .checkbox(&mut z.shield, "Objetos reforzados: lo construido aguanta 40 veces más golpes, la madera 120")
-                        .on_hover_text("Lo colocado con el martillo dentro de la zona (antorchas, lámparas, muebles, decoración, estaciones) necesita unas 40 veces más daño para romperse (120 veces si es de madera), también lo que ya estaba construido. Se siguen rompiendo: defender la base sigue costando algo. Los animales, los PNJ y las herramientas no cambian. Al desmarcar la casilla vuelven a su resistencia normal. Se siguen quitando con el martillo.")
+                        .checkbox(&mut z.shield, "Objetos protegidos: nadie rompe lo construido aquí; el martillo sigue quitándolo")
+                        .on_hover_text("Lo colocado con el martillo dentro de la zona (antorchas, mesas, lámparas, bloques, estaciones) no se puede romper a golpes, ni por los atacantes ni por el propio equipo. Vale para lo que se construya o se cargue con la zona activada; lo que ya estaba en pie se protege cuando el servidor lo vuelve a crear (al reiniciar). Los animales, los PNJ y las herramientas no cambian. El martillo de desmontar sigue funcionando. Al desmarcar la casilla, la inmunidad a golpes se quita al momento y la protección de destrucción al reiniciar el servidor.")
                         .changed();
                     if z.team != 0 {
                         ui.horizontal_wrapped(|ui| {
