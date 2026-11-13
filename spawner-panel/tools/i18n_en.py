@@ -336,7 +336,7 @@ EN = {
 "Según la pestaña PvP": "As set in the PvP tab",
 "PvP siempre activo": "PvP always on",
 "Objetos irrompibles: lo construido aquí no se rompe a golpes": "Unbreakable objects: what is built here cannot be broken by hits",
-"Antorchas, lámparas, muebles y decoración colocados dentro de la zona no se rompen con armas. Se siguen quitando con el martillo. Se aplica a lo que se coloque o se cargue a partir de ahora.": "Torches, lamps, furniture and decoration placed inside the zone cannot be broken with weapons. The hammer still removes them. It applies to what is placed or loaded from now on.",
+"Antorchas, lámparas, muebles y decoración colocados con el martillo dentro de la zona no se rompen con armas, también lo que ya estaba construido. Se siguen quitando con el martillo.": "Torches, lamps, furniture and decoration placed with the hammer inside the zone cannot be broken with weapons, including what was already built. The hammer still removes them.",
 "PvP: {state}. Se cambia en la pestaña PvP.": "PvP: {state}. Change it in the PvP tab.",
 "activado": "on",
 "desactivado": "off",

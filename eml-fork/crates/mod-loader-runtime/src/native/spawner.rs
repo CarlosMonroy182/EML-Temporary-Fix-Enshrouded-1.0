@@ -1074,7 +1074,7 @@ pub fn write_position(pos: (i64, i64, i64)) {
     }
 }
 
-fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
+pub(super) fn entity_ids(manager: usize) -> Option<HashSet<u32>> {
     if manager == 0 {
         return None;
     }
@@ -1140,7 +1140,7 @@ fn bit_set(def: usize, index: usize) -> bool {
     }
 }
 
-fn hash_slot(id: u32, capacity: u64) -> u64 {
+pub(super) fn hash_slot(id: u32, capacity: u64) -> u64 {
     let mut a = (id >> 16) ^ id;
     a = a.wrapping_mul(0x045d_9f3b);
     let mut b = (a >> 16) ^ a;
