@@ -254,6 +254,22 @@ pub struct SocialState {
     pub teams_seq: u32,
     pub teams_asked: Option<Instant>,
     pub teams_last: Option<Instant>,
+    pub guardian_pick: usize,
+    pub guardian_level: u32,
+    pub guardian_sent: bool,
+}
+
+/// Creatures offered as a base guardian: template name and the name the game shows.
+pub const GUARDIANS: [(&str, &str); 5] = [
+    ("Enemy_Heavy_Fogger_Monstrosity_BossHealthBar", "Fell Monstrosity"),
+    ("Enemy_Fogger_Heavy_unarmored_BossHealthBar", "Fell Thunderbrute"),
+    ("Enemy_Midboss_Vukah_Bigfoot_BossHealthBar", "Vukah Brawler"),
+    ("Enemy_Wildbeast_Wolf_Heavy_BossHealthBar", "Direwolf"),
+    ("Enemy_Boss_Fog_Dragon", "Fell Dragon Youngling (vuela)"),
+];
+
+pub fn guardian_request(zone: &str, template: &str, level: u32) -> Value {
+    json!({ "template": template, "count": 1, "level": level.clamp(1, 100), "guardian": zone })
 }
 
 impl Default for SocialState {
@@ -285,6 +301,9 @@ impl Default for SocialState {
             teams_seq: 0,
             teams_asked: None,
             teams_last: None,
+            guardian_pick: 0,
+            guardian_level: 40,
+            guardian_sent: false,
         }
     }
 }
@@ -783,6 +802,8 @@ impl App {
             ui.label(RichText::new("El PvP está activado en todo el mundo (pestaña PvP). Apágalo ahí para que las zonas de PvP siempre activo se noten.").color(GOLD));
         }
         let team_names: Vec<String> = self.social.teams.iter().map(|t| t.name.clone()).collect();
+        let (mut pick, mut level) = (self.social.guardian_pick.min(GUARDIANS.len() - 1), self.social.guardian_level);
+        let mut guardian_for: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, z) in self.social.zones.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -824,8 +845,8 @@ impl App {
                         });
                     });
                     changed |= ui
-                        .checkbox(&mut z.shield, "Objetos irrompibles: lo construido aquí no se rompe a golpes")
-                        .on_hover_text("Antorchas, lámparas, muebles y decoración colocados con el martillo dentro de la zona no se rompen con armas, también lo que ya estaba construido. Se siguen quitando con el martillo.")
+                        .checkbox(&mut z.shield, "Objetos reforzados: lo construido aquí aguanta 40 veces más golpes")
+                        .on_hover_text("Lo colocado con el martillo dentro de la zona (antorchas, lámparas, muebles, decoración, estaciones) necesita unas 40 veces más daño para romperse, también lo que ya estaba construido. Se siguen rompiendo: defender la base sigue costando algo. Al desmarcar la casilla vuelven a su resistencia normal. Se siguen quitando con el martillo.")
                         .changed();
                     if z.team != 0 {
                         ui.horizontal_wrapped(|ui| {
@@ -834,6 +855,21 @@ impl App {
                                 changed |= ui.checkbox(&mut z.lock_admins, "También a los administradores (para probarlo)").changed();
                             }
                         });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Guardián de la base (prueba)");
+                            egui::ComboBox::from_id_salt(("zone_guardian", i)).selected_text(GUARDIANS[pick].1).show_ui(ui, |ui| {
+                                for (n, (_, name)) in GUARDIANS.iter().enumerate() {
+                                    ui.selectable_value(&mut pick, n, *name);
+                                }
+                            });
+                            ui.label("Nivel");
+                            ui.add(egui::DragValue::new(&mut level).speed(1.0).range(1..=100));
+                            if button(ui, "Colocar guardián aquí", Vec2::new(190.0, 26.0), true, false) {
+                                guardian_for = Some(z.name.clone());
+                            }
+                        })
+                        .response
+                        .on_hover_text("Ponte dentro de la zona y pulsa. Aparece una criatura poderosa que defiende la zona: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. No se guarda: desaparece al reiniciar el servidor.");
                     }
                 });
             }
@@ -849,9 +885,37 @@ impl App {
             let dir = self.dir.clone();
             self.social.save_zones(&dir);
         }
+        self.social.guardian_pick = pick;
+        self.social.guardian_level = level;
+        if let Some(zone) = guardian_for {
+            self.place_guardian(&zone, GUARDIANS[pick].0, level);
+        }
         if !self.social.notice.is_empty() {
             ui.label(RichText::new(&self.social.notice).color(GOOD));
         }
+        if self.social.guardian_sent {
+            let (text, color) = self.status_text();
+            if !text.is_empty() {
+                ui.label(RichText::new(text).color(color));
+            }
+        }
+    }
+
+    fn place_guardian(&mut self, zone: &str, template: &str, level: u32) {
+        self.social.guardian_sent = true;
+        let inside = match (self.player, self.social.zones.iter().find(|z| z.name == zone)) {
+            (Some(p), Some(z)) => Some(zone_at(std::slice::from_ref(z), p[0], p[2]).is_some()),
+            _ => None,
+        };
+        if inside == Some(false) && !crate::remote::active() {
+            self.status = crate::Status::Error(format!("Ponte dentro de la zona «{zone}» y vuelve a pulsar."));
+            return;
+        }
+        let request = guardian_request(zone, template, level);
+        self.status = match write_atomic(&self.dir, crate::REQUEST_FILE, crate::REQUEST_TMP, &request.to_string()) {
+            Ok(()) => crate::Status::Waiting(Instant::now()),
+            Err(e) => crate::Status::Error(e),
+        };
     }
 
     pub fn teams_tab(&mut self, ui: &mut egui::Ui) {
@@ -1272,6 +1336,14 @@ mod tests {
         let old = parse_zones(r#"{"zones":[{"name":"Old","x":1.0,"z":2.0,"radius":30.0}]}"#);
         assert!(!old[0].shield);
         assert_eq!(zones_json(&old)["zones"][0], zones_json(&[Zone::new("Old".into(), 1.0, 2.0, 30.0)])["zones"][0]);
+    }
+
+    #[test]
+    fn the_guardian_request_names_the_zone_and_keeps_the_level_in_range() {
+        let r = guardian_request("Keep", GUARDIANS[0].0, 500);
+        assert_eq!((r["guardian"].as_str(), r["count"].as_u64(), r["level"].as_u64()), (Some("Keep"), Some(1), Some(100)));
+        assert_eq!(r["template"], GUARDIANS[0].0);
+        assert!(GUARDIANS.iter().all(|(t, n)| !t.is_empty() && !n.is_empty()));
     }
 
     #[test]

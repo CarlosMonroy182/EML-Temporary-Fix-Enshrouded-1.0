@@ -589,7 +589,11 @@ struct Request {
     item_amount: Option<u32>,
     item_guid: Option<String>,
     stats: Option<StatsPatch>,
+    /// Name of a zone with an owning team: the creature is placed there as that team's guardian.
+    guardian: Option<String>,
 }
+
+static GUARDIAN_REQUEST: Mutex<Option<super::guardian::Post>> = Mutex::new(None);
 
 static DROP_FACTOR: OnceLock<f64> = OnceLock::new();
 
@@ -691,6 +695,20 @@ fn poll_request_in(dir: &std::path::Path) {
         log("panel request ignored: invalid file");
         return;
     };
+    let post = match req.guardian.as_deref().map(|name| {
+        let zones = std::fs::read_to_string(dir.join(groups::ZONES_FILE)).map(|t| groups::parse_zones(&t)).unwrap_or_default();
+        super::guardian::post_for(&zones, name)
+    }) {
+        Some(Err(why)) => {
+            log(&format!("guardian: not placed: {why}"));
+            return;
+        }
+        Some(Ok(post)) => Some(post),
+        None => None,
+    };
+    if let Ok(mut g) = GUARDIAN_REQUEST.lock() {
+        *g = post;
+    }
     if let Ok(mut t) = SPAWN_TAG.lock() {
         *t = None;
     }
@@ -707,6 +725,9 @@ fn poll_request_in(dir: &std::path::Path) {
     }
     if let Some(v) = req.count {
         s.count = v.clamp(1, 20);
+    }
+    if req.guardian.is_some() {
+        s.count = 1;
     }
     if let Some(v) = req.distance {
         s.distance = v.clamp(1.0, 60.0);
@@ -1844,6 +1865,7 @@ fn requester_transform(manager: usize) -> Option<Vec<u8>> {
 }
 
 fn spawn_now(manager: usize) {
+    let post = GUARDIAN_REQUEST.lock().ok().and_then(|mut g| g.take());
     let tag = SPAWN_TAG.lock().ok().and_then(|mut t| t.take());
     let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
     let settings = match requested {
@@ -1866,7 +1888,15 @@ fn spawn_now(manager: usize) {
         ));
         return;
     };
-    let at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
+    let mut at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
+    if let Some(post) = &post {
+        let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
+        if (x - post.x).powi(2) + (z - post.z).powi(2) > post.radius * post.radius {
+            log(&format!("guardian: not placed: the admin stands at x={x:.0} z={z:.0}, outside '{}'; stand inside the zone and try again", post.zone));
+            return;
+        }
+        at = Some([x, y, z]);
+    }
     let mut base = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
     if let Some(p) = at {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
@@ -1939,6 +1969,14 @@ fn spawn_now(manager: usize) {
             }
         }
 
+        if post.is_some() {
+            let at = entry_count as usize * 24;
+            write_u32(&mut entries.0, at, super::guardian::HASH_DO_NOT_SAVE);
+            write_u64(&mut entries.0, at + 8, super::guardian::DO_NOT_SAVE_DATA.as_ptr() as u64);
+            write_u64(&mut entries.0, at + 16, super::guardian::DO_NOT_SAVE_DATA.len() as u64);
+            entry_count += 1;
+        }
+
         let mut pickup = [0u8; PICKUP_ITEM_SIZE];
         if let Some(g) = &give {
             pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
@@ -1962,6 +2000,12 @@ fn spawn_now(manager: usize) {
         if let Some(g) = give {
             if id != 0 {
                 verify_pickup(manager, id, &g);
+            }
+        }
+        if let (Some(post), true) = (&post, id != 0) {
+            if !super::guardian::adopt(manager, id, post.clone()) {
+                let removed = retire_entity(manager, id);
+                log(&format!("guardian: ERROR entity {id} was created but could not be made a guardian; {}", if removed { "it was taken out of the world again" } else { "it could not be taken out and keeps its own side, remove it by hand" }));
             }
         }
         if id != 0 && !object {
@@ -2753,6 +2797,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         st.zone_ids.clear();
         return;
     }
+    super::guardian::refresh(manager);
     let players: Vec<(u32, u32)> = match TRACKED.lock() {
         Ok(list) => list.iter().map(|p| (p.id, p.number)).collect(),
         Err(_) => return,

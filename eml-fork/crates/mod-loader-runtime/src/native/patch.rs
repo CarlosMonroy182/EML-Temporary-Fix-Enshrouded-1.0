@@ -57,6 +57,7 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
 extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
     super::probe::hit(super::probe::ENEMY_VALUES);
     let (a, b) = (rcx as u8, rdx as u8);
+    super::guardian::note_values(a, b, "isEnemy");
     let hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
     team_check_report(a, b, hostile, "values");
     hostile as u8
@@ -68,6 +69,9 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
         return 0;
     }
+    if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isEnemy") {
+        return hostile as u8;
+    }
     let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
     team_check_report(fa, fb, hostile, "pointers");
     hostile as u8
@@ -75,6 +79,7 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
 
 extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
     super::probe::hit(super::probe::FRIEND_VALUES);
+    super::guardian::note_values(rcx as u8, rdx as u8, "isFriend");
     faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks()) as u8
 }
 
@@ -82,6 +87,9 @@ extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8
     super::probe::hit(super::probe::FRIEND_OPTS);
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
     let (fa, fb) = (read_faction(a), read_faction(b));
+    if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isFriend") {
+        return !hostile as u8;
+    }
     faction::friend_opts(fa, fb, flag, LIVE.pvp_friend_checks()) as u8
 }
 
