@@ -594,9 +594,44 @@ struct Request {
     stats: Option<StatsPatch>,
     /// Name of a zone with an owning team: the creature is placed there as that team's guardian.
     guardian: Option<String>,
+    /// Name of a zone whose guardian is taken away.
+    guardian_remove: Option<String>,
 }
 
 static GUARDIAN_REQUEST: Mutex<Option<super::guardian::Post>> = Mutex::new(None);
+
+/// Places a saved guardian again, when nothing else waits to be spawned.
+fn queue_saved_guardian(post: super::guardian::Post, saved: &super::guardian::Saved) {
+    if PENDING.load(Ordering::SeqCst) != 0 {
+        log(&format!("guardian: '{}' will be placed again at a later moment: another spawn is waiting", post.zone));
+        return;
+    }
+    let mut s = match SPAWN.lock() {
+        Ok(s) => s.clone(),
+        Err(_) => return,
+    };
+    s.template = saved.template.clone();
+    s.level = saved.level.min(1000);
+    s.count = 1;
+    s.health = 0;
+    s.damage = 1.0;
+    log(&format!("guardian: placing the saved guardian of '{}' again ({} level {})", post.zone, saved.template, saved.level));
+    if let Ok(mut g) = GUARDIAN_REQUEST.lock() {
+        *g = Some(post);
+    }
+    if let Ok(mut t) = SPAWN_TAG.lock() {
+        *t = None;
+    }
+    if let Ok(mut r) = REQUEST.lock() {
+        *r = Some(s);
+    }
+    if let Ok(mut r) = REQUEST_AT.lock() {
+        *r = Some(saved.at);
+    }
+    REQUEST_OBJECT.store(false, Ordering::SeqCst);
+    REQUEST_FORWARD.store(false, Ordering::SeqCst);
+    PENDING.store(1, Ordering::SeqCst);
+}
 
 static DROP_FACTOR: OnceLock<f64> = OnceLock::new();
 
@@ -698,6 +733,11 @@ fn poll_request_in(dir: &std::path::Path) {
         log("panel request ignored: invalid file");
         return;
     };
+    if let Some(zone) = req.guardian_remove.as_deref().map(str::trim).filter(|z| !z.is_empty()) {
+        super::guardian::queue_remove(zone);
+        log(&format!("guardian: removal of the guardian of '{zone}' requested from the panel"));
+        return;
+    }
     let post = match req.guardian.as_deref().map(|name| {
         let zones = std::fs::read_to_string(dir.join(groups::ZONES_FILE)).map(|t| groups::parse_zones(&t)).unwrap_or_default();
         super::guardian::post_for(&zones, name)
@@ -1508,7 +1548,7 @@ pub fn tick() {
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() && !super::divine::pending() {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() && !super::divine::pending() && !super::guardian::removals_pending() {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1517,6 +1557,7 @@ pub fn before(manager: usize, edx: u32) {
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
+    super::guardian::run_removals(manager);
     if PENDING.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
         spawn_now(manager);
     }
@@ -1894,7 +1935,7 @@ fn spawn_now(manager: usize) {
         return;
     };
     let mut at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
-    if let Some(post) = &post {
+    if let Some(post) = post.as_ref().filter(|p| !p.auto) {
         let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
         if (x - post.x).powi(2) + (z - post.z).powi(2) > post.radius * post.radius {
             log(&format!("guardian: not placed: the admin stands at x={x:.0} z={z:.0}, outside '{}'; stand inside the zone and try again", post.zone));
@@ -2008,7 +2049,12 @@ fn spawn_now(manager: usize) {
             }
         }
         if let (Some(post), true) = (&post, id != 0) {
-            if !super::guardian::adopt(manager, id, post.clone()) {
+            if super::guardian::adopt(manager, id, post.clone()) {
+                if !post.auto {
+                    let spot = [(base.0.wrapping_add(dx)) as f64 / METERS, base.1.wrapping_add(dy) as f64 / METERS, (base.2.wrapping_add(dz)) as f64 / METERS];
+                    super::guardian::remember(&post.zone, &settings.template, settings.level, spot);
+                }
+            } else {
                 let removed = retire_entity(manager, id);
                 log(&format!("guardian: ERROR entity {id} was created but could not be made a guardian; {}", if removed { "it was taken out of the world again" } else { "it could not be taken out and keeps its own side, remove it by hand" }));
             }
@@ -2868,6 +2914,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     let mut inside_ids: Vec<u32> = Vec::new();
     let mut inside_at: Vec<(u32, i64, i64, i64)> = Vec::new();
     let mut visitors: Vec<usize> = Vec::new();
+    let mut standing: Vec<(f64, f64)> = Vec::new();
     for (seen_index, p) in seen.iter().enumerate() {
         let (id, number, team) = (p.id, p.number, p.team);
         match transform_of(manager, id) {
@@ -2883,6 +2930,7 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     id,
                     serde_json::Value::String(p.name.clone().unwrap_or_default())
                 ));
+                standing.push((x, z));
                 let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
                 if in_safe {
                     inside_ids.push(id);
@@ -2934,6 +2982,9 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             log(&format!("players: listed (number, entity, name, team) {listed}"));
             *last = listed;
         }
+    }
+    if let Some((post, saved)) = super::guardian::due(&st.groups.zones, &standing) {
+        queue_saved_guardian(post, &saved);
     }
     let entered: Vec<u32> = inside_ids.iter().copied().filter(|id| !st.zone_ids.contains(id)).collect();
     if st.zone_ids != inside_ids {

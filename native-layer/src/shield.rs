@@ -231,7 +231,7 @@ static SAY_PLACED: Budget = Budget::new(8);
 static SAY_PLACED_OUTSIDE: Budget = Budget::new(3);
 static SAY_PROTECTED: Budget = Budget::new(12);
 static SAY_UNPROTECTED: Budget = Budget::new(8);
-static SAY_LOADED: Budget = Budget::new(4);
+static SAY_LOADED: Budget = Budget::new(8);
 static SAY_REFUSED: Budget = Budget::new(2);
 static SAY_RELEASED: Budget = Budget::new(6);
 static SAY_NO_DESTRUCTIBLE: Budget = Budget::new(3);
@@ -575,6 +575,20 @@ fn take_immunity_off(p: &spawner::Placement, slots: &Slots, id: u32) -> bool {
     size == COMBAT_FLAGS_SIZE && spawner::write_bytes(addr, &[0])
 }
 
+/// An object that already stands and has a `CombatFlags` of its own can be made immune where it is.
+fn make_immune_in_place(p: &spawner::Placement, slots: &Slots, id: u32) -> bool {
+    let Some((addr, size)) = slots.combat.and_then(|index| spawner::component_address(p, index)) else { return false };
+    if size != COMBAT_FLAGS_SIZE || !spawner::write_bytes(addr, &[1]) {
+        return false;
+    }
+    immune_set(|set| {
+        if set.len() < IMMUNE_MAX {
+            set.insert(id);
+        }
+    });
+    true
+}
+
 /// Looks at one built object inside a protected or released place. Numbers an earlier version multiplied are
 /// divided back, immunity this module gave is taken off in a released place, and inside a protected zone the
 /// object is reported as protected or not.
@@ -637,6 +651,7 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
         return Outcome::NoDestructible(item);
     }
     match protection(&p, slots) {
+        (false, false) if IMMUNE.load(Ordering::Relaxed) && make_immune_in_place(&p, slots, id) => Outcome::Protected { zone, item, disable: false, immune: true },
         (false, false) => Outcome::Unprotected { zone, item, shared },
         (disable, immune) => Outcome::Protected { zone, item, disable, immune },
     }
@@ -910,14 +925,8 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     let carried = entry(&entries, HASH_USED_ITEM, USED_ITEM_SIZE).and_then(|at| read_bytes(at, 4)).map(|b| u32_at(&b, 0));
     let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable: may_break(&head[4..20]), immune_added: false, desc, original: [0; 16], entries: Vec::new() };
     let Some(item) = seen.built else {
-        if seen.breakable && SAY_LOADED.take() {
-            let inside = entry(&entries, HASH_CURRENT_TRANSFORM, 24)
-                .and_then(|at| read_bytes(at, 24))
-                .and_then(|b| meters(&b))
-                .and_then(|(x, z)| AREAS.lock().ok().and_then(|a| a.shielded.iter().find(|s| s.holds(x, z)).map(|s| s.name.clone())));
-            if let Some(zone) = inside {
-                log(&format!("object shield: created in '{zone}' without a hammer item: template {} given [{}]", spawner::guid_text(&head[4..20]), describe(&entries)));
-            }
+        if seen.breakable && !seen.carried && SAY_LOADED.take() {
+            log(&format!("object shield: created without a hammer item: template {} given [{}]", spawner::guid_text(&head[4..20]), describe(&entries)));
         }
         return Some(seen);
     };
@@ -1415,8 +1424,8 @@ mod tests {
         w.entity_with(26, Some((100.0, 100.0)), Some(TORCH), Some(10), None, true, Some(1));
         w.entity_with(27, Some((100.0, 100.0)), Some(TORCH), Some(10), None, false, Some(1));
         w.entity_with(28, Some((100.0, 100.0)), Some(TORCH), Some(10), None, true, None);
-        let shared = w.entity(29, Some((100.0, 100.0)), Some(TORCH), None, None);
-        let _ = shared;
+        w.entity(29, Some((100.0, 100.0)), Some(TORCH), None, None);
+        w.entity_with(32, Some((100.0, 100.0)), Some(TORCH), Some(10), None, false, Some(0));
 
         assert_eq!(settle(w.at(), 10, &slots, &town), Outcome::Unprotected { zone: "Town".into(), item: TORCH, shared: false });
         assert_eq!(threshold(torch), 10);
@@ -1429,6 +1438,15 @@ mod tests {
         assert_eq!(settle(w.at(), 26, &slots, &town), protected(TORCH, true, true));
         assert_eq!(settle(w.at(), 27, &slots, &town), protected(TORCH, false, true));
         assert_eq!(settle(w.at(), 28, &slots, &town), protected(TORCH, true, false));
+        let own_flags = {
+            let p = spawner::find_record(w.at(), 32).and_then(spawner::placement).unwrap();
+            spawner::component_address(&p, CB).unwrap().0
+        };
+        assert_eq!(read_flag(own_flags), 0);
+        assert_eq!(settle(w.at(), 32, &slots, &town), protected(TORCH, false, true));
+        assert_eq!(read_flag(own_flags), 1);
+        assert_eq!(settle(w.at(), 32, &slots, &off), Outcome::Released { zone: "Town".into(), item: TORCH, edit: Edit { immune_off: true, ..Edit::default() } });
+        assert_eq!(read_flag(own_flags), 0);
         assert_eq!((threshold(far), threshold(world_prop), threshold(impact)), (10, 10, 10));
 
         let mut z = World::new(0);

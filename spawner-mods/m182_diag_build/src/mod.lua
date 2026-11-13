@@ -115,7 +115,7 @@ local function patch_doors()
     local wanted = config.door_lock_permission or "CanAccessInventories"
     local donor_before = perm_text(try(function() return donor.value.requiredPermission end))
     local locked, stations, altars = 0, 0, 0
-    local extra, untoggled = {}, {}
+    local extra, untoggled, altar_names = {}, {}, {}
     local retargeted, sample = 0, nil
     local function retarget(resource)
         local c = last_lock(resource)
@@ -134,12 +134,14 @@ local function patch_doors()
             local crafted = name:find("Door") and name:find("Crafted")
             local doorlike = buildable and (lower:find("door") or lower:find("gate") or lower:find("portcullis")) and not lower:find("frame")
             local door = (crafted or doorlike) and not name:find("DEPRECATED")
-            local altar = config.altars_need_permission ~= false and buildable and not door and name:find("FlameAltar") ~= nil
+            local altar = config.altars_need_permission ~= false and not door and name:find("FlameAltar") ~= nil
+                and not name:find("DEPRECATED") and not name:find("NOT_USED") and not name:find("VFX") and not name:find("FastTravel")
             local station = config.stations_need_permission ~= false and buildable and not door and not name:find("FlameAltar")
             if not door and not station and not altar then return end
-            local toggle, lock, craft = false, false, false
+            local toggle, lock, craft, interactive = false, false, false, false
             for _, c in ipairs(resource.data.components) do
                 local t = tostring(c.type)
+                if t:find("Interaction") then interactive = true end
                 if t == "keen::ecs::InteractionToggle" then toggle = true end
                 if t == "keen::ecs::InteractionLock" then lock = true end
                 if t == "keen::ecs::CraftingInteraction" then craft = true end
@@ -156,15 +158,17 @@ local function patch_doors()
                 table.insert(resource.data.components, donor)
                 retarget(resource)
                 stations = stations + 1
-            elseif altar then
+            elseif altar and interactive then
                 table.insert(resource.data.components, donor)
                 retarget(resource)
                 altars = altars + 1
+                table.insert(altar_names, name)
             end
         end)
     end
     print(string.format("%s player doors that need the building permission: %d, crafting stations: %d, altars: %d", TAG, locked, stations, altars))
     print(string.format("%s door and station lock needs %s (lock source had %s, now %s; %d locks changed, first reads %s)", TAG, wanted, donor_before, perm_text(try(function() return donor.value.requiredPermission end)), retargeted, tostring(sample)))
+    print(TAG .. " altars locked: " .. (#altar_names > 0 and table.concat(altar_names, ", ") or "none found"))
     if #extra > 0 then print(TAG .. " doors added from the building menu: " .. table.concat(extra, ", ")) end
     if #untoggled > 0 then print(TAG .. " door pieces without an open/close interaction (unchanged): " .. table.concat(untoggled, ", ")) end
 end

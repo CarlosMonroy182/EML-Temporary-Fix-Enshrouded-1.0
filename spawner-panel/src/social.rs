@@ -271,6 +271,10 @@ pub const GUARDIANS: [(&str, &str); 5] = [
 
 pub const GUARDIAN_LEVEL: u32 = 40;
 
+pub fn guardian_remove_request(zone: &str) -> Value {
+    json!({ "template": "", "guardian_remove": zone })
+}
+
 pub fn guardian_request(zone: &str, template: &str, level: u32) -> Value {
     json!({ "template": template, "count": 1, "level": level.clamp(1, 100), "guardian": zone })
 }
@@ -810,6 +814,7 @@ impl App {
         }
         let team_names: Vec<String> = self.social.teams.iter().map(|t| t.name.clone()).collect();
         let mut guardian_for: Option<(String, usize, u32)> = None;
+        let mut guardian_away: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, z) in self.social.zones.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -873,9 +878,12 @@ impl App {
                             if button(ui, "Colocar guardián aquí", Vec2::new(190.0, 26.0), true, false) {
                                 guardian_for = Some((z.name.clone(), z.guardian.min(GUARDIANS.len() - 1), z.guardian_level));
                             }
+                            if button(ui, "Quitar guardián", Vec2::new(150.0, 26.0), true, false) {
+                                guardian_away = Some(z.name.clone());
+                            }
                         })
                         .response
-                        .on_hover_text("Ponte dentro de la zona y pulsa. Cada zona tiene su propio guardián, con su criatura y su nivel; si pulsas otra vez, solo se reemplaza el de esta zona. Aparece una criatura poderosa que defiende la zona con su propia vida y daño: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. No se guarda: desaparece al reiniciar el servidor.");
+                        .on_hover_text("Ponte dentro de la zona y pulsa. Cada zona tiene su propio guardián, con su criatura y su nivel; si pulsas otra vez, solo se reemplaza el de esta zona. Aparece una criatura poderosa que defiende la zona con su propia vida y daño: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. Se queda: tras reiniciar el servidor vuelve a aparecer solo cuando alguien entra en la zona. «Quitar guardián» lo quita de esta zona y no vuelve.");
                     }
                 });
             }
@@ -894,6 +902,9 @@ impl App {
         if let Some((zone, pick, level)) = guardian_for {
             self.place_guardian(&zone, GUARDIANS[pick].0, level);
         }
+        if let Some(zone) = guardian_away {
+            self.remove_guardian(&zone);
+        }
         if !self.social.notice.is_empty() {
             ui.label(RichText::new(&self.social.notice).color(GOOD));
         }
@@ -903,6 +914,15 @@ impl App {
                 ui.label(RichText::new(text).color(color));
             }
         }
+    }
+
+    fn remove_guardian(&mut self, zone: &str) {
+        self.social.guardian_sent = true;
+        let request = guardian_remove_request(zone);
+        self.status = match write_atomic(&self.dir, crate::REQUEST_FILE, crate::REQUEST_TMP, &request.to_string()) {
+            Ok(()) => crate::Status::Waiting(Instant::now()),
+            Err(e) => crate::Status::Error(e),
+        };
     }
 
     fn place_guardian(&mut self, zone: &str, template: &str, level: u32) {
@@ -1356,6 +1376,13 @@ mod tests {
         let back = parse_zones(&value.to_string());
         assert_eq!((back[0].guardian, back[0].guardian_level), (3, 70));
         assert_eq!((back[1].guardian, back[1].guardian_level), (0, GUARDIAN_LEVEL));
+    }
+
+    #[test]
+    fn the_removal_request_names_only_the_zone() {
+        let r = guardian_remove_request("Keep");
+        assert_eq!((r["guardian_remove"].as_str(), r["template"].as_str()), (Some("Keep"), Some("")));
+        assert!(r.get("guardian").is_none());
     }
 
     #[test]
