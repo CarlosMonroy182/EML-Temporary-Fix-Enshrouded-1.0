@@ -134,6 +134,7 @@ extern "win64" fn hook_create(manager: usize, edx: u32, desc: usize, r9: usize, 
     if LIVE.spawn_probe() {
         log_call(manager, edx as usize, desc, caller);
     }
+    let started = std::time::Instant::now();
     let desc = super::pillar::before(manager, desc);
     let hooked = LIVE.spawner() || super::vfx::wanted();
     if hooked {
@@ -141,13 +142,29 @@ extern "win64" fn hook_create(manager: usize, edx: u32, desc: usize, r9: usize, 
     }
     super::guardian::on_create(manager);
     let shield = super::shield::before(manager, edx, desc);
+    let before_done = started.elapsed();
     let ret = original_create(manager, edx, desc, r9);
+    let created = started.elapsed();
     super::shield::after(shield, manager, ret);
     if hooked {
         spawner::after(manager, edx, desc, ret);
     }
+    let total = started.elapsed();
+    if total >= SLOW_CREATE && SLOW_CREATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < SLOW_CREATES_MAX {
+        spawner::log(&format!(
+            "slow create: {} ms in total (our part before {} ms, the game {} ms, our part after {} ms)",
+            total.as_millis(),
+            before_done.as_millis(),
+            (created - before_done).as_millis(),
+            (total - created).as_millis()
+        ));
+    }
     ret
 }
+
+const SLOW_CREATE: std::time::Duration = std::time::Duration::from_millis(15);
+const SLOW_CREATES_MAX: u32 = 24;
+static SLOW_CREATES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub(super) fn read_bytes(addr: usize, len: usize) -> Option<Vec<u8>> {
     if addr < 0x10000 || len == 0 {

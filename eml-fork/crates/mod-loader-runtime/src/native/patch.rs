@@ -887,7 +887,9 @@ extern "win64" fn hook_resource_delta<const N: usize>(chunk: usize, entity: usiz
     if lock_applies(kind, delta) {
         let locked = chunk != 0 && RESOURCE_LOCK.iter().any(|slot| slot.load(Ordering::Relaxed) == chunk);
         if locked && kind == super::spawner::HEALTH_SIGNATURE {
-            HEALTH_BLOCKED.fetch_add(1, Ordering::Relaxed);
+            if HEALTH_BLOCKED.fetch_add(1, Ordering::Relaxed) + 1 == HEALTH_PROOF {
+                super::spawner::log("resource lock: the hook has stopped health losses, god mode no longer needs the fast loop");
+            }
             return 0;
         }
         if !locked && kind != super::spawner::HEALTH_SIGNATURE && RESOURCE_LOGGED.fetch_add(1, Ordering::Relaxed) < 24 {

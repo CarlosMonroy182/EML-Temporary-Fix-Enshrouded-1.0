@@ -55,6 +55,7 @@ struct Entry {
 #[derive(Default)]
 struct Catalog {
     entries: Vec<Entry>,
+    loading: bool,
     error: Option<String>,
     selected: Option<usize>,
     search: String,
@@ -130,6 +131,7 @@ pub struct App {
     tab: Tab,
     creatures: Catalog,
     item_cat: Catalog,
+    loading: Option<std::sync::mpsc::Receiver<Loaded>>,
     items: items::ItemsState,
     downloader: Option<icons::Downloader>,
     powers: powers::PowersState,
@@ -394,6 +396,35 @@ fn load_item_catalog(dir: &Path) -> (Catalog, Vec<items::Item>) {
     }
 }
 
+struct Loaded {
+    creatures: Catalog,
+    item_cat: Catalog,
+    rows: Vec<items::Item>,
+    titled: bool,
+    log: String,
+}
+
+fn load_catalogs(dir: &Path) -> Loaded {
+    let wiki_index = wiki::load(dir);
+    let creatures = match load_enemies(dir) {
+        Ok(mut entries) => {
+            apply_wiki(&mut entries, &wiki_index);
+            Catalog { entries, ..Default::default() }
+        }
+        Err(e) => Catalog { error: Some(e), ..Default::default() },
+    };
+    let titles = icons::load_titles(dir);
+    let (item_cat, rows) = match items::load_items(dir) {
+        Ok(rows) => {
+            let entries = item_entries(&rows, &titles);
+            (Catalog { entries, ..Default::default() }, rows)
+        }
+        Err(e) => (Catalog { error: Some(e), ..Default::default() }, Vec::new()),
+    };
+    let log = std::fs::read_to_string(dir.join("m182_spawner.log")).unwrap_or_default();
+    Loaded { creatures, item_cat, rows, titled: !titles.is_empty(), log }
+}
+
 fn item_kind(group: &str) -> emblems::Kind {
     match group {
         "Armas" | "Armas a distancia" | "Munición" => emblems::Kind::Fang,
@@ -461,6 +492,9 @@ fn parse_places(text: &str) -> Vec<Place> {
         .collect()
 }
 
+const ICONS_PER_FRAME: usize = 6;
+static ICONS_THIS_FRAME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn load_icon(ctx: &egui::Context, dir: &Path, entry: &Entry) -> Option<TextureHandle> {
     let base = dir.join("export").join("m182_icons");
     let mut paths = Vec::new();
@@ -496,15 +530,22 @@ impl App {
         remote::open_log(&dir);
         remote::configure(remote_cfg.clone());
         let cfg = read_config(&dir);
-        let wiki_index = wiki::load(&dir);
-        let creatures = match load_enemies(&dir) {
-            Ok(mut entries) => {
-                apply_wiki(&mut entries, &wiki_index);
-                Catalog { entries, ..Default::default() }
+        let (loading, creatures, item_cat) = {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (load_dir, ctx) = (dir.clone(), cc.egui_ctx.clone());
+            let spawned = std::thread::Builder::new().name("m182-panel-load".into()).spawn(move || {
+                let _ = tx.send(load_catalogs(&load_dir));
+                ctx.request_repaint();
+            });
+            match spawned {
+                Ok(_) => (Some(rx), Catalog { loading: true, ..Default::default() }, Catalog { loading: true, ..Default::default() }),
+                Err(_) => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = tx.send(load_catalogs(&dir));
+                    (Some(rx), Catalog { loading: true, ..Default::default() }, Catalog { loading: true, ..Default::default() })
+                }
             }
-            Err(e) => Catalog { error: Some(e), ..Default::default() },
         };
-        let (item_cat, item_rows) = load_item_catalog(&dir);
         let (saved_stats, saved_balance) = items::load_saved(&dir);
         let balance_base = items::load_balance(&dir);
         let mut balance = balance_base.clone();
@@ -513,7 +554,6 @@ impl App {
         }
         let mut item_state = items::ItemsState {
             levels: items::load_levels(&dir),
-            rows: item_rows,
             balance_base,
             balance,
             sent: saved_stats.clone(),
@@ -525,9 +565,6 @@ impl App {
             direct: true,
             ..Default::default()
         };
-        if let Ok(log) = std::fs::read_to_string(dir.join("m182_spawner.log")) {
-            item_state.adopt_logged_deliveries(&log);
-        }
         if dir.join("enshrouded.exe").exists() {
             let _ = item_state.persist_local(&dir);
         }
@@ -555,6 +592,7 @@ impl App {
             tab: preview_tab,
             creatures,
             item_cat,
+            loading,
             items: item_state,
             downloader: Some(icons::Downloader::start(&dir)),
             powers: powers::PowersState::load(&dir),
@@ -851,7 +889,30 @@ impl App {
         };
     }
 
+    fn receive_catalogs(&mut self) {
+        let Some(rx) = &self.loading else { return };
+        let Ok(loaded) = rx.try_recv() else { return };
+        self.loading = None;
+        self.creatures.entries = loaded.creatures.entries;
+        self.creatures.error = loaded.creatures.error;
+        self.creatures.loading = false;
+        self.item_cat.entries = loaded.item_cat.entries;
+        self.item_cat.error = loaded.item_cat.error;
+        self.item_cat.loading = false;
+        self.items.rows = loaded.rows;
+        self.items.names_applied = loaded.titled;
+        self.items.adopt_logged_deliveries(&loaded.log);
+        self.fill_spawner_names();
+    }
+
+    /// What runs while the window is hidden: only the background work, nothing is drawn.
+    pub fn background(&mut self, ctx: &egui::Context) {
+        self.tick(ctx);
+        remote::hold(remote::active() && !self.confirmed);
+    }
+
     fn tick(&mut self, ctx: &egui::Context) {
+        self.receive_catalogs();
         self.items_pump();
         self.social_tick();
         if let Some(d) = &self.downloader {
@@ -1122,11 +1183,12 @@ impl App {
                 ui.label(RichText::new(error).color(BAD));
                 return;
             }
+            if cat.loading {
+                ui.label(RichText::new("Cargando la lista…").color(MUTED));
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut cat.search).hint_text("Buscar…").desired_width(240.0));
-                let mut groups: Vec<String> = cat.entries.iter().map(|e| e.group.clone()).collect();
-                groups.sort_unstable();
-                groups.dedup();
                 let all = if mode == Mode::Creatures { "Todas las facciones" } else { "Todas las categorías" };
                 let salt = match mode {
                     Mode::Creatures => 0,
@@ -1134,6 +1196,9 @@ impl App {
                 };
                 let current = if cat.group.is_empty() { all.to_string() } else { group_label(mode, &cat.group) };
                 egui::ComboBox::from_id_salt(("group", salt)).selected_text(current).show_ui(ui, |ui| {
+                    let mut groups: Vec<String> = cat.entries.iter().map(|e| e.group.clone()).collect();
+                    groups.sort_unstable();
+                    groups.dedup();
                     ui.selectable_value(&mut cat.group, String::new(), all);
                     for g in groups {
                         let text = group_label(mode, &g);
@@ -1185,7 +1250,9 @@ impl App {
         if !ui.is_rect_visible(rect) {
             return response.clicked();
         }
-        if !icons.contains_key(&e.guid) {
+        if !icons.contains_key(&e.guid) && ICONS_THIS_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= ICONS_PER_FRAME {
+            ui.ctx().request_repaint();
+        } else if !icons.contains_key(&e.guid) {
             let loaded = load_icon(ui.ctx(), dir, e);
             if loaded.is_none() {
                 if let Some(d) = downloader {
@@ -1509,6 +1576,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ICONS_THIS_FRAME.store(0, std::sync::atomic::Ordering::Relaxed);
         self.tick(ctx);
         remote::hold(remote::active() && !self.confirmed);
 
@@ -1592,6 +1660,7 @@ mod tests {
             tab: Tab::Creatures,
             creatures: Catalog { entries, selected: Some(0), ..Default::default() },
             item_cat: Catalog::default(),
+            loading: None,
             items: Default::default(),
             downloader: None,
             powers: Default::default(),
@@ -1671,6 +1740,32 @@ mod tests {
         let by = |raw: &str| entries.iter().find(|e| e.raw == raw).unwrap().label.clone();
         assert_eq!(by("Armor_T2_Warrior_Helmet_Loot"), "Warrior Helmet");
         assert_eq!(by("Mystery_Thing_Zz"), "Mystery Thing Zz");
+    }
+
+    #[test]
+    fn lists_arrive_from_the_loader_thread_without_blocking_the_window() {
+        let dir = temp_dir("loader");
+        std::fs::write(
+            dir.join("export").join("m182_items.csv"),
+            "item_id,guid,debug_name,name,category,rarity,max_stack,slot,level_min,level_max,give_guid,pickup_guid,pickup_name,give_level,speed_mod,dmg_mod,cut\n1,aaaaaaaa-0000-0000-0000-000000000001,Armor_T2_Warrior_Helmet_Loot,Armor_T2_Warrior_Helmet_Loot,Equipment,Rare,1,Armour_Head,10,10,,,,10,1,1,0\n",
+        )
+        .unwrap();
+        let loaded = load_catalogs(&dir);
+        assert_eq!(loaded.rows.len(), 1);
+        assert!(loaded.creatures.error.is_some());
+        let mut app = app_in(&dir, Vec::new());
+        app.creatures.loading = true;
+        app.item_cat.loading = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.loading = Some(rx);
+        app.receive_catalogs();
+        assert!(app.loading.is_some() && app.creatures.loading, "nothing arrived yet, nothing changes");
+        tx.send(loaded).unwrap();
+        app.receive_catalogs();
+        assert!(app.loading.is_none() && !app.creatures.loading && !app.item_cat.loading);
+        assert_eq!(app.items.rows.len(), 1);
+        assert_eq!(app.item_cat.entries.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

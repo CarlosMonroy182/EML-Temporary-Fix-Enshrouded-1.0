@@ -108,8 +108,11 @@ pub fn log(message: &str) {
         }
     }
     if let Some(f) = guard.as_mut() {
-        let _ = writeln!(f, "[{ms}ms] {message}");
-        let _ = f.flush();
+        let mut line = String::with_capacity(message.len() + 16);
+        line.push_str(&format!("[{ms}ms] "));
+        line.push_str(message);
+        line.push('\n');
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
@@ -5071,6 +5074,7 @@ struct PauseInputs {
     only_shield: bool,
     shield_idle: bool,
     stamina: bool,
+    zones: bool,
     hosting: bool,
     health_hook: bool,
 }
@@ -5082,7 +5086,7 @@ fn power_pause(i: &PauseInputs) -> u64 {
     if i.fly {
         1
     } else if i.clients_busy {
-        if i.health_hook { 8 } else { 1 }
+        if i.health_hook { 8 } else { 4 }
     } else if i.urgent && i.only_shield && i.shield_idle {
         50
     } else if i.urgent {
@@ -5092,7 +5096,7 @@ fn power_pause(i: &PauseInputs) -> u64 {
             (false, true) => 50,
             (false, false) => 16,
         }
-    } else if i.stamina {
+    } else if i.stamina || i.zones {
         16
     } else {
         25
@@ -5115,7 +5119,6 @@ fn powers_loop() {
             || st.heal_once
             || !st.saved.is_empty()
             || !st.zone_ids.is_empty()
-            || !st.groups.zones.is_empty()
             || st.protect_until.map(|t| Instant::now() < t).unwrap_or(false);
         let only_shield = !st.powers.fly
             && !st.heal_once
@@ -5130,6 +5133,7 @@ fn powers_loop() {
             only_shield,
             shield_idle: shield_idle(),
             stamina: st.powers.stamina || client_stamina_on(&st),
+            zones: !st.groups.zones.is_empty(),
             hosting: SERVER_MGR.load(Ordering::SeqCst) != 0,
             health_hook: super::patch::health_hook_proven(),
         });
@@ -5148,13 +5152,20 @@ mod pause_tests {
     use super::*;
 
     fn base() -> PauseInputs {
-        PauseInputs { fly: false, clients_busy: false, urgent: false, only_shield: true, shield_idle: false, stamina: false, hosting: false, health_hook: false }
+        PauseInputs { fly: false, clients_busy: false, urgent: false, only_shield: true, shield_idle: false, stamina: false, zones: false, hosting: false, health_hook: false }
     }
 
     #[test]
     fn nothing_on_sleeps_long() {
         assert_eq!(power_pause(&base()), 25);
         assert_eq!(power_pause(&PauseInputs { stamina: true, ..base() }), 16);
+    }
+
+    #[test]
+    fn defined_zones_alone_never_speed_the_loop_up() {
+        assert_eq!(power_pause(&PauseInputs { zones: true, only_shield: false, hosting: true, ..base() }), 16);
+        assert_eq!(power_pause(&PauseInputs { zones: true, only_shield: false, hosting: true, stamina: true, ..base() }), 16);
+        assert!(power_pause(&PauseInputs { zones: true, urgent: true, only_shield: false, hosting: true, ..base() }) <= 8);
     }
 
     #[test]
@@ -5172,7 +5183,7 @@ mod pause_tests {
     fn the_host_keeps_the_old_pace_until_the_hook_proves_itself() {
         assert_eq!(power_pause(&PauseInputs { urgent: true, hosting: true, ..base() }), 4);
         assert_eq!(power_pause(&PauseInputs { urgent: true, hosting: true, health_hook: true, ..base() }), 8);
-        assert_eq!(power_pause(&PauseInputs { clients_busy: true, hosting: true, ..base() }), 1);
+        assert_eq!(power_pause(&PauseInputs { clients_busy: true, hosting: true, ..base() }), 4);
         assert_eq!(power_pause(&PauseInputs { clients_busy: true, hosting: true, health_hook: true, ..base() }), 8);
     }
 

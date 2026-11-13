@@ -1,4 +1,5 @@
 EN = {
+"Cargando la lista…": "Loading the list…",
 "raid de plantilla, una vez": "template raid, one time",
 "Esa plantilla no tiene enemigos.": "That template has no enemies.",
 "Plantilla {}": "Template {}",
