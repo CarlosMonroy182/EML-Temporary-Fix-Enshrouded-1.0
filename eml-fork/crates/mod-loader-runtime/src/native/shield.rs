@@ -1,13 +1,14 @@
 //! Reinforced objects: inside a zone whose `shield` flag is on, what players built with the hammer takes
-//! 40 times more to break. A hit takes `Destructible.maxHealth` points off an object that has no `Health`
+//! 40 times more to break, and wooden objects 120 times more. A hit takes `Destructible.maxHealth` points off an object that has no `Health`
 //! yet and creates the `Health` it keeps afterwards, so damage adds up. The object's own numbers are
 //! multiplied once (`Destructible.maxHealth`, and `Health` maximum and current where there is one) and
-//! divided again when the zone stops reinforcing. A reinforced number always has the form `n * 40 + 39`
-//! (or one of a few fixed codes for numbers too large for 16 bits), which no original number has, so it is
-//! never applied twice and always undone exactly. Work happens only when the game creates an entity or the
+//! divided again when the zone stops reinforcing. A reinforced number has the form `n * 40 + 39` (other
+//! objects) or `n * 120 + 117` (wood), or is one of a few fixed codes for numbers too large for 16 bits;
+//! no original number has any of those forms and the two forms exclude each other, so a number is never
+//! changed twice and is always undone exactly. Work happens only when the game creates an entity or the
 //! zones change: no timers, no hook on damage.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -30,9 +31,14 @@ const USED_ITEM_SIZE: usize = 4;
 const TYPE_MAPS: [usize; 2] = [0x88, 0x30];
 const FACTOR: u32 = 40;
 const MARK: u32 = FACTOR - 1;
+const WOOD_FACTOR: u32 = 120;
+const WOOD_MARK: u32 = WOOD_FACTOR - 3;
 const SMALL_MAX: u16 = ((u16::MAX as u32 - MARK) / FACTOR) as u16;
+const WOOD_SMALL_MAX: u16 = ((u16::MAX as u32 - WOOD_MARK) / WOOD_FACTOR) as u16;
 /// Originals too large to be multiplied inside 16 bits, and the fixed codes they are stored as.
-const LARGE: [(u16, u16); 3] = [(2000, 65518), (4000, 65478), (10000, 65438)];
+const LARGE: [(u16, u16); 4] = [(1000, 65398), (2000, 65518), (4000, 65478), (10000, 65438)];
+const SKIP_PREFIXES: [&str; 7] = ["NPC_", "Animal_", "Tool_", "Consumable_", "Blueprint_", "BuildTool_", "Building_"];
+const WOOD_WORDS: [&str; 7] = ["wood", "wooden", "timber", "plank", "log", "bamboo", "palisade"];
 const HEALTH_SIZE: usize = 40;
 const HEALTH_CURRENT_AT: usize = 8;
 const HEALTH_MAX_AT: usize = 36;
@@ -112,7 +118,16 @@ pub enum Outcome {
     Unusual(u32),
     Reinforced { zone: String, item: u32, edit: Edit },
     Released { zone: String, item: u32, edit: Edit },
-    Failed,
+    Failed(String),
+}
+
+/// How a built item is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Normal,
+    Wood,
+    /// Creatures, tools and the like that the hammer menu also lists: never reinforced.
+    Skip,
 }
 
 /// What was written into one object.
@@ -171,7 +186,7 @@ static LOADED: AtomicBool = AtomicBool::new(false);
 static SWEEP_WANTED: AtomicBool = AtomicBool::new(false);
 static HAS_WORK: AtomicBool = AtomicBool::new(false);
 static AREAS: Mutex<Areas> = Mutex::new(Areas { shielded: Vec::new(), released: Vec::new() });
-static ITEMS: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+static ITEMS: Mutex<Option<HashMap<u32, Class>>> = Mutex::new(None);
 static CATALOG: Mutex<Option<HashSet<[u8; 16]>>> = Mutex::new(None);
 static SLOTS: Mutex<Option<(usize, usize, Option<Slots>)>> = Mutex::new(None);
 static WORK: Mutex<Work> = Mutex::new(Work { waiting: VecDeque::new(), sweep: None });
@@ -195,9 +210,9 @@ static SAY_SHIELDED: Budget = Budget::new(12);
 static SAY_ALREADY: Budget = Budget::new(3);
 static SAY_RELEASED: Budget = Budget::new(6);
 static SAY_HEALTH: Budget = Budget::new(6);
-static SAY_NO_DESTRUCTIBLE: Budget = Budget::new(6);
+static SAY_NO_DESTRUCTIBLE: Budget = Budget::new(3);
 static SAY_OTHER_ITEM: Budget = Budget::new(4);
-static SAY_NO_POSITION: Budget = Budget::new(4);
+static SAY_NO_POSITION: Budget = Budget::new(2);
 static SAY_UNUSUAL: Budget = Budget::new(4);
 static SAY_FAILED: Budget = Budget::new(6);
 static SAY_LIMITED: Budget = Budget::new(3);
@@ -247,12 +262,13 @@ pub fn decide(areas: &Areas, x: f64, z: f64) -> Decision {
 }
 
 /// The break threshold of a reinforced object, or `None` when the value cannot be reinforced.
-pub fn reinforced_value(value: u16) -> Option<u16> {
+pub fn reinforced_value(value: u16, wood: bool) -> Option<u16> {
     if value == 0 || is_reinforced(value) {
         return None;
     }
-    if value <= SMALL_MAX {
-        return Some((value as u32 * FACTOR + MARK) as u16);
+    let (factor, mark, small) = if wood { (WOOD_FACTOR, WOOD_MARK, WOOD_SMALL_MAX) } else { (FACTOR, MARK, SMALL_MAX) };
+    if value <= small {
+        return Some((value as u32 * factor + mark) as u16);
     }
     LARGE.iter().find(|(original, _)| *original == value).map(|(_, code)| *code)
 }
@@ -266,15 +282,20 @@ pub fn original_value(value: u16) -> Option<u16> {
     if let Some((original, _)) = LARGE.iter().find(|(_, code)| *code == value) {
         return Some(*original);
     }
-    (value as u32 % FACTOR == MARK && value as u32 > MARK).then(|| ((value as u32 - MARK) / FACTOR) as u16)
+    let v = value as u32;
+    if v % FACTOR == MARK && v > MARK {
+        return Some(((v - MARK) / FACTOR) as u16);
+    }
+    (v % WOOD_FACTOR == WOOD_MARK && v > WOOD_MARK).then(|| ((v - WOOD_MARK) / WOOD_FACTOR) as u16)
 }
 
 /// Health maximum and current after the object was reinforced. A full object stays full.
-pub fn reinforced_health(current: u32, max: u32) -> Option<(u32, u32)> {
+pub fn reinforced_health(current: u32, max: u32, wood: bool) -> Option<(u32, u32)> {
     if max == 0 || max > HEALTH_MAX_LIMIT || is_reinforced_max(max) {
         return None;
     }
-    let to = max * FACTOR + MARK;
+    let (factor, mark) = if wood { (WOOD_FACTOR, WOOD_MARK) } else { (FACTOR, MARK) };
+    let to = u32::try_from(max as u64 * factor as u64 + mark as u64).ok()?;
     Some((scaled(current, max, to), to))
 }
 
@@ -286,7 +307,10 @@ fn original_max(max: u32) -> Option<u32> {
     if max <= u16::MAX as u32 {
         return original_value(max as u16).map(u32::from);
     }
-    (max % FACTOR == MARK).then(|| (max - MARK) / FACTOR)
+    if max % FACTOR == MARK {
+        return Some((max - MARK) / FACTOR);
+    }
+    (max % WOOD_FACTOR == WOOD_MARK).then(|| (max - WOOD_MARK) / WOOD_FACTOR)
 }
 
 /// Health maximum and current as they were before the object was reinforced.
@@ -305,13 +329,36 @@ fn scaled(current: u32, from_max: u32, to_max: u32) -> u32 {
     ((current as u64 * to_max as u64 * 2 + from_max as u64) / (from_max as u64 * 2)).clamp(1, to_max as u64) as u32
 }
 
-/// Item numbers of everything that is placed with the build hammer.
-pub fn parse_build_items(text: &str) -> HashSet<u32> {
+fn words(name: &str) -> Vec<String> {
+    let mut spaced = String::new();
+    let mut last_lower = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() && last_lower {
+            spaced.push('_');
+        }
+        last_lower = c.is_ascii_lowercase();
+        spaced.push(c);
+    }
+    spaced.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.trim_end_matches(|c: char| c.is_ascii_digit()).to_ascii_lowercase()).collect()
+}
+
+/// How a hammer item is treated, by its name.
+pub fn classify(name: &str) -> Class {
+    if SKIP_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return Class::Skip;
+    }
+    let wooden = words(name).iter().any(|w| WOOD_WORDS.contains(&w.as_str()) || (w.len() > 4 && w.ends_with("wood")));
+    if wooden { Class::Wood } else { Class::Normal }
+}
+
+/// Item numbers of everything that is placed with the build hammer, with how each is treated.
+pub fn parse_build_items(text: &str) -> HashMap<u32, Class> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
     let id_at = header.iter().position(|h| h.trim() == "item_id").unwrap_or(0);
     let slot_at = header.iter().position(|h| h.trim() == "slot").unwrap_or(7);
-    let mut out = HashSet::new();
+    let name_at = header.iter().position(|h| h.trim() == "debug_name").unwrap_or(2);
+    let mut out = HashMap::new();
     for line in lines {
         let cells: Vec<&str> = line.split(',').collect();
         if cells.get(slot_at).map(|s| s.trim()) != Some("BuildTool") {
@@ -319,7 +366,7 @@ pub fn parse_build_items(text: &str) -> HashSet<u32> {
         }
         if let Some(id) = cells.get(id_at).and_then(|c| c.trim().parse::<u32>().ok()) {
             if id != 0 {
-                out.insert(id);
+                out.insert(id, classify(cells.get(name_at).map(|n| n.trim()).unwrap_or("")));
             }
         }
     }
@@ -443,8 +490,8 @@ fn slots(manager: usize) -> Option<Slots> {
     found
 }
 
-fn is_build_item(item: u32) -> bool {
-    ITEMS.lock().ok().is_some_and(|i| i.as_ref().is_some_and(|set| set.contains(&item)))
+fn item_class(item: u32) -> Option<Class> {
+    ITEMS.lock().ok().and_then(|i| i.as_ref().and_then(|map| map.get(&item).copied()))
 }
 
 /// False only when the object list says the template cannot be broken.
@@ -473,12 +520,10 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
     let Some(p) = spawner::find_record(manager, id).and_then(spawner::placement) else { return Outcome::Gone };
     let Some((item_at, item_size)) = spawner::component_address(&p, slots.used_item) else { return Outcome::NotBuilt };
     if item_size != USED_ITEM_SIZE {
-        return Outcome::Failed;
+        return Outcome::Failed(format!("the used-item component is {item_size} bytes, expected {USED_ITEM_SIZE}"));
     }
     let Some(item) = read_bytes(item_at, 4).map(|b| u32_at(&b, 0)) else { return Outcome::Gone };
-    if !is_build_item(item) {
-        return Outcome::OtherItem(item);
-    }
+    let Some(class) = item_class(item) else { return Outcome::OtherItem(item) };
     let at = spawner::component_address(&p, slots.transform)
         .filter(|(_, size)| *size == TRANSFORM_SIZE)
         .and_then(|(addr, _)| read_bytes(addr, 24))
@@ -487,12 +532,13 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
     let decision = decide(areas, x, z);
     let (zone, release) = match decision {
         Decision::Leave => return Outcome::Outside,
-        Decision::Shield(zone) => (zone, false),
+        Decision::Shield(zone) => (zone, class == Class::Skip),
         Decision::Release(zone) => (zone, true),
     };
+    let wood = class == Class::Wood;
     let threshold = spawner::component_address(&p, slots.destructible);
-    if threshold.is_some_and(|(_, size)| size != DESTRUCTIBLE_SIZE) {
-        return Outcome::Failed;
+    if let Some((_, size)) = threshold.filter(|(_, size)| *size != DESTRUCTIBLE_SIZE) {
+        return Outcome::Failed(format!("item {item}: the break-threshold component is {size} bytes, expected {DESTRUCTIBLE_SIZE}"));
     }
     let health = health_of(&p, slots);
     if threshold.is_none() && health.is_none() {
@@ -503,11 +549,11 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
     let mut unusual = None;
     if let Some((addr, _)) = threshold {
         let Some(from) = read_bytes(addr, 2).filter(|b| b.len() == 2).map(|b| u16::from_le_bytes([b[0], b[1]])) else { return Outcome::Gone };
-        let to = if release { original_value(from) } else { reinforced_value(from) };
+        let to = if release { original_value(from) } else { reinforced_value(from, wood) };
         match to {
             Some(to) => {
                 if !spawner::write_bytes(addr, &to.to_le_bytes()) {
-                    return Outcome::Failed;
+                    return Outcome::Failed(format!("item {item}: the write of the break threshold at {addr:#x} was refused"));
                 }
                 edit.threshold = Some((from, to));
             }
@@ -518,7 +564,7 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
     }
     if let Some((addr, bytes)) = health {
         let (current, max) = (u32_at(&bytes, HEALTH_CURRENT_AT), u32_at(&bytes, HEALTH_MAX_AT));
-        let to = if release { released_health(current, max) } else { reinforced_health(current, max) };
+        let to = if release { released_health(current, max) } else { reinforced_health(current, max, wood) };
         match to {
             Some((now, top)) => {
                 let mut span = [0u8; HEALTH_SIZE - HEALTH_CURRENT_AT];
@@ -526,7 +572,7 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
                 span[0..4].copy_from_slice(&now.to_le_bytes());
                 span[HEALTH_MAX_AT - HEALTH_CURRENT_AT..].copy_from_slice(&top.to_le_bytes());
                 if !spawner::write_bytes(addr + HEALTH_CURRENT_AT, &span) {
-                    return Outcome::Failed;
+                    return Outcome::Failed(format!("item {item}: the write of the health at {addr:#x} was refused"));
                 }
                 edit.health_max = Some((max, top));
                 edit.health_current = Some((current, now));
@@ -546,7 +592,7 @@ pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome 
     }
 }
 
-fn report(manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>) {
+fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>) {
     if let Some(t) = tally {
         t.checked += 1;
         match outcome {
@@ -569,8 +615,8 @@ fn report(manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>)
             if edit.health_max.is_some() && SAY_HEALTH.take() {
                 log(&format!("object shield: entity {id} (item {item}) also has health of its own; its maximum and current health were multiplied too"));
             }
-            if edit.threshold.is_some_and(|(from, to)| from > SMALL_MAX && to != from) && SAY_LIMITED.take() {
-                log(&format!("object shield: entity {id} has a break threshold of {}; 40 times that does not fit in 16 bits, so it got the largest value that still can be undone exactly", edit.threshold.map_or(0, |t| t.0)));
+            if edit.threshold.is_some_and(|(from, to)| from > WOOD_SMALL_MAX && LARGE.iter().any(|(o, c)| *o == from && *c == to)) && SAY_LIMITED.take() {
+                log(&format!("object shield: entity {id} has a break threshold of {}; the full multiple does not fit in 16 bits, so it got the fixed value {} that can be undone exactly", edit.threshold.map_or(0, |t| t.0), edit.threshold.map_or(0, |t| t.1)));
             }
         }
         Outcome::Already => {
@@ -585,8 +631,7 @@ fn report(manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>)
         }
         Outcome::NoDestructible(item) => {
             if SAY_NO_DESTRUCTIBLE.take() {
-                let made = spawner::component_summary(manager, id).unwrap_or_else(|| "not readable".into());
-                log(&format!("object shield: entity {id} (item {item}) is built inside a reinforced or released place and has nothing that hits can break; it has {made}"));
+                log(&format!("object shield: entity {id} (item {item}) has nothing that hits can break"));
             }
         }
         Outcome::OtherItem(item) => {
@@ -596,7 +641,7 @@ fn report(manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>)
         }
         Outcome::NoPosition(item) => {
             if SAY_NO_POSITION.take() {
-                log(&format!("object shield: entity {id} (item {item}) is built but has no readable position; left as it is"));
+                log(&format!("object shield: entity {id} (item {item}) has no position of its own (a tool or item lying around); left as it is"));
             }
         }
         Outcome::Unusual(value) => {
@@ -604,7 +649,7 @@ fn report(manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>)
                 log(&format!("object shield: entity {id} has a break threshold or health maximum of {value} that cannot be multiplied exactly; left as it is"));
             }
         }
-        Outcome::Failed => fail(&format!("entity {id} could not be switched (unexpected component size or write refused)")),
+        Outcome::Failed(why) => fail(&format!("entity {id} could not be switched: {why}")),
         Outcome::Gone | Outcome::NotBuilt | Outcome::Outside => {}
     }
 }
@@ -673,8 +718,8 @@ fn wait_for(id: u32) {
     HAS_WORK.store(true, Ordering::SeqCst);
 }
 
-fn read_table<T>(dir: &std::path::Path, file: &str, parse: fn(&str) -> HashSet<T>) -> Option<HashSet<T>> {
-    std::fs::read_to_string(dir.join("export").join(file)).ok().map(|t| parse(&t)).filter(|s| !s.is_empty())
+fn read_table<C>(dir: &std::path::Path, file: &str, parse: fn(&str) -> C, empty: fn(&C) -> bool) -> Option<C> {
+    std::fs::read_to_string(dir.join("export").join(file)).ok().map(|t| parse(&t)).filter(|c| !empty(c))
 }
 
 fn save(dir: &std::path::Path, areas: &Areas) {
@@ -718,9 +763,10 @@ pub fn set_zones(dir: &std::path::Path, zones: &[Zone]) {
     }
     if active {
         if ITEMS.lock().is_ok_and(|i| i.is_none()) {
-            match read_table(dir, ITEMS_FILE, parse_build_items) {
+            match read_table(dir, ITEMS_FILE, parse_build_items, |m| m.is_empty()) {
                 Some(set) => {
-                    log(&format!("object shield: {} items are placed with the hammer", set.len()));
+                    let count = |class: Class| set.values().filter(|c| **c == class).count();
+                    log(&format!("object shield: {} items are placed with the hammer: {} wooden (x{WOOD_FACTOR}), {} other (x{FACTOR}), {} never reinforced (creatures, tools)", set.len(), count(Class::Wood), count(Class::Normal), count(Class::Skip)));
                     ITEMS_MISSING.store(false, Ordering::SeqCst);
                     if let Ok(mut items) = ITEMS.lock() {
                         *items = Some(set);
@@ -734,7 +780,7 @@ pub fn set_zones(dir: &std::path::Path, zones: &[Zone]) {
             }
         }
         if CATALOG.lock().is_ok_and(|c| c.is_none()) {
-            if let Some(set) = read_table(dir, CATALOG_FILE, parse_catalog) {
+            if let Some(set) = read_table(dir, CATALOG_FILE, parse_catalog, |s| s.is_empty()) {
                 if let Ok(mut catalog) = CATALOG.lock() {
                     *catalog = Some(set);
                 }
@@ -775,7 +821,7 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     }
     let entries = if count == 0 { Vec::new() } else { read_bytes(array, count * ENTRY).filter(|e| e.len() == count * ENTRY)? };
     let carried = entry(&entries, HASH_USED_ITEM, USED_ITEM_SIZE).and_then(|at| read_bytes(at, 4)).map(|b| u32_at(&b, 0));
-    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| is_build_item(*i)), breakable: may_break(&head[4..20]), desc, original: [0; 16], entries: Vec::new() };
+    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable: may_break(&head[4..20]), desc, original: [0; 16], entries: Vec::new() };
     let Some(item) = seen.built else { return Some(seen) };
 
     let at = entry(&entries, HASH_CURRENT_TRANSFORM, 24).and_then(|at| read_bytes(at, 24)).and_then(|b| meters(&b));
@@ -890,57 +936,112 @@ mod tests {
     #[test]
     fn the_break_threshold_is_multiplied_once_and_comes_back_exactly() {
         for value in [1u16, 5, 10, 25, 40, 150, 200, 1000, SMALL_MAX] {
-            let up = reinforced_value(value).unwrap();
+            let up = reinforced_value(value, false).unwrap();
             assert_eq!(up as u32, value as u32 * 40 + 39);
             assert!(is_reinforced(up));
-            assert_eq!(reinforced_value(up), None);
+            assert_eq!(reinforced_value(up, false), None);
+            assert_eq!(reinforced_value(up, true), None);
             assert_eq!(original_value(up), Some(value));
             assert!(!is_reinforced(value), "{value} must not look reinforced");
         }
+        for value in [1u16, 2, 5, 10, 25, 100, 250, 500, WOOD_SMALL_MAX] {
+            let up = reinforced_value(value, true).unwrap();
+            assert_eq!(up as u32, value as u32 * 120 + 117);
+            assert_eq!(reinforced_value(up, true), None);
+            assert_eq!(reinforced_value(up, false), None);
+            assert_eq!(original_value(up), Some(value));
+        }
         for (original, code) in LARGE {
-            assert_eq!(reinforced_value(original), Some(code));
+            assert_eq!(reinforced_value(original, true), Some(code));
             assert_eq!(original_value(code), Some(original));
             assert!(!is_reinforced(original));
+            assert_eq!(reinforced_value(code, true), None);
         }
-        assert_eq!(reinforced_value(0), None);
-        assert_eq!(reinforced_value(SMALL_MAX + 1), None);
-        assert_eq!(reinforced_value(3000), None);
+        assert_eq!(reinforced_value(0, false), None);
+        assert_eq!(reinforced_value(SMALL_MAX + 1, false), None);
+        assert_eq!(reinforced_value(3000, true), None);
         assert_eq!(original_value(10), None);
         assert_eq!(original_value(39), None);
+        assert_eq!(original_value(117), None);
     }
 
     #[test]
-    fn the_game_templates_never_look_reinforced_and_always_fit() {
+    fn the_two_forms_never_look_alike_and_no_game_value_looks_reinforced() {
+        for v in 0..=u16::MAX {
+            let normal = v as u32 % 40 == 39;
+            let wood = v as u32 % 120 == 117;
+            assert!(!(normal && wood), "{v}");
+        }
         for value in [1u16, 2, 4, 5, 6, 7, 10, 12, 15, 16, 20, 25, 30, 40, 50, 60, 70, 75, 100, 150, 160, 200, 250, 300, 450, 500, 1000, 2000, 4000, 10000] {
             assert!(!is_reinforced(value), "{value}");
-            assert!(reinforced_value(value).is_some(), "{value}");
+            assert!(reinforced_value(value, false).is_some(), "{value}");
+        }
+        for value in [1u16, 2, 5, 10, 12, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 300, 500, 1000] {
+            assert!(reinforced_value(value, true).is_some(), "{value}");
         }
     }
 
     #[test]
     fn health_is_multiplied_with_the_same_marker_and_restored() {
-        assert_eq!(reinforced_health(100, 100), Some((4039, 4039)));
-        assert_eq!(reinforced_health(50, 100), Some((2020, 4039)));
+        assert_eq!(reinforced_health(100, 100, false), Some((4039, 4039)));
+        assert_eq!(reinforced_health(50, 100, false), Some((2020, 4039)));
         assert_eq!(released_health(4039, 4039), Some((100, 100)));
         assert_eq!(released_health(2020, 4039), Some((50, 100)));
-        assert_eq!(reinforced_health(0, 100), Some((0, 4039)));
-        assert_eq!(reinforced_health(1, 100), Some((40, 4039)));
-        assert_eq!(reinforced_health(4039, 4039), None);
-        assert_eq!(reinforced_health(5, 0), None);
+        assert_eq!(reinforced_health(100, 100, true), Some((12117, 12117)));
+        assert_eq!(released_health(12117, 12117), Some((100, 100)));
+        assert_eq!(reinforced_health(0, 100, false), Some((0, 4039)));
+        assert_eq!(reinforced_health(1, 100, false), Some((40, 4039)));
+        assert_eq!(reinforced_health(4039, 4039, false), None);
+        assert_eq!(reinforced_health(12117, 12117, true), None);
+        assert_eq!(reinforced_health(5, 0, false), None);
         assert_eq!(released_health(100, 100), None);
         assert_eq!(released_health(65518 - 7, 65518), Some((2000, 2000)));
         assert_eq!(released_health(160_039, 160_039), Some((4000, 4000)));
-        assert_eq!(reinforced_health(100_000, 100_000), Some((4_000_039, 4_000_039)));
-        assert_eq!(reinforced_health(1, HEALTH_MAX_LIMIT + 1), None);
+        assert_eq!(reinforced_health(100_000, 100_000, false), Some((4_000_039, 4_000_039)));
+        assert_eq!(reinforced_health(100_000, 100_000, true), Some((12_000_117, 12_000_117)));
+        assert_eq!(released_health(12_000_117, 12_000_117), Some((100_000, 100_000)));
+        assert_eq!(reinforced_health(50672, 50672, false), Some((2_026_919, 2_026_919)));
+        assert_eq!(reinforced_health(1, HEALTH_MAX_LIMIT + 1, false), None);
+        assert_eq!(reinforced_health(HEALTH_MAX_LIMIT, HEALTH_MAX_LIMIT, true), None);
+        let top = reinforced_health(30_000_000, 30_000_000, true).unwrap();
+        assert_eq!(top.1 as u64, 30_000_000u64 * 120 + 117);
+        assert_eq!(released_health(top.0, top.1), Some((30_000_000, 30_000_000)));
+        let top = reinforced_health(HEALTH_MAX_LIMIT, HEALTH_MAX_LIMIT, false).unwrap();
+        assert_eq!(top.1 as u64, HEALTH_MAX_LIMIT as u64 * 40 + 39);
     }
 
     #[test]
-    fn damage_adds_up_so_a_reinforced_object_takes_forty_times_more_hits() {
+    fn damage_adds_up_so_a_reinforced_object_takes_many_more_hits() {
         let hits = |start: u32| (start + 6) / 7;
         assert_eq!(hits(25), 4);
-        assert_eq!(hits(reinforced_value(25).unwrap() as u32), 149);
-        assert_eq!(hits(200), 29);
-        assert!(hits(reinforced_value(200).unwrap() as u32) >= 40 * hits(200) - 40);
+        assert_eq!(hits(reinforced_value(25, false).unwrap() as u32), 149);
+        assert_eq!(hits(reinforced_value(25, true).unwrap() as u32), 446);
+        assert!(hits(reinforced_value(200, false).unwrap() as u32) >= 40 * hits(200) - 40);
+    }
+
+    #[test]
+    fn items_are_sorted_into_wood_other_and_never_reinforced() {
+        for name in [
+            "Prop_Decoration_T1_Door_Carved_Wooden_Double",
+            "Prop_Decoration_T6_Fence_Bamboo_01",
+            "Prop_Decoration_T0_Fence_Palisade_08",
+            "Prop_Decoration_T5_Fence_PineWood_Gate_01",
+            "Prop_Decoration_T4_Shelf_Palmwood",
+            "Prop_Decoration_T2_Barrel_Wooden03",
+            "Base_Door_Secret_Wood01",
+            "Prop_Decoration_T2_Fence_Plank_High_02",
+            "Prop_Decoration_T3_Fence_HardWood_Corner_01",
+            "Prop_Decoration_T0_Fence_Crude_Wooden1",
+            "Prop_Storage_32_T2_Chest_Wood",
+        ] {
+            assert_eq!(classify(name), Class::Wood, "{name}");
+        }
+        for name in ["Prop_Logic_Lever", "Prop_Decoration_T7_AncientTemple_Shelf_Large01", "Prop_Decoration_Comfort3_T2_Table_Large", "Prop_Decoration_T2_StoneTotem_01B", "Prop_Production_T3_Oven", "Prop_Decoration_T5_Barrel_Steel", "Home_Base_FlameAltar"] {
+            assert_eq!(classify(name), Class::Normal, "{name}");
+        }
+        for name in ["Animal_Farming_Capybara", "NPC_Townsfolk_Male_Villager_03", "Tool_T0_Pickaxe_Stone_Grassland", "Blueprint_Voxel_Stone", "Consumable_Toy_Ball"] {
+            assert_eq!(classify(name), Class::Skip, "{name}");
+        }
     }
 
     #[test]
@@ -951,9 +1052,11 @@ mod tests {
             1003,c,Block,Block,Blueprints,Common,1,BuildTool,0\n\
             0,d,Broken,Broken,BuildTools,Common,1,BuildTool,0\n\
             x,e,Bad,Bad,BuildTools,Common,1,BuildTool,0\n";
-        assert_eq!(parse_build_items(text), HashSet::from([1001, 1003]));
+        assert_eq!(parse_build_items(text), HashMap::from([(1001, Class::Normal), (1003, Class::Normal)]));
+        let wooden = "item_id,guid,debug_name,slot\n5,a,Prop_Decoration_T0_Door_Wooden,BuildTool\n6,b,Animal_Pet_Cat,BuildTool\n";
+        assert_eq!(parse_build_items(wooden), HashMap::from([(5, Class::Wood), (6, Class::Skip)]));
         let moved = "slot,item_id\nBuildTool,7\nHead,8\n";
-        assert_eq!(parse_build_items(moved), HashSet::from([7]));
+        assert_eq!(parse_build_items(moved), HashMap::from([(7, Class::Normal)]));
         assert!(parse_build_items("").is_empty());
     }
 
@@ -1127,6 +1230,9 @@ mod tests {
 
     const TORCH: u32 = 1001;
     const SWORD: u32 = 2002;
+    const DOOR: u32 = 1002;
+    const LADDER: u32 = 1004;
+    const PET: u32 = 1003;
 
     fn slots_for_tests() -> Slots {
         Slots { transform: T, destructible: D, used_item: U, health: Some(H) }
@@ -1149,7 +1255,7 @@ mod tests {
 
     #[test]
     fn the_whole_switch_against_a_stand_in_for_the_game() {
-        *ITEMS.lock().unwrap() = Some(HashSet::from([TORCH]));
+        *ITEMS.lock().unwrap() = Some(HashMap::from([(TORCH, Class::Normal), (DOOR, Class::Wood), (LADDER, Class::Wood), (PET, Class::Skip)]));
         *CATALOG.lock().unwrap() = None;
         *SLOTS.lock().unwrap() = None;
         let town = Areas { shielded: vec![area("Town", 100.0, 100.0, 30.0)], released: Vec::new() };
@@ -1194,6 +1300,23 @@ mod tests {
         assert_eq!(settle(w.at(), 19, &slots, &town), reinforced("Town", Some((200, 8039)), Some(((50, 2010), (200, 8039)))));
         assert_eq!(settle(w.at(), 21, &slots, &town), reinforced("Town", Some((10000, 65438)), None));
         assert_eq!((threshold(far), threshold(world_prop), threshold(impact), threshold(odd)), (10, 10, 10, 3000));
+
+        let door = w.entity(22, Some((100.0, 99.0)), Some(DOOR), Some(100), Some((100, 100)));
+        let ladder = w.entity(23, Some((100.0, 98.0)), Some(LADDER), Some(1000), None);
+        let pet = w.entity(24, Some((100.0, 97.0)), Some(PET), None, Some((22279, 22279)));
+        let fresh_pet = w.entity(25, Some((100.0, 96.0)), Some(PET), None, Some((556, 556)));
+        let wood = |item, edit| Outcome::Reinforced { zone: "Town".into(), item, edit };
+        assert_eq!(settle(w.at(), 22, &slots, &town), wood(DOOR, edit_of(Some((100, 12117)), Some(((100, 12117), (100, 12117))))));
+        assert_eq!((threshold(door), health(door)), (12117, (12117, 12117)));
+        assert_eq!(settle(w.at(), 22, &slots, &town), Outcome::Already);
+        assert_eq!(settle(w.at(), 23, &slots, &town), wood(LADDER, edit_of(Some((1000, 65398)), None)));
+        assert_eq!(settle(w.at(), 24, &slots, &town), Outcome::Released { zone: "Town".into(), item: PET, edit: edit_of(None, Some(((22279, 556), (22279, 556)))) });
+        assert_eq!(health(pet), (556, 556));
+        assert_eq!(settle(w.at(), 25, &slots, &town), Outcome::Outside);
+        assert_eq!(health(fresh_pet), (556, 556));
+        assert_eq!(settle(w.at(), 22, &slots, &off), Outcome::Released { zone: "Town".into(), item: DOOR, edit: edit_of(Some((12117, 100)), Some(((12117, 100), (12117, 100)))) });
+        assert_eq!(settle(w.at(), 23, &slots, &off), Outcome::Released { zone: "Town".into(), item: LADDER, edit: edit_of(Some((65398, 1000)), None) });
+        assert_eq!((threshold(door), health(door), threshold(ladder)), (100, (100, 100), 1000));
 
         assert_eq!(settle(w.at(), 10, &slots, &off), released("Town", Some((439, 10)), None));
         assert_eq!(threshold(torch), 10);

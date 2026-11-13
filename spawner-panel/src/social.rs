@@ -32,11 +32,14 @@ pub struct Zone {
     pub pvp: bool,
     /// Decoration built inside cannot be broken by hits; the hammer still removes it.
     pub shield: bool,
+    /// Creature (position in `GUARDIANS`) and level of this zone's base guardian.
+    pub guardian: usize,
+    pub guardian_level: u32,
 }
 
 impl Zone {
     pub fn new(name: String, x: f64, z: f64, radius: f64) -> Self {
-        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false, shield: false }
+        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false, shield: false, guardian: 0, guardian_level: GUARDIAN_LEVEL }
     }
 }
 
@@ -254,8 +257,6 @@ pub struct SocialState {
     pub teams_seq: u32,
     pub teams_asked: Option<Instant>,
     pub teams_last: Option<Instant>,
-    pub guardian_pick: usize,
-    pub guardian_level: u32,
     pub guardian_sent: bool,
 }
 
@@ -267,6 +268,8 @@ pub const GUARDIANS: [(&str, &str); 5] = [
     ("Enemy_Wildbeast_Wolf_Heavy_BossHealthBar", "Direwolf"),
     ("Enemy_Boss_Fog_Dragon", "Fell Dragon Youngling (vuela)"),
 ];
+
+pub const GUARDIAN_LEVEL: u32 = 40;
 
 pub fn guardian_request(zone: &str, template: &str, level: u32) -> Value {
     json!({ "template": template, "count": 1, "level": level.clamp(1, 100), "guardian": zone })
@@ -301,8 +304,6 @@ impl Default for SocialState {
             teams_seq: 0,
             teams_asked: None,
             teams_last: None,
-            guardian_pick: 0,
-            guardian_level: 40,
             guardian_sent: false,
         }
     }
@@ -375,6 +376,8 @@ pub fn parse_zones(text: &str) -> Vec<Zone> {
                 lock_admins: v.get("lock_admins").and_then(|e| e.as_bool()).unwrap_or(false),
                 pvp: v.get("pvp").and_then(|e| e.as_bool()).unwrap_or(false),
                 shield: v.get("shield").and_then(|e| e.as_bool()).unwrap_or(false),
+                guardian: v.get("guardian").and_then(|e| e.as_str()).and_then(|t| GUARDIANS.iter().position(|g| g.0 == t)).unwrap_or(0),
+                guardian_level: v.get("guardian_level").and_then(|e| e.as_u64()).map(|l| l.clamp(1, 100) as u32).unwrap_or(GUARDIAN_LEVEL),
             })
         })
         .collect()
@@ -388,6 +391,10 @@ pub fn zones_json(zones: &[Zone]) -> Value {
                 let mut v = json!({"name": z.name, "x": z.x, "z": z.z, "radius": z.radius, "enabled": z.enabled, "safe": z.safe, "team": z.team, "lock": z.lock && z.team != 0, "lock_admins": z.lock_admins, "pvp": z.pvp});
                 if z.shield {
                     v["shield"] = json!(true);
+                }
+                if z.guardian != 0 || z.guardian_level != GUARDIAN_LEVEL {
+                    v["guardian"] = json!(GUARDIANS[z.guardian.min(GUARDIANS.len() - 1)].0);
+                    v["guardian_level"] = json!(z.guardian_level.clamp(1, 100));
                 }
                 v
             })
@@ -802,8 +809,7 @@ impl App {
             ui.label(RichText::new("El PvP está activado en todo el mundo (pestaña PvP). Apágalo ahí para que las zonas de PvP siempre activo se noten.").color(GOLD));
         }
         let team_names: Vec<String> = self.social.teams.iter().map(|t| t.name.clone()).collect();
-        let (mut pick, mut level) = (self.social.guardian_pick.min(GUARDIANS.len() - 1), self.social.guardian_level);
-        let mut guardian_for: Option<String> = None;
+        let mut guardian_for: Option<(String, usize, u32)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, z) in self.social.zones.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -845,8 +851,8 @@ impl App {
                         });
                     });
                     changed |= ui
-                        .checkbox(&mut z.shield, "Objetos reforzados: lo construido aquí aguanta 40 veces más golpes")
-                        .on_hover_text("Lo colocado con el martillo dentro de la zona (antorchas, lámparas, muebles, decoración, estaciones) necesita unas 40 veces más daño para romperse, también lo que ya estaba construido. Se siguen rompiendo: defender la base sigue costando algo. Al desmarcar la casilla vuelven a su resistencia normal. Se siguen quitando con el martillo.")
+                        .checkbox(&mut z.shield, "Objetos reforzados: lo construido aguanta 40 veces más golpes, la madera 120")
+                        .on_hover_text("Lo colocado con el martillo dentro de la zona (antorchas, lámparas, muebles, decoración, estaciones) necesita unas 40 veces más daño para romperse (120 veces si es de madera), también lo que ya estaba construido. Se siguen rompiendo: defender la base sigue costando algo. Los animales, los PNJ y las herramientas no cambian. Al desmarcar la casilla vuelven a su resistencia normal. Se siguen quitando con el martillo.")
                         .changed();
                     if z.team != 0 {
                         ui.horizontal_wrapped(|ui| {
@@ -857,19 +863,19 @@ impl App {
                         });
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Guardián de la base (prueba)");
-                            egui::ComboBox::from_id_salt(("zone_guardian", i)).selected_text(GUARDIANS[pick].1).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt(("zone_guardian", i)).selected_text(GUARDIANS[z.guardian.min(GUARDIANS.len() - 1)].1).show_ui(ui, |ui| {
                                 for (n, (_, name)) in GUARDIANS.iter().enumerate() {
-                                    ui.selectable_value(&mut pick, n, *name);
+                                    changed |= ui.selectable_value(&mut z.guardian, n, *name).changed();
                                 }
                             });
                             ui.label("Nivel");
-                            ui.add(egui::DragValue::new(&mut level).speed(1.0).range(1..=100));
+                            changed |= ui.add(egui::DragValue::new(&mut z.guardian_level).speed(1.0).range(1..=100)).changed();
                             if button(ui, "Colocar guardián aquí", Vec2::new(190.0, 26.0), true, false) {
-                                guardian_for = Some(z.name.clone());
+                                guardian_for = Some((z.name.clone(), z.guardian.min(GUARDIANS.len() - 1), z.guardian_level));
                             }
                         })
                         .response
-                        .on_hover_text("Ponte dentro de la zona y pulsa. Aparece una criatura poderosa que defiende la zona: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. No se guarda: desaparece al reiniciar el servidor.");
+                        .on_hover_text("Ponte dentro de la zona y pulsa. Cada zona tiene su propio guardián, con su criatura y su nivel; si pulsas otra vez, solo se reemplaza el de esta zona. Aparece una criatura poderosa que defiende la zona con su propia vida y daño: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. No se guarda: desaparece al reiniciar el servidor.");
                     }
                 });
             }
@@ -885,9 +891,7 @@ impl App {
             let dir = self.dir.clone();
             self.social.save_zones(&dir);
         }
-        self.social.guardian_pick = pick;
-        self.social.guardian_level = level;
-        if let Some(zone) = guardian_for {
+        if let Some((zone, pick, level)) = guardian_for {
             self.place_guardian(&zone, GUARDIANS[pick].0, level);
         }
         if !self.social.notice.is_empty() {
@@ -1336,6 +1340,22 @@ mod tests {
         let old = parse_zones(r#"{"zones":[{"name":"Old","x":1.0,"z":2.0,"radius":30.0}]}"#);
         assert!(!old[0].shield);
         assert_eq!(zones_json(&old)["zones"][0], zones_json(&[Zone::new("Old".into(), 1.0, 2.0, 30.0)])["zones"][0]);
+    }
+
+    #[test]
+    fn each_zone_keeps_its_own_guardian_choice() {
+        let mut a = Zone::new("Keep".into(), 0.0, 0.0, 30.0);
+        a.team = 1;
+        a.guardian = 3;
+        a.guardian_level = 70;
+        let mut b = Zone::new("Tower".into(), 90.0, 0.0, 30.0);
+        b.team = 2;
+        let value = zones_json(&[a, b]);
+        assert_eq!((value["zones"][0]["guardian"].as_str(), value["zones"][0]["guardian_level"].as_u64()), (Some(GUARDIANS[3].0), Some(70)));
+        assert!(value["zones"][1].get("guardian").is_none());
+        let back = parse_zones(&value.to_string());
+        assert_eq!((back[0].guardian, back[0].guardian_level), (3, 70));
+        assert_eq!((back[1].guardian, back[1].guardian_level), (0, GUARDIAN_LEVEL));
     }
 
     #[test]

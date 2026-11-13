@@ -3,5 +3,6 @@ return {
     free_materials_check = true,
     doors_need_permission = true,
     stations_need_permission = true,
+    altars_need_permission = true,
     dismantle_anywhere = false,
 }

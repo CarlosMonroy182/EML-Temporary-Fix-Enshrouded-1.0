@@ -726,9 +726,6 @@ fn poll_request_in(dir: &std::path::Path) {
     if let Some(v) = req.count {
         s.count = v.clamp(1, 20);
     }
-    if req.guardian.is_some() {
-        s.count = 1;
-    }
     if let Some(v) = req.distance {
         s.distance = v.clamp(1.0, 60.0);
     }
@@ -737,6 +734,11 @@ fn poll_request_in(dir: &std::path::Path) {
     }
     if let Some(v) = req.damage {
         s.damage = v.clamp(0.0, 1000.0);
+    }
+    if req.guardian.is_some() {
+        s.count = 1;
+        s.health = 0;
+        s.damage = 1.0;
     }
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some(s);
@@ -2776,6 +2778,10 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             st.groups.zones.iter().filter(|z| z.locks()).count()
         ));
         super::shield::set_zones(dir, &st.groups.zones);
+        let manager = SERVER_MGR.load(Ordering::SeqCst);
+        if manager != 0 {
+            super::guardian::zones_changed(manager, &st.groups.zones);
+        }
     }
     let teams_path = dir.join(groups::TEAMS_FILE);
     let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
@@ -2797,7 +2803,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         st.zone_ids.clear();
         return;
     }
-    super::guardian::refresh(manager);
     let players: Vec<(u32, u32)> = match TRACKED.lock() {
         Ok(list) => list.iter().map(|p| (p.id, p.number)).collect(),
         Err(_) => return,

@@ -1,11 +1,15 @@
-//! Base guardian (trial): a creature an admin places for the team that owns a zone. It carries the faction
-//! of the player group, so it is hostile to every creature, and the relation hooks decide the rest by the
-//! address of its faction: it is a friend of the owning team (and of the teams `friends` names) and an
-//! enemy of every other player. Its leash is the zone. Nothing here runs unless a guardian was placed:
-//! the hooks return before looking at anything, and there is no timer of its own.
+//! Base guardian (trial): a creature an admin places for the team that owns a zone, at most one per zone.
+//! It carries the faction of the player group, so it is hostile to every creature, and the relation hooks
+//! decide the rest by the address of its faction (and of the attack entities that copy it, its kin): it is
+//! a friend of the owning team (and of the teams `friends` names) and an enemy of every other player. When
+//! the guardian stands outside its zone the hooks stop naming targets, so the game's own AI sends it home.
+//! Nothing here runs unless a guardian was placed: the hooks return before looking at anything, and there
+//! is no timer. The bookkeeping follows game events only: the hooks' own questions, every 16th entity
+//! creation, and a change of the zones.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::groups::{self, Zone};
 use super::spawn_probe::read_bytes;
@@ -23,7 +27,10 @@ const HOME_ZONE_AT: usize = 60;
 const LEASH_AT: usize = 64;
 const LEASH_SHARE: f32 = 0.9;
 const LEASH_LEAST: f32 = 5.0;
-const MAX_GUARDIANS: usize = 8;
+const MAX_GUARDIANS: usize = 16;
+const MAX_KIN: usize = 48;
+const REFRESH_EVERY: u32 = 16;
+const POSITION_FRESH: Duration = Duration::from_secs(1);
 const MAX_ASKED: usize = 24;
 
 /// Where and for whom a guardian stands.
@@ -36,17 +43,31 @@ pub struct Post {
     pub radius: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Guardian {
     id: u32,
     faction_at: usize,
     post: Post,
+    /// Faction addresses of entities that copied the guardian's side (its attacks), found when the game asked.
+    kin: Vec<usize>,
+    outside: Option<(Instant, bool)>,
+}
+
+impl Guardian {
+    fn new(id: u32, faction_at: usize, post: Post) -> Self {
+        Self { id, faction_at, post, kin: Vec::new(), outside: None }
+    }
+
+    fn owns(&self, addr: usize) -> bool {
+        self.faction_at == addr || self.kin.contains(&addr)
+    }
 }
 
 static ANY: AtomicBool = AtomicBool::new(false);
 static GUARDIANS: Mutex<Vec<Guardian>> = Mutex::new(Vec::new());
 static ASKED: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
 static VALUE_CALLS: AtomicU32 = AtomicU32::new(0);
+static CREATIONS: AtomicU32 = AtomicU32::new(0);
 
 fn log(text: &str) {
     spawner::log(&format!("guardian: {text}"));
@@ -79,22 +100,30 @@ fn player_group(value: u8) -> bool {
 }
 
 /// Whether a pair that involves a guardian is hostile, or `None` when the game's own rules stay in charge.
-/// `team_of` gives the team of the faction at an address.
-fn decide(guardians: &[Guardian], a: (usize, u8), b: (usize, u8), team_of: &dyn Fn(usize) -> u8) -> Option<bool> {
-    let of = |addr: usize| guardians.iter().find(|g| g.faction_at == addr);
+/// `team_of` gives the team of the faction at an address; `away` tells whether a guardian is outside its zone.
+fn decide(guardians: &[Guardian], a: (usize, u8), b: (usize, u8), team_of: &dyn Fn(usize) -> u8, away: &dyn Fn(&Guardian) -> bool) -> Option<bool> {
+    let of = |addr: usize| guardians.iter().find(|g| g.owns(addr));
     match (of(a.0), of(b.0)) {
         (None, None) => None,
         (Some(g), Some(h)) => Some(!friends(g.post.team, h.post.team)),
-        (Some(g), None) => other(g, b, team_of),
-        (None, Some(g)) => other(g, a, team_of),
+        (Some(g), None) => other(g, b, team_of, away),
+        (None, Some(g)) => other(g, a, team_of, away),
     }
 }
 
-fn other(guardian: &Guardian, other: (usize, u8), team_of: &dyn Fn(usize) -> u8) -> Option<bool> {
+fn other(guardian: &Guardian, other: (usize, u8), team_of: &dyn Fn(usize) -> u8, away: &dyn Fn(&Guardian) -> bool) -> Option<bool> {
     if !player_group(other.1) {
         return None;
     }
-    Some(!friends(guardian.post.team, team_of(other.0)))
+    if friends(guardian.post.team, team_of(other.0)) || away(guardian) {
+        return Some(false);
+    }
+    Some(true)
+}
+
+/// A faction of the guardian's own side that belongs to nobody: one of its attacks.
+fn is_kin_candidate(guardians: &[Guardian], addr: usize, value: u8, team_of: &dyn Fn(usize) -> u8) -> bool {
+    value == FACTION_VALUE && team_of(addr) == 0 && !guardians.iter().any(|g| g.owns(addr))
 }
 
 /// The hook point of the relation functions that look at faction addresses. `None` unless the pair involves a
@@ -103,15 +132,30 @@ pub fn relation(a: usize, fa: u8, b: usize, fb: u8, asked: &str) -> Option<bool>
     if !ANY.load(Ordering::Relaxed) {
         return None;
     }
-    let guardians = GUARDIANS.try_lock().ok()?;
-    let hostile = decide(&guardians, (a, fa), (b, fb), &groups::team_of)?;
-    let (g, other, value) = match guardians.iter().find(|g| g.faction_at == a) {
-        Some(g) => (g.clone(), b, fb),
-        None => (guardians.iter().find(|g| g.faction_at == b)?.clone(), a, fa),
-    };
+    let mut guardians = GUARDIANS.try_lock().ok()?;
+    let index = guardians.iter().position(|g| g.owns(a)).or_else(|| guardians.iter().position(|g| g.owns(b)))?;
+    let (other, value) = if guardians[index].owns(a) { (b, fb) } else { (a, fa) };
+    if is_kin_candidate(&guardians, other, value, &groups::team_of) && guardians[index].kin.len() < MAX_KIN {
+        guardians[index].kin.push(other);
+    }
+    refresh_positions(&mut guardians, spawner::server_manager());
+    let away = |g: &Guardian| g.outside.is_some_and(|(_, out)| out);
+    let hostile = decide(&guardians, (a, fa), (b, fb), &groups::team_of, &away)?;
+    let g = guardians[index].clone();
     drop(guardians);
     say_relation(&g, other, value, asked, hostile);
     Some(hostile)
+}
+
+/// Whether each guardian stands outside its zone, looked up at most once a second and only while the game asks.
+fn refresh_positions(list: &mut [Guardian], manager: usize) {
+    for g in list.iter_mut() {
+        if g.outside.is_some_and(|(at, _)| at.elapsed() < POSITION_FRESH) {
+            continue;
+        }
+        let out = spawner::entity_position(manager, g.id).is_some_and(|[x, _, z]| (x - g.post.x).powi(2) + (z - g.post.z).powi(2) > g.post.radius * g.post.radius);
+        g.outside = Some((Instant::now(), out));
+    }
 }
 
 fn say_relation(g: &Guardian, other: usize, value: u8, asked: &str, hostile: bool) {
@@ -208,8 +252,10 @@ pub fn adopt(manager: usize, id: u32, post: Post) -> bool {
     }
     leash(manager, id, &post);
     let Ok(mut list) = GUARDIANS.lock() else { return false };
-    if list.len() >= MAX_GUARDIANS {
-        list.remove(0);
+    if list.len() >= MAX_GUARDIANS && !list.iter().any(|g| same_zone(&g.post.zone, &post.zone)) {
+        let oldest = list.remove(0);
+        spawner::retire_entity(manager, oldest.id);
+        log(&format!("entity {} of '{}' was taken out: no more than {MAX_GUARDIANS} guardians at once", oldest.id, oldest.post.zone));
     }
     log(&format!(
         "entity {id} guards '{}' for team {}: faction {before} -> {FACTION_VALUE} at {addr:#x} (component slot {slot}, table says {:?})",
@@ -217,9 +263,62 @@ pub fn adopt(manager: usize, id: u32, post: Post) -> bool {
         post.team,
         shield::component_index(manager, HASH_FACTION)
     ));
-    list.push(Guardian { id, faction_at: addr, post });
+    if let Some(old) = register(&mut list, Guardian::new(id, addr, post)) {
+        let removed = spawner::retire_entity(manager, old.id);
+        log(&format!("entity {} replaces entity {} as the guardian of '{}' ({})", id, old.id, old.post.zone, if removed { "the old one was taken out" } else { "the old one could not be taken out" }));
+    }
     ANY.store(true, Ordering::SeqCst);
     true
+}
+
+fn same_zone(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Adds a guardian; the one the same zone had before, if any, is returned.
+fn register(list: &mut Vec<Guardian>, guardian: Guardian) -> Option<Guardian> {
+    let old = list.iter().position(|g| same_zone(&g.post.zone, &guardian.post.zone)).map(|i| list.remove(i));
+    list.push(guardian);
+    old
+}
+
+/// Guardians whose zone is gone, switched off, or owned by another team now, with the reason; the others
+/// follow the zone's new place and size.
+fn follow(list: &mut [Guardian], zones: &[Zone]) -> Vec<(u32, String)> {
+    let mut orphans = Vec::new();
+    for g in list.iter_mut() {
+        match post_for(zones, &g.post.zone) {
+            Err(_) => orphans.push((g.id, format!("zone '{}' is gone or has no owner", g.post.zone))),
+            Ok(post) if post.team != g.post.team => orphans.push((g.id, format!("zone '{}' belongs to team {} now, not team {}", g.post.zone, post.team, g.post.team))),
+            Ok(post) => g.post = post,
+        }
+    }
+    orphans
+}
+
+/// Called when the zones were read again: a guardian whose zone changed owner or disappeared is taken out.
+pub fn zones_changed(manager: usize, zones: &[Zone]) {
+    if !ANY.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(mut list) = GUARDIANS.lock() else { return };
+    let orphans = follow(&mut list, zones);
+    for (id, why) in &orphans {
+        let removed = spawner::retire_entity(manager, *id);
+        log(&format!("entity {id} stops guarding: {why} ({})", if removed { "taken out" } else { "could not be taken out" }));
+    }
+    list.retain(|g| !orphans.iter().any(|(id, _)| *id == g.id));
+    if list.is_empty() {
+        ANY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Called for every entity the game creates; every 16th one looks after the guardians.
+pub fn on_create(manager: usize) {
+    if !ANY.load(Ordering::Relaxed) || CREATIONS.fetch_add(1, Ordering::Relaxed) % REFRESH_EVERY != 0 {
+        return;
+    }
+    refresh(manager);
 }
 
 /// Called with the work the game's creation events and the group tick already do: finds each guardian's
@@ -268,7 +367,15 @@ mod tests {
     }
 
     fn guardian(at: usize, team: u8) -> Guardian {
-        Guardian { id: at as u32, faction_at: at, post: post(team) }
+        Guardian::new(at as u32, at, post(team))
+    }
+
+    fn near(_: &Guardian) -> bool {
+        false
+    }
+
+    fn far(_: &Guardian) -> bool {
+        true
     }
 
     fn teams(addr: usize) -> u8 {
@@ -282,34 +389,34 @@ mod tests {
     #[test]
     fn the_owning_team_is_a_friend_and_every_other_player_an_enemy() {
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams), Some(false));
-        assert_eq!(decide(&g, (0x101, 8), (0x1000, 11), &teams), Some(false));
-        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams), Some(true));
-        assert_eq!(decide(&g, (0x300, 7), (0x1000, 11), &teams), Some(true));
-        assert_eq!(decide(&g, (0x1000, 11), (0x300, 8), &teams), Some(true));
+        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x101, 8), (0x1000, 11), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x300, 7), (0x1000, 11), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, 11), (0x300, 8), &teams, &near), Some(true));
     }
 
     #[test]
     fn creatures_and_unrelated_pairs_stay_with_the_game() {
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x400, 3), &teams), None);
-        assert_eq!(decide(&g, (0x400, 3), (0x1000, 11), &teams), None);
-        assert_eq!(decide(&g, (0x100, 7), (0x200, 7), &teams), None);
-        assert_eq!(decide(&[], (0x1000, 11), (0x100, 7), &teams), None);
+        assert_eq!(decide(&g, (0x1000, 11), (0x400, 3), &teams, &near), None);
+        assert_eq!(decide(&g, (0x400, 3), (0x1000, 11), &teams, &near), None);
+        assert_eq!(decide(&g, (0x100, 7), (0x200, 7), &teams, &near), None);
+        assert_eq!(decide(&[], (0x1000, 11), (0x100, 7), &teams, &near), None);
     }
 
     #[test]
     fn guardians_of_one_team_are_friends_and_of_two_teams_enemies() {
         let g = [guardian(0x1000, 1), guardian(0x1100, 1), guardian(0x1200, 2)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x1100, 11), &teams), Some(false));
-        assert_eq!(decide(&g, (0x1000, 11), (0x1200, 11), &teams), Some(true));
+        assert_eq!(decide(&g, (0x1000, 11), (0x1100, 11), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x1000, 11), (0x1200, 11), &teams, &near), Some(true));
     }
 
     #[test]
     fn nobody_is_a_friend_of_a_guardian_without_a_team() {
         let g = [guardian(0x1000, 0)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x300, 7), &teams), Some(true));
-        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams), Some(true));
+        assert_eq!(decide(&g, (0x1000, 11), (0x300, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams, &near), Some(true));
     }
 
     #[test]
@@ -324,6 +431,63 @@ mod tests {
         assert!(post_for(&zones, "Nowhere").unwrap_err().contains("no zone"));
     }
 
+    fn zone_post(zone: &str, team: u8) -> Post {
+        Post { zone: zone.into(), ..post(team) }
+    }
+
+    #[test]
+    fn two_zones_with_two_teams_each_keep_their_own_guardian() {
+        let mut list = Vec::new();
+        assert!(register(&mut list, Guardian::new(1, 0x1000, zone_post("Keep", 1))).is_none());
+        assert!(register(&mut list, Guardian::new(2, 0x1100, zone_post("Tower", 2))).is_none());
+        assert_eq!(list.len(), 2);
+        let old = register(&mut list, Guardian::new(3, 0x1200, zone_post(" keep ", 1))).unwrap();
+        assert_eq!(old.id, 1);
+        let ids: Vec<u32> = list.iter().map(|g| g.id).collect();
+        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(decide(&list, (0x1100, 11), (0x100, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&list, (0x1100, 11), (0x200, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&list, (0x1200, 11), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&list, (0x1200, 11), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&list, (0x1000, 11), (0x100, 7), &teams, &near), None);
+    }
+
+    #[test]
+    fn a_guardian_outside_its_zone_names_no_target() {
+        let g = [guardian(0x1000, 1)];
+        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &far), Some(false));
+        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &near), Some(true));
+    }
+
+    #[test]
+    fn attacks_that_copy_the_guardian_side_are_decided_like_the_guardian() {
+        let mut g = [guardian(0x1000, 1)];
+        assert!(is_kin_candidate(&g, 0x5000, 11, &teams));
+        assert!(!is_kin_candidate(&g, 0x5000, 7, &teams));
+        assert!(!is_kin_candidate(&g, 0x100, 11, &teams));
+        assert!(!is_kin_candidate(&g, 0x1000, 11, &teams));
+        g[0].kin.push(0x5000);
+        assert_eq!(decide(&g, (0x5000, 11), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x5000, 11), (0x200, 7), &teams, &near), Some(true));
+    }
+
+    #[test]
+    fn only_the_guardian_of_a_changed_zone_is_taken_out() {
+        let zones = |json: &str| super::super::groups::parse_zones(json);
+        let mut list = vec![
+            Guardian::new(1, 0x1000, zone_post("Keep", 1)),
+            Guardian::new(2, 0x1100, zone_post("Tower", 2)),
+            Guardian::new(3, 0x1200, zone_post("Gate", 1)),
+        ];
+        let now = zones(r#"{"zones":[{"name":"Keep","x":5,"z":6,"radius":70,"team":3},{"name":"Tower","x":5,"z":6,"radius":70,"team":2}]}"#);
+        let orphans = follow(&mut list, &now);
+        let ids: Vec<u32> = orphans.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert!(orphans[0].1.contains("belongs to team 3"));
+        assert!(orphans[1].1.contains("gone"));
+        assert_eq!((list[1].post.x, list[1].post.z, list[1].post.radius), (5.0, 6.0, 70.0));
+    }
+
     #[test]
     fn nothing_changes_while_no_guardian_exists() {
         ANY.store(false, Ordering::SeqCst);
@@ -331,5 +495,7 @@ mod tests {
         note_values(11, 7, "isEnemy");
         assert_eq!(VALUE_CALLS.load(Ordering::Relaxed), 0);
         refresh(0);
+        on_create(0);
+        zones_changed(0, &[]);
     }
 }
