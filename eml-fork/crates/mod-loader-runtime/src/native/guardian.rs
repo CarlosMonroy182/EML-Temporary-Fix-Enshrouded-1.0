@@ -158,7 +158,7 @@ fn is_kin_candidate(guardians: &[Guardian], addr: usize, value: u8, team_of: &dy
 /// The hook point of the relation functions that look at faction addresses. `None` unless the pair involves a
 /// guardian.
 pub fn relation(a: usize, fa: u8, b: usize, fb: u8, asked: &str) -> Option<bool> {
-    if !ANY.load(Ordering::Relaxed) {
+    if !ANY.load(Ordering::Relaxed) || (fa != FACTION_VALUE && fb != FACTION_VALUE) {
         return None;
     }
     let mut guardians = GUARDIANS.try_lock().ok()?;

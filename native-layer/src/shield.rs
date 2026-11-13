@@ -60,7 +60,7 @@ const RELEASED_MAX: usize = 200;
 const SETTLE: Duration = Duration::from_millis(300);
 const WAITING_MAX: usize = 16384;
 const WAITING_PER_EVENT: usize = 64;
-const SWEEP_PER_EVENT: usize = 400;
+const SWEEP_PER_EVENT: usize = 48;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Area {
@@ -530,6 +530,10 @@ fn item_class(item: u32) -> Option<Class> {
 }
 
 /// False only when the object list says the template cannot be broken.
+fn catalog_known() -> bool {
+    CATALOG.lock().is_ok_and(|c| c.is_some())
+}
+
 fn may_break(template: &[u8]) -> bool {
     let Ok(catalog) = CATALOG.lock() else { return true };
     let Some(set) = catalog.as_ref() else { return true };
@@ -721,7 +725,6 @@ fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>
 
 fn start_sweep(manager: usize, work: &mut Work) {
     let mut ids: Vec<u32> = spawner::entity_ids(manager).map(|s| s.into_iter().collect()).unwrap_or_default();
-    ids.sort_unstable();
     log(&format!("object shield: checking the {} entities that are loaded", ids.len()));
     work.sweep = Some(Sweep { ids, next: 0, tally: Tally::default() });
 }
@@ -733,12 +736,11 @@ fn work(manager: usize) {
         return;
     }
     let Some(slots) = slots(manager) else { return };
-    let wanted = SWEEP_WANTED.swap(false, Ordering::SeqCst);
     let Ok(mut work) = WORK.lock() else { return };
-    if wanted {
+    if work.sweep.is_none() && SWEEP_WANTED.swap(false, Ordering::SeqCst) {
         start_sweep(manager, &mut work);
     }
-    let Ok(areas) = AREAS.lock().map(|a| a.clone()) else { return };
+    let Ok(areas) = AREAS.lock() else { return };
     for _ in 0..WAITING_PER_EVENT {
         match work.waiting.front() {
             Some((_, since)) if since.elapsed() >= SETTLE => {}
@@ -980,7 +982,7 @@ pub fn after(seen: Option<Seen>, manager: usize, entity: u32) {
         });
     }
     if !seen.carried {
-        if seen.breakable {
+        if seen.breakable && catalog_known() {
             wait_for(entity);
         }
         return;
@@ -989,7 +991,7 @@ pub fn after(seen: Option<Seen>, manager: usize, entity: u32) {
         return;
     }
     let Some(slots) = slots(manager) else { return };
-    let Ok(areas) = AREAS.lock().map(|a| a.clone()) else { return };
+    let Ok(areas) = AREAS.lock() else { return };
     let outcome = settle(manager, entity, &slots, &areas);
     report(manager, entity, &outcome, None);
 }
