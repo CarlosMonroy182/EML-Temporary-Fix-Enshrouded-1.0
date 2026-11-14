@@ -317,3 +317,14 @@ Account id (Nov 8): the Dathost server's player table has no Steam id; each slot
 - Traffic: the relation question volume (13 to 17 million per 30 s, against 1.2 to 6.7 million in the previous run, with no
   creations in the windows) cannot be told apart from the creatures alive. A line `N relation questions about
   guardians in the last 30 s (X answered enemy, Y friend)` (every 30 s, 20 times a run) now says how much of it involves a guardian.
+
+## Confirmed in game (Nov 13-14, 2026)
+- Protected objects work: since protect3/protect4 no built structure inside a protected zone breaks, tested by the owner as
+  a normal player and by a visitor outside the team (fences, work stations, doors placed with the hammer, and everything
+  created at world load that gets immunity at creation). Hammer removal still works.
+- The one exception seen earlier was a door placed while the item was unknown to the catalog; the 3 second placing window
+  (`shield::placing()`) now protects any hammer placement.
+- Altar interaction is locked for players outside the owning team; fast travel to altars is left open on purpose (the owner
+  closes the door or walls the altar in).
+- Flame pillar, ice pillar and fire or electric totems cannot be used in an enemy base: the world permissions of a visitor
+  in an owned zone. Left as is.
