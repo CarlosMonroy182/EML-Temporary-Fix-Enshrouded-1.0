@@ -32,7 +32,7 @@ const MAX_GUARDIANS: usize = 16;
 const MAX_KIN: usize = 48;
 const REFRESH_EVERY: u32 = 16;
 const POSITION_FRESH: Duration = Duration::from_secs(1);
-const MAX_ASKED: usize = 24;
+const MAX_ASKED: usize = 12;
 
 /// Where and for whom a guardian stands.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,8 +77,10 @@ impl Guardian {
 
 static ANY: AtomicBool = AtomicBool::new(false);
 static GUARDIANS: Mutex<Vec<Guardian>> = Mutex::new(Vec::new());
-static ASKED: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
+static ASKED: Mutex<Vec<(u8, u8, bool)>> = Mutex::new(Vec::new());
+static ASKED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static VALUE_CALLS: AtomicU32 = AtomicU32::new(0);
+static LAST_PAIR: AtomicU32 = AtomicU32::new(0);
 static CREATIONS: AtomicU32 = AtomicU32::new(0);
 static WANTED: AtomicBool = AtomicBool::new(false);
 static REMOVALS_PENDING: AtomicBool = AtomicBool::new(false);
@@ -170,9 +172,11 @@ pub fn relation(a: usize, fa: u8, b: usize, fb: u8, asked: &str) -> Option<bool>
     refresh_positions(&mut guardians, spawner::server_manager());
     let away = |g: &Guardian| g.outside.is_some_and(|(_, out)| out);
     let hostile = decide(&guardians, (a, fa), (b, fb), &groups::team_of, &away)?;
-    let g = guardians[index].clone();
-    drop(guardians);
-    say_relation(&g, other, value, asked, hostile);
+    if ASKED_COUNT.load(Ordering::Relaxed) < MAX_ASKED {
+        let g = guardians[index].clone();
+        drop(guardians);
+        say_relation(&g, other, value, asked, hostile);
+    }
     Some(hostile)
 }
 
@@ -188,13 +192,14 @@ fn refresh_positions(list: &mut [Guardian], manager: usize) {
 }
 
 fn say_relation(g: &Guardian, other: usize, value: u8, asked: &str, hostile: bool) {
+    let team = groups::team_of(other);
     let Ok(mut known) = ASKED.try_lock() else { return };
-    if known.len() >= MAX_ASKED || known.contains(&(other, hostile)) {
+    if known.len() >= MAX_ASKED || known.contains(&(value, team, hostile)) {
         return;
     }
-    known.push((other, hostile));
+    known.push((value, team, hostile));
+    ASKED_COUNT.store(known.len(), Ordering::Relaxed);
     drop(known);
-    let team = groups::team_of(other);
     log(&format!(
         "{asked} was asked about the guardian of '{}' and the entity whose faction is at {other:#x} (faction {value}, team {team}): {}; the guardian is {}",
         g.post.zone,
@@ -209,7 +214,9 @@ pub fn note_values(a: u8, b: u8, asked: &str) {
     if !ANY.load(Ordering::Relaxed) || !(a == FACTION_VALUE || b == FACTION_VALUE) {
         return;
     }
-    if VALUE_CALLS.fetch_add(1, Ordering::Relaxed) < 8 {
+    let pair = (a as u32) << 8 | b as u32;
+    if VALUE_CALLS.load(Ordering::Relaxed) < 4 && LAST_PAIR.swap(pair + 1, Ordering::Relaxed) != pair + 1 {
+        VALUE_CALLS.fetch_add(1, Ordering::Relaxed);
         log(&format!("{asked} (values) asked about factions {a} and {b}; the values carry no address, so the guardian's own rule does not apply there"));
     }
 }
@@ -510,6 +517,7 @@ pub fn refresh(manager: usize) {
         if let Ok(mut known) = ASKED.lock() {
             known.clear();
         }
+        ASKED_COUNT.store(0, Ordering::Relaxed);
     }
 }
 

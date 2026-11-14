@@ -492,6 +492,11 @@ pub fn apply_op(dir: &Path, op: &Value) -> Result<String, String> {
         Topic::Teams => return apply_team_op(dir, op),
         _ => {}
     }
+    if topic == Topic::Zones {
+        if let Some(said) = apply_zone_op(dir, op)? {
+            return Ok(said);
+        }
+    }
     let root = read_root(dir, topic)?;
     let mut list = list_of(&root, topic);
     let mut out = Outcome::default();
@@ -534,6 +539,208 @@ pub fn apply_op(dir: &Path, op: &Value) -> Result<String, String> {
     write_file(dir, topic.file(), &text)?;
     note_change();
     Ok(out.describe(topic, now))
+}
+
+/// A JSON object that keeps its keys in the order they were written.
+#[derive(Debug, Clone, PartialEq)]
+struct Ordered(Vec<(String, Value)>);
+
+impl<'de> serde::Deserialize<'de> for Ordered {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Reader;
+        impl<'de> serde::de::Visitor<'de> for Reader {
+            type Value = Ordered;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Ordered, A::Error> {
+                let mut out = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    out.push((key, value));
+                }
+                Ok(Ordered(out))
+            }
+        }
+        d.deserialize_map(Reader)
+    }
+}
+
+impl serde::Serialize for Ordered {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl Ordered {
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+}
+
+/// The zones file as it was written: every key of the root, and every zone with its keys in their own order.
+struct ZonesDoc(Vec<(String, ZonesPart)>);
+
+enum ZonesPart {
+    Zones(Vec<Ordered>),
+    Other(Value),
+}
+
+impl<'de> serde::Deserialize<'de> for ZonesDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Reader;
+        impl<'de> serde::de::Visitor<'de> for Reader {
+            type Value = ZonesDoc;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ZonesDoc, A::Error> {
+                let mut out = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let part = if key == "zones" { ZonesPart::Zones(map.next_value()?) } else { ZonesPart::Other(map.next_value()?) };
+                    out.push((key, part));
+                }
+                Ok(ZonesDoc(out))
+            }
+        }
+        d.deserialize_map(Reader)
+    }
+}
+
+impl serde::Serialize for ZonesDoc {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (key, part) in &self.0 {
+            match part {
+                ZonesPart::Zones(list) => map.serialize_entry(key, list)?,
+                ZonesPart::Other(value) => map.serialize_entry(key, value)?,
+            }
+        }
+        map.end()
+    }
+}
+
+/// The keys the panel writes for a zone, in the order it writes them. Any other key of a zone belongs to
+/// somebody else (an older or newer panel, the administrator) and is left as it is.
+const ZONE_KEYS: [&str; 13] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield", "guardian", "guardian_level"];
+
+/// `old` with the panel's keys taken from `new` (a key `new` leaves out is removed) and everything else kept in place.
+fn merged_zone(old: &Ordered, new: &Value) -> Ordered {
+    let mut out = Vec::new();
+    for (key, value) in &old.0 {
+        if ZONE_KEYS.contains(&key.as_str()) {
+            if let Some(fresh) = new.get(key) {
+                out.push((key.clone(), fresh.clone()));
+            }
+        } else {
+            out.push((key.clone(), value.clone()));
+        }
+    }
+    for key in ZONE_KEYS {
+        if out.iter().all(|(k, _)| k != key) {
+            if let Some(fresh) = new.get(key) {
+                out.push((key.to_string(), fresh.clone()));
+            }
+        }
+    }
+    Ordered(out)
+}
+
+fn fresh_zone(new: &Value) -> Ordered {
+    merged_zone(&Ordered(Vec::new()), new).with_rest(new)
+}
+
+impl Ordered {
+    fn with_rest(mut self, new: &Value) -> Ordered {
+        if let Some(map) = new.as_object() {
+            for (key, value) in map {
+                if self.get(key).is_none() {
+                    self.0.push((key.clone(), value.clone()));
+                }
+            }
+        }
+        self
+    }
+}
+
+fn zone_name(zone: &Ordered) -> Option<String> {
+    zone.get("name").and_then(Value::as_str).map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Zone changes keep the file as the administrator left it: untouched zones are not rewritten, the keys of a
+/// zone nobody here knows stay where they are, and a change that changes nothing does not write at all.
+/// `None` when the file is not in a shape this can follow; the general path then takes over.
+fn apply_zone_op(dir: &Path, op: &Value) -> Result<Option<String>, String> {
+    let topic = Topic::Zones;
+    let text = match std::fs::read_to_string(dir.join(topic.file())) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", topic.file())),
+    };
+    let mut doc = match &text {
+        Some(text) => match serde_json::from_str::<ZonesDoc>(text) {
+            Ok(doc) => doc,
+            Err(_) => return Ok(None),
+        },
+        None => ZonesDoc(vec![("zones".to_string(), ZonesPart::Zones(Vec::new()))]),
+    };
+    if !doc.0.iter().any(|(k, _)| k == "zones") {
+        doc.0.push(("zones".to_string(), ZonesPart::Zones(Vec::new())));
+    }
+    let Some(ZonesPart::Zones(list)) = doc.0.iter_mut().find(|(k, _)| k == "zones").map(|(_, p)| p) else { return Ok(None) };
+    let mut out = Outcome::default();
+    for item in many(op, "add") {
+        let key = check(topic, &item)?;
+        match list.iter().position(|x| zone_name(x).is_some_and(|k| same_key(&k, &key))) {
+            Some(i) if merged_zone(&list[i], &item) == list[i] => {}
+            Some(_) => out.refused.push(key),
+            None => {
+                list.push(fresh_zone(&item));
+                out.added += 1;
+            }
+        }
+    }
+    for item in many(op, "up") {
+        let key = check(topic, &item)?;
+        match list.iter().position(|x| zone_name(x).is_some_and(|k| same_key(&k, &key))) {
+            Some(i) => {
+                let merged = merged_zone(&list[i], &item);
+                if merged != list[i] {
+                    list[i] = merged;
+                    out.updated += 1;
+                }
+            }
+            None => {
+                list.push(fresh_zone(&item));
+                out.added += 1;
+            }
+        }
+    }
+    for name in many(op, "rm") {
+        let Some(name) = name.as_str() else { continue };
+        let before = list.len();
+        list.retain(|x| !zone_name(x).is_some_and(|k| same_key(&k, name)));
+        out.removed += before - list.len();
+    }
+    if list.len() > topic.limit() {
+        return Err(format!("too many items in {} ({})", topic.name(), list.len()));
+    }
+    let now = list.len();
+    if out.added + out.updated + out.removed > 0 || text.is_none() {
+        let written = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
+        write_file(dir, topic.file(), &written)?;
+        note_change();
+    }
+    Ok(Some(out.describe(topic, now)))
 }
 
 fn person_ok(p: &Value) -> bool {
@@ -753,6 +960,29 @@ mod tests {
         apply_op(&dir, &json!({"t": "zones", "add": [zone("Base sur", 5.0)]})).unwrap();
         let names: Vec<String> = list_of(&read(&dir, "m182_zones.json"), Topic::Zones).iter().map(|z| text_of(z, "name")).collect();
         assert_eq!(names, vec!["Base norte", "Base sur"]);
+    }
+
+    #[test]
+    fn a_zone_change_keeps_the_order_and_the_keys_it_does_not_know() {
+        let dir = scratch("keep");
+        let original = r#"{"zones":[{"name":"Home","x":1.5,"z":2.5,"radius":40.0,"team":2,"note":"mine","enabled":true,"lock":true},{"name":"Other","x":9.0,"z":9.0,"radius":20.0,"extra":{"b":1,"a":2}}]}"#;
+        std::fs::write(dir.join("m182_zones.json"), original).unwrap();
+        let before = revision(&dir, Topic::Zones);
+        apply_op(&dir, &json!({"t": "zones", "up": [{"name": "Home", "x": 1.5, "z": 2.5, "radius": 40.0, "team": 2, "enabled": true, "lock": true}]})).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("m182_zones.json")).unwrap(), original, "a change that changes nothing writes nothing");
+        assert_eq!(revision(&dir, Topic::Zones), before);
+        apply_op(&dir, &json!({"t": "zones", "up": [{"name": "Home", "x": 1.5, "z": 2.5, "radius": 55.0, "team": 2, "enabled": true, "lock": true, "shield": true}]})).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("m182_zones.json")).unwrap(),
+            r#"{"zones":[{"name":"Home","x":1.5,"z":2.5,"radius":55.0,"team":2,"note":"mine","enabled":true,"lock":true,"shield":true},{"name":"Other","x":9.0,"z":9.0,"radius":20.0,"extra":{"a":2,"b":1}}]}"#
+        );
+        apply_op(&dir, &json!({"t": "zones", "up": [{"name": "Home", "x": 1.5, "z": 2.5, "radius": 55.0, "team": 2, "enabled": true, "lock": true}]})).unwrap();
+        let list = list_of(&read(&dir, "m182_zones.json"), Topic::Zones);
+        assert!(list[0].get("shield").is_none(), "a key the panel leaves out is taken out");
+        assert_eq!(list[0]["note"], "mine");
+        apply_op(&dir, &json!({"t": "zones", "add": [zone("New", 3.0)], "rm": ["Other"]})).unwrap();
+        let names: Vec<String> = list_of(&read(&dir, "m182_zones.json"), Topic::Zones).iter().map(|z| text_of(z, "name")).collect();
+        assert_eq!(names, vec!["Home", "New"]);
     }
 
     #[test]

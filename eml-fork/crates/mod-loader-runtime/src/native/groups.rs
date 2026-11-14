@@ -193,6 +193,15 @@ pub fn parse_live_line(text: &str, seq: u32) -> Option<(Vec<LiveTeam>, bool)> {
     Some((out, complete))
 }
 
+/// What the Lua mod that locks doors, stations and altars looks like on disk, for one log line.
+pub fn lock_mod_status(dir: &std::path::Path) -> &'static str {
+    match std::fs::read_to_string(dir.join("mods").join("m182_diag_build").join("src").join("mod.lua")) {
+        Err(_) => "mods/m182_diag_build is not next to the game: doors, stations and altars are not locked for visitors",
+        Ok(text) if text.contains("altars_need_permission") => "mods/m182_diag_build has the altar rule",
+        Ok(_) => "mods/m182_diag_build is an older build without the altar rule: copy the new folder so altars are locked for visitors",
+    }
+}
+
 pub fn parse_zones(text: &str) -> Vec<Zone> {
     let Ok(file) = serde_json::from_str::<ZonesFile>(text) else { return Vec::new() };
     file.zones
@@ -392,6 +401,20 @@ pub fn same_team(a: usize, b: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_mod_on_disk_is_named_old_current_or_missing() {
+        let dir = std::env::temp_dir().join(format!("m182_lockmod_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(lock_mod_status(&dir).contains("not next to the game"));
+        let src = dir.join("mods").join("m182_diag_build").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("mod.lua"), "print(1)").unwrap();
+        assert!(lock_mod_status(&dir).contains("older build"));
+        std::fs::write(src.join("mod.lua"), "if config.altars_need_permission ~= false then end").unwrap();
+        assert!(lock_mod_status(&dir).contains("has the altar rule"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn zones_parse_and_contain() {

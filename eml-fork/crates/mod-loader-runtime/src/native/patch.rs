@@ -65,12 +65,13 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
 
 extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     super::probe::hit(super::probe::ENEMY_PTRS);
+    let _span = super::perf::sampled(super::perf::QUESTION);
     let (fa, fb) = (read_faction(a), read_faction(b));
-    if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
-        return 0;
-    }
     if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isEnemy") {
         return hostile as u8;
+    }
+    if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
+        return 0;
     }
     let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
     team_check_report(fa, fb, hostile, "pointers");
@@ -85,6 +86,7 @@ extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
     super::probe::hit(super::probe::FRIEND_OPTS);
+    let _span = super::perf::sampled(super::perf::QUESTION);
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
     let (fa, fb) = (read_faction(a), read_faction(b));
     if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isFriend") {
@@ -167,6 +169,7 @@ pub fn restricted_permissions() -> u64 {
 
 extern "win64" fn filter_permissions(entity: u32, permissions: u32, caller: usize) -> u32 {
     super::probe::hit(super::probe::PERMISSIONS);
+    let _span = super::perf::sampled(super::perf::PERMISSION);
     super::outbox::pump();
     let bit = entity.wrapping_sub(1);
     let shown = if bit < 64 && PERMISSIONS_RESTRICTED.load(Ordering::Relaxed) >> bit & 1 != 0 {

@@ -406,6 +406,27 @@ pub fn zones_json(zones: &[Zone]) -> Value {
     })
 }
 
+/// The keys of a zone that this panel does not write (somebody else's notes, newer settings) are carried over
+/// from the file that is being replaced, matched by zone name.
+pub fn keep_unknown_zone_keys(existing: &str, mut fresh: Value) -> Value {
+    let Ok(Value::Object(old)) = serde_json::from_str::<Value>(existing) else { return fresh };
+    let Some(Value::Array(old)) = old.get("zones") else { return fresh };
+    let Some(Value::Array(list)) = fresh.get_mut("zones") else { return fresh };
+    for zone in list.iter_mut() {
+        let Some(name) = zone.get("name").and_then(|n| n.as_str()).map(|n| n.trim().to_lowercase()) else { continue };
+        let Some(Value::Object(before)) = old.iter().find(|o| o.get("name").and_then(|n| n.as_str()).is_some_and(|n| n.trim().to_lowercase() == name)) else { continue };
+        let Some(now) = zone.as_object_mut() else { continue };
+        for (key, value) in before {
+            if !ZONE_KEYS.contains(&key.as_str()) && !now.contains_key(key) {
+                now.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    fresh
+}
+
+const ZONE_KEYS: [&str; 13] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield", "guardian", "guardian_level"];
+
 pub fn parse_teams(text: &str) -> Vec<Team> {
     let Ok(Value::Object(root)) = serde_json::from_str::<Value>(text) else { return Vec::new() };
     let Some(Value::Array(list)) = root.get("teams") else { return Vec::new() };
@@ -595,7 +616,8 @@ impl SocialState {
     }
 
     pub fn save_zones(&mut self, dir: &Path) {
-        self.notice = match write_atomic(dir, ZONES_FILE, "m182_zones.json.tmp", &zones_json(&self.zones).to_string()) {
+        let kept = keep_unknown_zone_keys(&std::fs::read_to_string(dir.join(ZONES_FILE)).unwrap_or_default(), zones_json(&self.zones));
+        self.notice = match write_atomic(dir, ZONES_FILE, "m182_zones.json.tmp", &kept.to_string()) {
             Ok(()) => "Guardado. El juego lo aplica en un par de segundos.".to_string(),
             Err(e) => format!("Error: {e}"),
         };
@@ -1172,6 +1194,19 @@ mod tests {
         set_member(&mut teams, 0, &a, false);
         assert!(teams[0].leaders.is_empty());
         assert_eq!(teams_json(&teams, &[vec![]], &Default::default())["teams"][0]["leaders"], json!([]));
+    }
+
+    #[test]
+    fn saving_zones_keeps_the_keys_this_panel_does_not_know() {
+        let old = r#"{"zones":[{"name":"Home","x":1.0,"z":2.0,"radius":30.0,"note":"mine","shield":true},{"name":"Gone","x":0.0,"z":0.0,"radius":5.0,"note":"x"}]}"#;
+        let zones = vec![Zone::new("home".into(), 1.0, 2.0, 40.0), Zone::new("New".into(), 5.0, 5.0, 10.0)];
+        let saved = keep_unknown_zone_keys(old, zones_json(&zones));
+        assert_eq!(saved["zones"][0]["note"], "mine");
+        assert_eq!(saved["zones"][0]["radius"], 40.0);
+        assert!(saved["zones"][0].get("shield").is_none(), "a key the panel knows follows the panel");
+        assert!(saved["zones"][1].get("note").is_none());
+        assert_eq!(saved["zones"].as_array().unwrap().len(), 2);
+        assert_eq!(keep_unknown_zone_keys("not json", zones_json(&zones)), zones_json(&zones));
     }
 
     #[test]

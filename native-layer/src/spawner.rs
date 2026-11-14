@@ -93,6 +93,7 @@ static CALIBRATION_TRIES: AtomicU32 = AtomicU32::new(0);
 static CALIBRATION_DUMPS: AtomicU32 = AtomicU32::new(0);
 static PENDING: AtomicU32 = AtomicU32::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
+static LOCK_MOD_SAID: AtomicBool = AtomicBool::new(false);
 static LOG: Mutex<Option<File>> = Mutex::new(None);
 static CLOCK: OnceLock<Instant> = OnceLock::new();
 
@@ -2827,6 +2828,9 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             st.groups.zones.iter().filter(|z| z.locks()).count()
         ));
         super::shield::set_zones(dir, &st.groups.zones);
+        if st.groups.zones.iter().any(|z| z.locks()) && !LOCK_MOD_SAID.swap(true, Ordering::Relaxed) {
+            log(&format!("lock: {}", groups::lock_mod_status(dir)));
+        }
         let manager = SERVER_MGR.load(Ordering::SeqCst);
         if manager != 0 {
             super::guardian::zones_changed(manager, &st.groups.zones);
@@ -3494,6 +3498,7 @@ pub fn power_tick(st: &mut PowerState, dir: &std::path::Path, tick: u32, poll: b
         deliveries_tick();
     }
     if hosting && tick % 4 == 0 {
+        let _span = super::perf::span(super::perf::TICK);
         groups_tick(st, dir);
     }
     if hosting && tick % 16 == 0 {

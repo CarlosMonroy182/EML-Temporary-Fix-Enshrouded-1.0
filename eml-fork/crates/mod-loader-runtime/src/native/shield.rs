@@ -231,7 +231,14 @@ static SAY_PLACED: Budget = Budget::new(8);
 static SAY_PLACED_OUTSIDE: Budget = Budget::new(3);
 static SAY_PROTECTED: Budget = Budget::new(12);
 static SAY_UNPROTECTED: Budget = Budget::new(8);
-static SAY_LOADED: Budget = Budget::new(8);
+static SAY_PLACED_LIVE: Budget = Budget::new(40);
+static SAY_PLACED_OUTSIDE_LIVE: Budget = Budget::new(12);
+static SAY_PROTECTED_LIVE: Budget = Budget::new(40);
+static SAY_UNPROTECTED_LIVE: Budget = Budget::new(20);
+static LOAD_ENDS: Mutex<Option<Instant>> = Mutex::new(None);
+static TEMPLATES_SAID: Mutex<Vec<[u8; 16]>> = Mutex::new(Vec::new());
+const LOAD_PHASE: Duration = Duration::from_secs(45);
+const TEMPLATES_SAID_MAX: usize = 16;
 static SAY_REFUSED: Budget = Budget::new(2);
 static SAY_RELEASED: Budget = Budget::new(6);
 static SAY_NO_DESTRUCTIBLE: Budget = Budget::new(3);
@@ -244,6 +251,27 @@ const SLOT_RETRY_EVERY: u32 = 64;
 
 fn log(text: &str) {
     spawner::log(text);
+}
+
+/// Whether the world has finished loading: what is built from then on is a placement, and its lines have their own room in the log.
+fn live() -> bool {
+    let Ok(mut start) = LOAD_ENDS.lock() else { return false };
+    start.get_or_insert_with(Instant::now).elapsed() >= LOAD_PHASE
+}
+
+fn say(load: &Budget, placed: &Budget) -> bool {
+    if live() { placed.take() } else { load.take() }
+}
+
+fn first_of_template(template: &[u8]) -> bool {
+    let Ok(mut said) = TEMPLATES_SAID.lock() else { return false };
+    let mut key = [0u8; 16];
+    key.copy_from_slice(template);
+    if said.len() >= TEMPLATES_SAID_MAX || said.contains(&key) {
+        return false;
+    }
+    said.push(key);
+    true
 }
 
 fn fail(text: &str) {
@@ -534,12 +562,13 @@ fn catalog_known() -> bool {
     CATALOG.lock().is_ok_and(|c| c.is_some())
 }
 
-fn may_break(template: &[u8]) -> bool {
-    let Ok(catalog) = CATALOG.lock() else { return true };
-    let Some(set) = catalog.as_ref() else { return true };
+/// `None` while the catalog of breakable templates is not known, otherwise whether the template is in it.
+fn catalog_says(template: &[u8]) -> Option<bool> {
+    let catalog = CATALOG.lock().ok()?;
+    let set = catalog.as_ref()?;
     let mut key = [0u8; 16];
     key.copy_from_slice(template);
-    set.contains(&key)
+    Some(set.contains(&key))
 }
 
 fn health_of(p: &spawner::Placement, slots: &Slots) -> Option<(usize, [u8; HEALTH_SIZE])> {
@@ -597,6 +626,21 @@ fn make_immune_in_place(p: &spawner::Placement, slots: &Slots, id: u32) -> bool 
 /// divided back, immunity this module gave is taken off in a released place, and inside a protected zone the
 /// object is reported as protected or not.
 pub fn settle(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome {
+    let outcome = settle_in(manager, id, slots, areas);
+    if !matches!(outcome, Outcome::Protected { .. }) && immune_set(|set| set.contains(&id)).unwrap_or(false) {
+        match spawner::find_record(manager, id).and_then(spawner::placement) {
+            Some(p) => {
+                take_immunity_off(&p, slots, id);
+            }
+            None => {
+                immune_set(|set| set.remove(&id));
+            }
+        }
+    }
+    outcome
+}
+
+fn settle_in(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome {
     let Some(p) = spawner::find_record(manager, id).and_then(spawner::placement) else { return Outcome::Gone };
     let Some((item_at, item_size)) = spawner::component_address(&p, slots.used_item) else { return Outcome::NotBuilt };
     if item_size != USED_ITEM_SIZE {
@@ -678,7 +722,7 @@ fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>
     match outcome {
         Outcome::Protected { zone, item, disable, immune } => {
             PROTECTED_NOW.fetch_add(1, Ordering::Relaxed);
-            if SAY_PROTECTED.take() {
+            if say(&SAY_PROTECTED, &SAY_PROTECTED_LIVE) {
                 let how = match (disable, immune) {
                     (true, true) => "cannot be destroyed, immune to hits",
                     (true, false) => "cannot be destroyed",
@@ -689,7 +733,7 @@ fn report(_manager: usize, id: u32, outcome: &Outcome, tally: Option<&mut Tally>
         }
         Outcome::Unprotected { zone, item, shared } => {
             UNPROTECTED_NOW.fetch_add(1, Ordering::Relaxed);
-            if SAY_UNPROTECTED.take() {
+            if say(&SAY_UNPROTECTED, &SAY_UNPROTECTED_LIVE) {
                 let why = if *shared {
                     "its break threshold is shared by every object of its kind, so only creating it again can protect it"
                 } else {
@@ -735,6 +779,7 @@ fn work(manager: usize) {
     if !SWEEP_WANTED.load(Ordering::SeqCst) && !HAS_WORK.load(Ordering::Relaxed) {
         return;
     }
+    let _span = super::perf::span(super::perf::SHIELD);
     let Some(slots) = slots(manager) else { return };
     let Ok(mut work) = WORK.lock() else { return };
     if work.sweep.is_none() && SWEEP_WANTED.swap(false, Ordering::SeqCst) {
@@ -905,6 +950,35 @@ fn protection_entries(manager: usize, entries: &[u8], count: usize) -> Vec<(u32,
     extra
 }
 
+fn position_of(entries: &[u8]) -> Option<(f64, f64)> {
+    entry(entries, HASH_CURRENT_TRANSFORM, 24).and_then(|at| read_bytes(at, 24)).and_then(|b| meters(&b))
+}
+
+/// Gives the creation request the protection components it can carry; `only_immune` leaves out the one that cannot be taken off again.
+fn extend(manager: usize, desc: usize, head: &[u8], entries: &[u8], count: usize, seen: &mut Seen, only_immune: bool) {
+    let mut extra = protection_entries(manager, entries, count);
+    if only_immune {
+        extra.retain(|(hash, _, _)| *hash == HASH_COMBAT_FLAGS);
+    }
+    if extra.is_empty() {
+        return;
+    }
+    let mut list = entries.to_vec();
+    for (hash, data, size) in &extra {
+        list = with_entry(&list, *hash, *data, *size);
+    }
+    let mut patched = [0u8; 16];
+    patched[..8].copy_from_slice(&(list.as_ptr() as u64).to_le_bytes());
+    patched[8..].copy_from_slice(&((list.len() / ENTRY) as u64).to_le_bytes());
+    if spawner::write_bytes(desc + 0x18, &patched) {
+        seen.original.copy_from_slice(&head[0x18..0x28]);
+        seen.entries = list;
+        seen.immune_added = extra.iter().any(|(hash, _, _)| *hash == HASH_COMBAT_FLAGS);
+    } else {
+        fail(&format!("the component list of template {} could not be extended", spawner::guid_text(&head[4..20])));
+    }
+}
+
 /// Called before the game creates an entity from `desc`.
 pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     if !LOADED.load(Ordering::Relaxed) && desc >= 0x10000 && spawner::is_server(manager) {
@@ -918,6 +992,11 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     if head.len() < 0x28 {
         return None;
     }
+    let known = catalog_says(&head[4..20]);
+    if known == Some(false) {
+        return None;
+    }
+    let breakable = known.unwrap_or(true);
     let array = u64_at(&head, 0x18) as usize;
     let count = u64_at(&head, 0x20) as usize;
     if count > MAX_ENTRIES {
@@ -925,42 +1004,37 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     }
     let entries = if count == 0 { Vec::new() } else { read_bytes(array, count * ENTRY).filter(|e| e.len() == count * ENTRY)? };
     let carried = entry(&entries, HASH_USED_ITEM, USED_ITEM_SIZE).and_then(|at| read_bytes(at, 4)).map(|b| u32_at(&b, 0));
-    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable: may_break(&head[4..20]), immune_added: false, desc, original: [0; 16], entries: Vec::new() };
+    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable, immune_added: false, desc, original: [0; 16], entries: Vec::new() };
     let Some(item) = seen.built else {
-        if seen.breakable && !seen.carried && SAY_LOADED.take() {
-            log(&format!("object shield: created without a hammer item: template {} given [{}]", spawner::guid_text(&head[4..20]), describe(&entries)));
+        if seen.breakable && !seen.carried && known.is_some() {
+            let at = position_of(&entries);
+            let inside = at.is_some_and(|(x, z)| AREAS.lock().is_ok_and(|a| a.shielded.iter().any(|s| s.holds(x, z))));
+            let added = if at.is_none() || inside {
+                extend(manager, desc, &head, &entries, count, &mut seen, at.is_none());
+                !seen.entries.is_empty()
+            } else {
+                false
+            };
+            if first_of_template(&head[4..20]) {
+                let place = at.map(|(x, z)| format!("x={x:.1} z={z:.1}")).unwrap_or_else(|| "no position given".into());
+                log(&format!("object shield: created without a hammer item: template {} at {place}, immunity added: {added}; given [{}]", spawner::guid_text(&head[4..20]), describe(&entries)));
+            }
         }
         return Some(seen);
     };
 
-    let at = entry(&entries, HASH_CURRENT_TRANSFORM, 24).and_then(|at| read_bytes(at, 24)).and_then(|b| meters(&b));
+    let at = position_of(&entries);
     let zone = at.and_then(|(x, z)| AREAS.lock().ok().and_then(|a| a.shielded.iter().find(|s| s.holds(x, z)).map(|s| s.name.clone())));
     let place = at.map(|(x, z)| format!("x={x:.1} z={z:.1}")).unwrap_or_else(|| "no position given".into());
     let template = spawner::guid_text(&head[4..20]);
     match &zone {
-        Some(zone) if SAY_PLACED.take() => log(&format!("object shield: created in '{zone}': template {template} item {item} (id {kind:#x}) at {place}; given [{}]", describe(&entries))),
-        None if SAY_PLACED_OUTSIDE.take() => log(&format!("object shield: created outside every protected zone: template {template} item {item} at {place}; given [{}]", describe(&entries))),
+        Some(zone) if say(&SAY_PLACED, &SAY_PLACED_LIVE) => log(&format!("object shield: created in '{zone}': template {template} item {item} (id {kind:#x}) at {place}; given [{}]", describe(&entries))),
+        None if say(&SAY_PLACED_OUTSIDE, &SAY_PLACED_OUTSIDE_LIVE) => log(&format!("object shield: created outside every protected zone: template {template} item {item} at {place}; given [{}]", describe(&entries))),
         _ => {}
     }
     let protect = zone.is_some() && seen.breakable && item_class(item) != Some(Class::Skip);
     if protect {
-        let extra = protection_entries(manager, &entries, count);
-        if !extra.is_empty() {
-            let mut list = entries.clone();
-            for (hash, data, size) in &extra {
-                list = with_entry(&list, *hash, *data, *size);
-            }
-            let mut patched = [0u8; 16];
-            patched[..8].copy_from_slice(&(list.as_ptr() as u64).to_le_bytes());
-            patched[8..].copy_from_slice(&((list.len() / ENTRY) as u64).to_le_bytes());
-            if spawner::write_bytes(desc + 0x18, &patched) {
-                seen.original.copy_from_slice(&head[0x18..0x28]);
-                seen.entries = list;
-                seen.immune_added = extra.iter().any(|(hash, _, _)| *hash == HASH_COMBAT_FLAGS);
-            } else {
-                fail(&format!("the component list of template {template} could not be extended"));
-            }
-        }
+        extend(manager, desc, &head, &entries, count, &mut seen, false);
     }
     Some(seen)
 }
@@ -1567,6 +1641,39 @@ mod tests {
         let seen7 = before(w.at(), 0x36, far_desc.as_ptr() as usize).unwrap();
         assert_eq!(u64_at(&read_bytes(far_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 2);
         after(Some(seen7), w.at(), 0);
+
+        let other = super::super::config::parse_guid("22222222-2222-2222-2222-222222222222").unwrap();
+        *CATALOG.lock().unwrap() = Some(HashSet::from([guid]));
+        let not_breakable = descriptor(&other, &[]);
+        assert!(before(w.at(), 0x37, not_breakable.as_ptr() as usize).is_none());
+        let loaded = descriptor(&guid, &[]);
+        let seen8 = before(w.at(), 0x38, loaded.as_ptr() as usize).unwrap();
+        let head = read_bytes(loaded.as_ptr() as usize, 0x28).unwrap();
+        assert_eq!(u64_at(&head, 0x20), 1);
+        assert_eq!(u32_at(&read_bytes(u64_at(&head, 0x18) as usize, ENTRY).unwrap(), 0), HASH_COMBAT_FLAGS);
+        w.entity_with(35, Some((400.0, 400.0)), Some(TORCH), Some(10), None, false, Some(1));
+        after(Some(seen8), w.at(), 35);
+        assert!(IMMUNE_SET.lock().unwrap().as_ref().unwrap().contains(&35));
+        let flag35 = {
+            let p = spawner::find_record(w.at(), 35).and_then(spawner::placement).unwrap();
+            spawner::component_address(&p, CB).unwrap().0
+        };
+        assert_eq!(settle(w.at(), 35, &slots, &town), Outcome::Outside);
+        assert_eq!(read_flag(flag35), 0);
+        assert!(!IMMUNE_SET.lock().unwrap().as_ref().unwrap().contains(&35));
+        let at_home = with_entry(&[], HASH_CURRENT_TRANSFORM, inside.as_ptr() as usize, 56);
+        let home_desc = descriptor(&guid, &at_home);
+        let seen9 = before(w.at(), 0x39, home_desc.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(home_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 3);
+        after(Some(seen9), w.at(), 0);
+        let away = with_entry(&[], HASH_CURRENT_TRANSFORM, outside.as_ptr() as usize, 56);
+        let away_desc = descriptor(&guid, &away);
+        let seen10 = before(w.at(), 0x3a, away_desc.as_ptr() as usize).unwrap();
+        assert_eq!(u64_at(&read_bytes(away_desc.as_ptr() as usize, 0x28).unwrap(), 0x20), 1);
+        after(Some(seen10), w.at(), 0);
+        *CATALOG.lock().unwrap() = None;
+        WORK.lock().unwrap().waiting.clear();
+        HAS_WORK.store(false, Ordering::SeqCst);
 
         let client = World::new(1);
         assert!(before(client.at(), 0, placed.as_ptr() as usize).is_none());
