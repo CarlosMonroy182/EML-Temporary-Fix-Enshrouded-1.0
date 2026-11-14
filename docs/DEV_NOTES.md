@@ -272,3 +272,28 @@ Account id (Nov 8): the Dathost server's player table has no Steam id; each slot
 - Fast travel is not an interaction, so `InteractionLock` does not stop it. In `enshrouded_server.exe` the client sends player actions (`teleportAction`, `adminTeleport`, `flameAltarAction`, `waypointAction`, with `TeleporterType::Normal/FallenCrypt`) and an ECS system consumes them (`consumedTeleportAction`) and logs "Player EntityId %k teleported From %k to %k". That system (the function holding the log string, RVA 0x8dc5e in the Nov 13 server build, 0x7e1 bytes) is one inlined per-entity loop with no caller and no argument that names the player or the altar, so it has no point where a refusal can be returned safely. Nothing was hooked.
 - Possible later options, none verified: (a) a position jump into an owned zone seen by `groups_tick`, answered by moving the visitor back (a reaction after the fact, indistinguishable from other teleports); (b) removing the fast-travel component from altar templates in Lua (global, not per zone).
 - Admins: nothing in the damage or permission hooks looks at admin rights. `roster::is_admin` is used only for chat gating, free building and the visitor exemption (`lock_admins`, admins that stand in a zone of another team). Protection is components on the object (`DisableDestructible`, `CombatFlags.immune`), so it does not depend on who hits. The difference seen in the test fits two other causes: visitors of an owned zone lose `PERM_EDIT_WORLD`/`PERM_EDIT_BASE` (so the friend could not hurt anything), and the objects the admin broke were loaded ones that had no protection before `c60a7dd`. A per-zone switch that makes the protection hold against admin hits needs the hit itself to be intercepted, and no verified point for that exists, so none was added.
+
+## Round 4 (guardians, placements, lag)
+
+- Damage with guardians. Exe finding: the impact graph's `IsEnemy` / `IsFriend` nodes (lambdas at RVA 0x183670 and
+  0x183740) look up the faction VALUE of both entities (`0x181730(ctx, id)`) and call the values functions (0x940160,
+  0x9406f0), so the pointer hooks never see player-to-guardian or guardian-to-player hits. Value 11 against a player
+  value is "friend" in the matrix, hence no damage. The values hooks now receive `rbx` (the target's entity id at that
+  call site) and their return address (stub `stub_with_caller`); `guardian::values_hostile` only believes them when the
+  12 bytes at the return address are the lambda epilogue, and only ever turns "friend" into "enemy": a visitor (not of
+  the owning team, admins included) inside a guardian's zone and within 80 m of it is an enemy; when the target is the
+  guardian itself the attacker is unknown, so it counts as a fight if any visitor stands in the zone. Unproven in game;
+  the log line `(values) ... a guardian fight, answered enemy` (6 per run) shows when it fires.
+- Roster: a registered guardian is never tracked as a player (`track_player`, table scan, whole-table scan), never gets
+  a team faction (`lend_faction`, `faction_addresses`), and `resembles_host` remembers the host's definition so that a
+  host leaving no longer makes every stamina-bearing creature look like a player. The faction rewrite loop is logged 3 times.
+- Death: a guardian at zero health is dropped at once (no rewriting its faction) and its zone is not refilled until
+  restart; a one-time dump of its 16 to 32 byte components (`entity N died; components ...`) is logged to find its
+  LifeTime. Deleting the corpse is NOT done: no verified primitive (`expire_entity` needs a known LifeTime value).
+- Placements: `shield::placing()` is called by the payment hook for 3 s; while it is on, a creation that carries a used
+  item is protected as a normal object even when its template is not in the breakable catalog or its item is unknown,
+  and a line `hammer placement of template ... protected as a normal object` is logged.
+- Lag: the relation question costs about 5 ns per call (1 ms timed per 190k samples), so 6.6M calls per 30 s is about
+  0.15 percent of a core; the hook is not the lag. Cheaper anyway: the protected-zone lists are looked at only when the
+  answer is hostile (and not at all when nobody is protected), the team report takes no lock once every combination
+  was seen, `m182_players.json` is written only when it changes.

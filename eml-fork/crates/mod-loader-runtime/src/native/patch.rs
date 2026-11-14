@@ -38,7 +38,18 @@ static TEAM_CHECKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 
 static ZONE_PAIRS: std::sync::Mutex<Vec<(u8, u8, bool)>> = std::sync::Mutex::new(Vec::new());
 
+static ZONE_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
+    // Every combination of the player group is reported once: after that nothing here takes a lock.
+    if matches!(a, 7 | 8 | 11) && matches!(b, 7 | 8 | 11) {
+        let slot = |v: u8| if v == 7 { 0 } else if v == 8 { 1 } else { 2 };
+        let bit = 1u64 << ((slot(a) * 3 + slot(b)) * 2 + hostile as u32 + if via == "values" { 18 } else { 0 });
+        if ZONE_SEEN.load(Ordering::Relaxed) & bit != 0 && (TEAM_CHECKS.load(Ordering::Relaxed) >= 30 || faction::team_mask() == 0) {
+            return;
+        }
+        ZONE_SEEN.fetch_or(bit, Ordering::Relaxed);
+    }
     if faction::zone_pvp() && matches!(a, 7 | 8 | 11) && matches!(b, 7 | 8 | 11) {
         if let Ok(mut seen) = ZONE_PAIRS.lock() {
             if !seen.contains(&(a, b, hostile)) && seen.len() < 40 {
@@ -54,11 +65,14 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
     }
 }
 
-extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
+extern "win64" fn enemy_values(rcx: usize, rdx: usize, id: usize, ret: usize) -> u8 {
     super::probe::hit(super::probe::ENEMY_VALUES);
     let (a, b) = (rcx as u8, rdx as u8);
     super::guardian::note_values(a, b, "isEnemy");
-    let hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
+    let mut hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
+    if !hostile && super::guardian::values_hostile(a, b, id as u32, ret, "isEnemy") {
+        hostile = true;
+    }
     team_check_report(a, b, hostile, "values");
     hostile as u8
 }
@@ -70,18 +84,20 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isEnemy") {
         return hostile as u8;
     }
-    if groups::is_protected(a as usize) || groups::is_protected(b as usize) {
+    // The cheap answer first: a protected player only changes a hostile answer, so the lists are looked at only then.
+    let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
+    if hostile && (groups::is_protected(a as usize) || groups::is_protected(b as usize)) {
         return 0;
     }
-    let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
     team_check_report(fa, fb, hostile, "pointers");
     hostile as u8
 }
 
-extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
+extern "win64" fn friend_values(rcx: usize, rdx: usize, id: usize, ret: usize) -> u8 {
     super::probe::hit(super::probe::FRIEND_VALUES);
     super::guardian::note_values(rcx as u8, rdx as u8, "isFriend");
-    faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks()) as u8
+    let friend = faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks());
+    (friend && !super::guardian::values_hostile(rcx as u8, rdx as u8, id as u32, ret, "isFriend")) as u8
 }
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
@@ -136,9 +152,53 @@ macro_rules! stub {
     };
 }
 
-stub!(stub_enemy_values, enemy_values);
+// The values variants also receive the caller's `rbx` (the target's entity id inside the impact graph's nodes)
+// and their own return address, in r8 and r9; the hook only believes them after checking the code at the
+// return address. r8 and r9 are saved above and restored below, so the hook may clobber them.
+macro_rules! stub_with_caller {
+    ($name:ident, $target:path) => {
+        #[unsafe(naked)]
+        unsafe extern "win64" fn $name() {
+            core::arch::naked_asm!(
+                "push rcx",
+                "push rdx",
+                "push r8",
+                "push r9",
+                "push r10",
+                "push r11",
+                "sub rsp, 0x88",
+                "movups [rsp + 0x20], xmm0",
+                "movups [rsp + 0x30], xmm1",
+                "movups [rsp + 0x40], xmm2",
+                "movups [rsp + 0x50], xmm3",
+                "movups [rsp + 0x60], xmm4",
+                "movups [rsp + 0x70], xmm5",
+                "mov r8, rbx",
+                "mov r9, [rsp + 0xb8]",
+                "call {f}",
+                "movups xmm0, [rsp + 0x20]",
+                "movups xmm1, [rsp + 0x30]",
+                "movups xmm2, [rsp + 0x40]",
+                "movups xmm3, [rsp + 0x50]",
+                "movups xmm4, [rsp + 0x60]",
+                "movups xmm5, [rsp + 0x70]",
+                "add rsp, 0x88",
+                "pop r11",
+                "pop r10",
+                "pop r9",
+                "pop r8",
+                "pop rdx",
+                "pop rcx",
+                "ret",
+                f = sym $target,
+            );
+        }
+    };
+}
+
+stub_with_caller!(stub_enemy_values, enemy_values);
 stub!(stub_enemy_ptrs, enemy_ptrs);
-stub!(stub_friend_values, friend_values);
+stub_with_caller!(stub_friend_values, friend_values);
 stub!(stub_friend_opts, friend_opts);
 
 
@@ -809,6 +869,9 @@ fn pay_caller_is_new(caller: usize, pay: u8) -> bool {
 
 extern "win64" fn hook_pay_costs(context: usize, costs: usize, pay: u8, _r9: usize, caller: usize) -> u8 {
     super::probe::hit(super::probe::PAY);
+    if pay != 0 && !is_gather_site(caller) {
+        super::shield::placing();
+    }
     if LIVE.free_building() {
         if let Some(head) = super::spawn_probe::read_bytes(context, 16) {
             if head[0] == 0 {

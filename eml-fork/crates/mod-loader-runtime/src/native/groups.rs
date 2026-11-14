@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use serde::Deserialize;
@@ -370,14 +370,17 @@ pub fn team_of(addr: usize) -> u8 {
 
 static PROTECTED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
+static ANY_PROTECTED: AtomicBool = AtomicBool::new(false);
+
 pub fn set_protected(addrs: Vec<usize>) {
+    ANY_PROTECTED.store(!addrs.is_empty(), Ordering::Relaxed);
     if let Ok(mut p) = PROTECTED.lock() {
         *p = addrs;
     }
 }
 
 pub fn is_protected(addr: usize) -> bool {
-    if addr == 0 {
+    if addr == 0 || !ANY_PROTECTED.load(Ordering::Relaxed) {
         return false;
     }
     let Ok(p) = PROTECTED.try_lock() else { return false };

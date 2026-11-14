@@ -8,7 +8,7 @@
 //! happens only when the game creates an entity or the zones change: no timers, no hook on damage.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -231,6 +231,8 @@ static SAY_PLACED: Budget = Budget::new(8);
 static SAY_PLACED_OUTSIDE: Budget = Budget::new(3);
 static SAY_PROTECTED: Budget = Budget::new(12);
 static SAY_UNPROTECTED: Budget = Budget::new(8);
+static SAY_ODD_PLACED: Budget = Budget::new(4);
+static SAY_ODD_PLACED_LIVE: Budget = Budget::new(30);
 static SAY_PLACED_LIVE: Budget = Budget::new(40);
 static SAY_PLACED_OUTSIDE_LIVE: Budget = Budget::new(12);
 static SAY_PROTECTED_LIVE: Budget = Budget::new(40);
@@ -257,6 +259,25 @@ fn log(text: &str) {
 fn live() -> bool {
     let Ok(mut start) = LOAD_ENDS.lock() else { return false };
     start.get_or_insert_with(Instant::now).elapsed() >= LOAD_PHASE
+}
+
+static PLACING_UNTIL: AtomicU64 = AtomicU64::new(0);
+static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+const PLACING_WINDOW_MS: u64 = 3000;
+
+fn now_ms() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Called when the game charges (or waives) the price of something a player builds with the hammer: for a
+/// moment the creations that follow are treated as placements whatever their item or template looks like.
+pub fn placing() {
+    PLACING_UNTIL.store(now_ms() + PLACING_WINDOW_MS, Ordering::Relaxed);
+}
+
+fn placing_now() -> bool {
+    let until = PLACING_UNTIL.load(Ordering::Relaxed);
+    until != 0 && now_ms() < until
 }
 
 fn say(load: &Budget, placed: &Budget) -> bool {
@@ -647,7 +668,11 @@ fn settle_in(manager: usize, id: u32, slots: &Slots, areas: &Areas) -> Outcome {
         return Outcome::Failed(format!("the used-item component is {item_size} bytes, expected {USED_ITEM_SIZE}"));
     }
     let Some(item) = read_bytes(item_at, 4).map(|b| u32_at(&b, 0)) else { return Outcome::Gone };
-    let Some(class) = item_class(item) else { return Outcome::OtherItem(item) };
+    let class = match item_class(item) {
+        Some(class) => class,
+        None if immune_set(|set| set.contains(&id)) == Some(true) => Class::Normal,
+        None => return Outcome::OtherItem(item),
+    };
     let at = spawner::component_address(&p, slots.transform)
         .filter(|(_, size)| *size == TRANSFORM_SIZE)
         .and_then(|(addr, _)| read_bytes(addr, 24))
@@ -993,10 +1018,11 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
         return None;
     }
     let known = catalog_says(&head[4..20]);
-    if known == Some(false) {
+    let placing = placing_now();
+    if known == Some(false) && !placing {
         return None;
     }
-    let breakable = known.unwrap_or(true);
+    let breakable = known.unwrap_or(true) || placing;
     let array = u64_at(&head, 0x18) as usize;
     let count = u64_at(&head, 0x20) as usize;
     if count > MAX_ENTRIES {
@@ -1004,7 +1030,12 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
     }
     let entries = if count == 0 { Vec::new() } else { read_bytes(array, count * ENTRY).filter(|e| e.len() == count * ENTRY)? };
     let carried = entry(&entries, HASH_USED_ITEM, USED_ITEM_SIZE).and_then(|at| read_bytes(at, 4)).map(|b| u32_at(&b, 0));
-    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| item_class(*i).is_some()), breakable, immune_added: false, desc, original: [0; 16], entries: Vec::new() };
+    if known == Some(false) && carried.is_none() {
+        return None;
+    }
+    // A hammer placement is protected whatever its item is: an item the lists do not know counts as a normal one.
+    let guessed = placing && carried.is_some_and(|i| item_class(i).is_none());
+    let mut seen = Seen { carried: carried.is_some(), built: carried.filter(|i| guessed || item_class(*i).is_some()), breakable, immune_added: false, desc, original: [0; 16], entries: Vec::new() };
     let Some(item) = seen.built else {
         if seen.breakable && !seen.carried && known.is_some() {
             let at = position_of(&entries);
@@ -1031,6 +1062,13 @@ pub fn before(manager: usize, kind: u32, desc: usize) -> Option<Seen> {
         Some(zone) if say(&SAY_PLACED, &SAY_PLACED_LIVE) => log(&format!("object shield: created in '{zone}': template {template} item {item} (id {kind:#x}) at {place}; given [{}]", describe(&entries))),
         None if say(&SAY_PLACED_OUTSIDE, &SAY_PLACED_OUTSIDE_LIVE) => log(&format!("object shield: created outside every protected zone: template {template} item {item} at {place}; given [{}]", describe(&entries))),
         _ => {}
+    }
+    if (guessed || known == Some(false)) && say(&SAY_ODD_PLACED, &SAY_ODD_PLACED_LIVE) {
+        log(&format!(
+            "object shield: hammer placement of template {template} item {item}: {}{}protected as a normal object",
+            if guessed { "item not in the item list, " } else { "" },
+            if known == Some(false) { "template not in the breakable list, " } else { "" }
+        ));
     }
     let protect = zone.is_some() && seen.breakable && item_class(item) != Some(Class::Skip);
     if protect {
@@ -1646,6 +1684,23 @@ mod tests {
         *CATALOG.lock().unwrap() = Some(HashSet::from([guid]));
         let not_breakable = descriptor(&other, &[]);
         assert!(before(w.at(), 0x37, not_breakable.as_ptr() as usize).is_none());
+        // A hammer placement whose template the catalog does not list and whose item the lists do not know is
+        // protected all the same, but only while the game is charging for a build.
+        let odd_item = 777_001u32;
+        let odd_bytes = odd_item.to_le_bytes();
+        let odd_entries = with_entry(&with_entry(&[], HASH_CURRENT_TRANSFORM, inside.as_ptr() as usize, 56), HASH_USED_ITEM, odd_bytes.as_ptr() as usize, 4);
+        let odd = descriptor(&other, &odd_entries);
+        assert!(before(w.at(), 0x3a, odd.as_ptr() as usize).is_none());
+        placing();
+        assert!(placing_now());
+        let seen9 = before(w.at(), 0x3b, odd.as_ptr() as usize).expect("a placement is always looked at");
+        assert_eq!(u64_at(&read_bytes(odd.as_ptr() as usize, 0x28).unwrap(), 0x20), 4);
+        w.entity_with(36, Some((110.0, 110.0)), Some(odd_item), Some(10), None, true, Some(1));
+        after(Some(seen9), w.at(), 36);
+        assert!(IMMUNE_SET.lock().unwrap().as_ref().unwrap().contains(&36));
+        assert_eq!(settle(w.at(), 36, &slots, &town), Outcome::Protected { zone: "Town".into(), item: odd_item, disable: true, immune: true });
+        PLACING_UNTIL.store(0, Ordering::Relaxed);
+        assert!(!placing_now());
         let loaded = descriptor(&guid, &[]);
         let seen8 = before(w.at(), 0x38, loaded.as_ptr() as usize).unwrap();
         let head = read_bytes(loaded.as_ptr() as usize, 0x28).unwrap();

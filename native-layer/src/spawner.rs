@@ -306,6 +306,23 @@ pub(super) fn expire_entity(manager: usize, id: u32, known: &[u64]) -> bool {
     retire_entity(manager, id)
 }
 
+/// A short description of the components of 16 to 32 bytes an entity carries (to find out which one holds its lifetime).
+pub(super) fn small_components(manager: usize, id: u32) -> String {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return "no layout".into() };
+    slots
+        .iter()
+        .filter(|s| (16..=32).contains(&s.stride))
+        .take(12)
+        .map(|s| format!("#{}:{}b:{}", s.index, s.stride, read_bytes(s.addr, 16).map(|b| hex(&b)).unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The team of the player that owns this entity, 0 when it has none.
+pub(super) fn team_of_entity(manager: usize, id: u32) -> u8 {
+    faction_addresses(manager, id).into_iter().map(groups::team_of).find(|t| *t != 0).unwrap_or(0)
+}
+
 /// Position in meters of an entity that carries a transform component.
 pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;
@@ -2676,6 +2693,7 @@ struct Tracked {
     misses: u8,
 }
 
+static PLAYERS_TEXT: Mutex<String> = Mutex::new(String::new());
 static LISTED: Mutex<String> = Mutex::new(String::new());
 
 static TRACKED: Mutex<Vec<Tracked>> = Mutex::new(Vec::new());
@@ -2684,6 +2702,9 @@ static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
 const PLAYER_SLOTS: u32 = 17;
 
 fn track_player(manager: usize, id: u32) {
+    if super::guardian::is_guardian(id) {
+        return;
+    }
     let Ok(mut list) = TRACKED.lock() else { return };
     if TRACKED_MGR.swap(manager, Ordering::SeqCst) != manager {
         list.clear();
@@ -2728,7 +2749,7 @@ fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
     let Some((_, _, slots)) = entity_layout(manager, id) else { return genuine };
     let lent = LENT_FACTIONS.lock().map(|l| l.clone()).unwrap_or_default();
     for slot in &slots {
-        if slot.stride != 1 {
+        if slot.stride != 1 || super::guardian::is_guardian_faction(slot.addr) {
             continue;
         }
         let Some(b) = read_bytes(slot.addr, 1) else { continue };
@@ -2743,6 +2764,9 @@ fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
 }
 
 fn lend_faction(addr: usize, value: u8) -> bool {
+    if super::guardian::is_guardian_faction(addr) {
+        return false;
+    }
     let current = read_bytes(addr, 1).and_then(|b| b.first().copied());
     match current {
         Some(c) if c == value => true,
@@ -3015,7 +3039,13 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         return;
     }
     st.groups.last_slow = Some(now);
-    let _ = std::fs::write(dir.join(groups::PLAYERS_FILE), format!("[{}]", rows.join(",")));
+    let players_text = format!("[{}]", rows.join(","));
+    if let Ok(mut last) = PLAYERS_TEXT.lock() {
+        let path = dir.join(groups::PLAYERS_FILE);
+        if (*last != players_text || !path.exists()) && std::fs::write(&path, &players_text).is_ok() {
+            *last = players_text;
+        }
+    }
     if let Ok(mut list) = TRACKED.lock() {
         for p in list.iter_mut() {
             if dead.contains(&p.id) {
@@ -4136,6 +4166,7 @@ fn run_item_stats(cmd: Command) {
 // ones whose creation was seen by the hook (friends join through other paths).
 // ---------------------------------------------------------------------------------------------
 
+static LAST_HOST_DEF: AtomicUsize = AtomicUsize::new(0);
 static DEF_CLASS: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
 static DEF_MGR: AtomicUsize = AtomicUsize::new(0);
 
@@ -4143,6 +4174,7 @@ static DEF_SIMILAR: Mutex<Option<HashMap<(usize, usize), bool>>> = Mutex::new(No
 const PLAYER_SIMILARITY: f32 = 0.8;
 
 pub fn reset_player_cache() {
+    LAST_HOST_DEF.store(0, Ordering::Relaxed);
     if let Ok(mut g) = DEF_CLASS.lock() {
         *g = None;
     }
@@ -4177,7 +4209,12 @@ fn component_indices(p: &Placement) -> Option<Vec<usize>> {
 fn resembles_host(p: &Placement, id: u32) -> bool {
     let host_manager = SERVER_MGR.load(Ordering::SeqCst);
     let host_id = PLAYER_ID.load(Ordering::SeqCst);
-    let Some(host) = find_record(host_manager, host_id).and_then(placement) else { return true };
+    let Some(host) = find_record(host_manager, host_id).and_then(placement) else {
+        // The host left: what is built like the host the game last saw still counts, nothing else does.
+        let last = LAST_HOST_DEF.load(Ordering::Relaxed);
+        return last == 0 || last == p.def;
+    };
+    LAST_HOST_DEF.store(host.def, Ordering::Relaxed);
     if host.def == p.def {
         return true;
     }
@@ -4275,6 +4312,9 @@ pub fn track_table_players(manager: usize) -> usize {
             table_note(entry.index, entry.client, "its entity has no position yet", "");
             continue;
         }
+        if super::guardian::is_guardian(id) {
+            continue;
+        }
         if !def_is_player(manager, id, &p) {
             table_note(entry.index, entry.client, "the entity of its slot is not a player", &format!(" (entity {id})"));
             continue;
@@ -4325,6 +4365,9 @@ pub fn scan_players_once(manager: usize) -> usize {
             if guard.as_ref().and_then(|m| m.get(&p.def)) == Some(&false) {
                 continue;
             }
+        }
+        if super::guardian::is_guardian(id) {
+            continue;
         }
         if !def_is_player(manager, id, &p) {
             continue;
@@ -4588,7 +4631,7 @@ pub struct SpawnerSet {
     done_ids: Vec<String>,
 }
 
-fn health_now(manager: usize, id: u32) -> Option<u32> {
+pub(super) fn health_now(manager: usize, id: u32) -> Option<u32> {
     let (_, _, slots) = entity_layout(manager, id)?;
     for slot in &slots {
         if slot.stride == 40 {
