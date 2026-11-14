@@ -306,34 +306,6 @@ pub(super) fn expire_entity(manager: usize, id: u32, known: &[u64]) -> bool {
     retire_entity(manager, id)
 }
 
-/// A short description of the components of 16 to 32 bytes an entity carries (to find out which one holds its lifetime).
-pub(super) fn small_components(manager: usize, id: u32) -> String {
-    let Some((_, _, slots)) = entity_layout(manager, id) else { return "no layout".into() };
-    slots
-        .iter()
-        .filter(|s| (16..=32).contains(&s.stride))
-        .take(12)
-        .map(|s| format!("#{}:{}b:{}", s.index, s.stride, read_bytes(s.addr, 16).map(|b| hex(&b)).unwrap_or_default()))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// The team of the player that owns this entity, 0 when it has none.
-pub(super) fn team_of_entity(manager: usize, id: u32) -> u8 {
-    faction_addresses(manager, id).into_iter().map(groups::team_of).find(|t| *t != 0).unwrap_or(0)
-}
-
-/// Brings the lifetime component found at component slot `index` to its end (the game then removes the entity itself).
-pub(super) fn expire_with_life_slot(manager: usize, id: u32, index: usize) -> bool {
-    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
-    let Some(slot) = slots.iter().find(|s| s.index == index && s.stride == LIFE_STRIDE) else { return false };
-    let Some(mut b) = read_bytes(slot.addr, LIFE_STRIDE).filter(|b| b.len() >= LIFE_STRIDE) else { return false };
-    b[0..8].copy_from_slice(&1u64.to_le_bytes());
-    b[8..16].copy_from_slice(&1u64.to_le_bytes());
-    b[16] = 1;
-    write_bytes(slot.addr, &b)
-}
-
 /// Position in meters of an entity that carries a transform component.
 pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;
@@ -621,45 +593,6 @@ struct Request {
     item_amount: Option<u32>,
     item_guid: Option<String>,
     stats: Option<StatsPatch>,
-    /// Name of a zone with an owning team: the creature is placed there as that team's guardian.
-    guardian: Option<String>,
-    /// Name of a zone whose guardian is taken away.
-    guardian_remove: Option<String>,
-}
-
-static GUARDIAN_REQUEST: Mutex<Option<super::guardian::Post>> = Mutex::new(None);
-
-/// Places a saved guardian again, when nothing else waits to be spawned.
-fn queue_saved_guardian(post: super::guardian::Post, saved: &super::guardian::Saved) {
-    if PENDING.load(Ordering::SeqCst) != 0 {
-        log(&format!("guardian: '{}' will be placed again at a later moment: another spawn is waiting", post.zone));
-        return;
-    }
-    let mut s = match SPAWN.lock() {
-        Ok(s) => s.clone(),
-        Err(_) => return,
-    };
-    s.template = saved.template.clone();
-    s.level = saved.level.min(1000);
-    s.count = 1;
-    s.health = 0;
-    s.damage = 1.0;
-    log(&format!("guardian: placing the saved guardian of '{}' again ({} level {})", post.zone, saved.template, saved.level));
-    if let Ok(mut g) = GUARDIAN_REQUEST.lock() {
-        *g = Some(post);
-    }
-    if let Ok(mut t) = SPAWN_TAG.lock() {
-        *t = None;
-    }
-    if let Ok(mut r) = REQUEST.lock() {
-        *r = Some(s);
-    }
-    if let Ok(mut r) = REQUEST_AT.lock() {
-        *r = Some(saved.at);
-    }
-    REQUEST_OBJECT.store(false, Ordering::SeqCst);
-    REQUEST_FORWARD.store(false, Ordering::SeqCst);
-    PENDING.store(1, Ordering::SeqCst);
 }
 
 static DROP_FACTOR: OnceLock<f64> = OnceLock::new();
@@ -762,25 +695,6 @@ fn poll_request_in(dir: &std::path::Path) {
         log("panel request ignored: invalid file");
         return;
     };
-    if let Some(zone) = req.guardian_remove.as_deref().map(str::trim).filter(|z| !z.is_empty()) {
-        super::guardian::queue_remove(zone);
-        log(&format!("guardian: removal of the guardian of '{zone}' requested from the panel"));
-        return;
-    }
-    let post = match req.guardian.as_deref().map(|name| {
-        let zones = std::fs::read_to_string(dir.join(groups::ZONES_FILE)).map(|t| groups::parse_zones(&t)).unwrap_or_default();
-        super::guardian::post_for(&zones, name)
-    }) {
-        Some(Err(why)) => {
-            log(&format!("guardian: not placed: {why}"));
-            return;
-        }
-        Some(Ok(post)) => Some(post),
-        None => None,
-    };
-    if let Ok(mut g) = GUARDIAN_REQUEST.lock() {
-        *g = post;
-    }
     if let Ok(mut t) = SPAWN_TAG.lock() {
         *t = None;
     }
@@ -806,11 +720,6 @@ fn poll_request_in(dir: &std::path::Path) {
     }
     if let Some(v) = req.damage {
         s.damage = v.clamp(0.0, 1000.0);
-    }
-    if req.guardian.is_some() {
-        s.count = 1;
-        s.health = 0;
-        s.damage = 1.0;
     }
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some(s);
@@ -1577,7 +1486,7 @@ pub fn tick() {
 }
 
 pub fn before(manager: usize, edx: u32) {
-    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() && !super::divine::pending() && !super::guardian::removals_pending() {
+    if PENDING.load(Ordering::Relaxed) == 0 && AURA_PENDING.load(Ordering::Relaxed) == 0 && !super::vfx::pending() && !super::divine::pending() {
         return;
     }
     if edx == 0 || edx >= 0x8000_0000 || manager != SERVER_MGR.load(Ordering::Relaxed) || !is_server(manager) {
@@ -1586,7 +1495,6 @@ pub fn before(manager: usize, edx: u32) {
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
-    super::guardian::run_removals(manager);
     if PENDING.compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
         spawn_now(manager);
     }
@@ -1940,7 +1848,6 @@ fn requester_transform(manager: usize) -> Option<Vec<u8>> {
 }
 
 fn spawn_now(manager: usize) {
-    let post = GUARDIAN_REQUEST.lock().ok().and_then(|mut g| g.take());
     let tag = SPAWN_TAG.lock().ok().and_then(|mut t| t.take());
     let requested = REQUEST.lock().ok().and_then(|mut r| r.take());
     let settings = match requested {
@@ -1963,15 +1870,7 @@ fn spawn_now(manager: usize) {
         ));
         return;
     };
-    let mut at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
-    if let Some(post) = post.as_ref().filter(|p| !p.auto) {
-        let (x, y, z) = (le_i64(&t, 0) as f64 / METERS, le_i64(&t, 8) as f64 / METERS, le_i64(&t, 16) as f64 / METERS);
-        if (x - post.x).powi(2) + (z - post.z).powi(2) > post.radius * post.radius {
-            log(&format!("guardian: not placed: the admin stands at x={x:.0} z={z:.0}, outside '{}'; stand inside the zone and try again", post.zone));
-            return;
-        }
-        at = Some([x, y, z]);
-    }
+    let at = REQUEST_AT.lock().ok().and_then(|mut r| r.take());
     let mut base = (le_i64(&t, 0), le_i64(&t, 8), le_i64(&t, 16));
     if let Some(p) = at {
         base = ((p[0] * METERS) as i64, (p[1] * METERS) as i64, (p[2] * METERS) as i64);
@@ -2044,14 +1943,6 @@ fn spawn_now(manager: usize) {
             }
         }
 
-        if post.is_some() {
-            let at = entry_count as usize * 24;
-            write_u32(&mut entries.0, at, super::guardian::HASH_DO_NOT_SAVE);
-            write_u64(&mut entries.0, at + 8, super::guardian::DO_NOT_SAVE_DATA.as_ptr() as u64);
-            write_u64(&mut entries.0, at + 16, super::guardian::DO_NOT_SAVE_DATA.len() as u64);
-            entry_count += 1;
-        }
-
         let mut pickup = [0u8; PICKUP_ITEM_SIZE];
         if let Some(g) = &give {
             pickup[0..4].copy_from_slice(&g.item.to_le_bytes());
@@ -2075,17 +1966,6 @@ fn spawn_now(manager: usize) {
         if let Some(g) = give {
             if id != 0 {
                 verify_pickup(manager, id, &g);
-            }
-        }
-        if let (Some(post), true) = (&post, id != 0) {
-            if super::guardian::adopt(manager, id, post.clone()) {
-                if !post.auto {
-                    let spot = [(base.0.wrapping_add(dx)) as f64 / METERS, base.1.wrapping_add(dy) as f64 / METERS, (base.2.wrapping_add(dz)) as f64 / METERS];
-                    super::guardian::remember(&post.zone, &settings.template, settings.level, spot);
-                }
-            } else {
-                let removed = retire_entity(manager, id);
-                log(&format!("guardian: ERROR entity {id} was created but could not be made a guardian; {}", if removed { "it was taken out of the world again" } else { "it could not be taken out and keeps its own side, remove it by hand" }));
             }
         }
         if id != 0 && !object {
@@ -2713,9 +2593,6 @@ static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
 const PLAYER_SLOTS: u32 = 17;
 
 fn track_player(manager: usize, id: u32) {
-    if super::guardian::is_guardian(id) {
-        return;
-    }
     let Ok(mut list) = TRACKED.lock() else { return };
     if TRACKED_MGR.swap(manager, Ordering::SeqCst) != manager {
         list.clear();
@@ -2760,7 +2637,7 @@ fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
     let Some((_, _, slots)) = entity_layout(manager, id) else { return genuine };
     let lent = LENT_FACTIONS.lock().map(|l| l.clone()).unwrap_or_default();
     for slot in &slots {
-        if slot.stride != 1 || super::guardian::is_guardian_faction(slot.addr) {
+        if slot.stride != 1 {
             continue;
         }
         let Some(b) = read_bytes(slot.addr, 1) else { continue };
@@ -2775,9 +2652,6 @@ fn faction_addresses(manager: usize, id: u32) -> Vec<usize> {
 }
 
 fn lend_faction(addr: usize, value: u8) -> bool {
-    if super::guardian::is_guardian_faction(addr) {
-        return false;
-    }
     let current = read_bytes(addr, 1).and_then(|b| b.first().copied());
     match current {
         Some(c) if c == value => true,
@@ -2866,10 +2740,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
         if st.groups.zones.iter().any(|z| z.locks()) && !LOCK_MOD_SAID.swap(true, Ordering::Relaxed) {
             log(&format!("lock: {}", groups::lock_mod_status(dir)));
         }
-        let manager = SERVER_MGR.load(Ordering::SeqCst);
-        if manager != 0 {
-            super::guardian::zones_changed(manager, &st.groups.zones);
-        }
     }
     let teams_path = dir.join(groups::TEAMS_FILE);
     let teams_mtime = std::fs::metadata(&teams_path).and_then(|m| m.modified()).ok();
@@ -2953,7 +2823,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
     let mut inside_ids: Vec<u32> = Vec::new();
     let mut inside_at: Vec<(u32, i64, i64, i64)> = Vec::new();
     let mut visitors: Vec<usize> = Vec::new();
-    let mut standing: Vec<(f64, f64)> = Vec::new();
     for (seen_index, p) in seen.iter().enumerate() {
         let (id, number, team) = (p.id, p.number, p.team);
         match transform_of(manager, id) {
@@ -2969,7 +2838,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
                     id,
                     serde_json::Value::String(p.name.clone().unwrap_or_default())
                 ));
-                standing.push((x, z));
                 let in_safe = st.groups.zones.iter().any(|zone| zone.is_safe() && groups::inside(std::slice::from_ref(zone), x, z));
                 if in_safe {
                     inside_ids.push(id);
@@ -3021,9 +2889,6 @@ fn groups_tick(st: &mut PowerState, dir: &std::path::Path) {
             log(&format!("players: listed (number, entity, name, team) {listed}"));
             *last = listed;
         }
-    }
-    if let Some((post, saved)) = super::guardian::due(&st.groups.zones, &standing) {
-        queue_saved_guardian(post, &saved);
     }
     let entered: Vec<u32> = inside_ids.iter().copied().filter(|id| !st.zone_ids.contains(id)).collect();
     if st.zone_ids != inside_ids {
@@ -4323,9 +4188,6 @@ pub fn track_table_players(manager: usize) -> usize {
             table_note(entry.index, entry.client, "its entity has no position yet", "");
             continue;
         }
-        if super::guardian::is_guardian(id) {
-            continue;
-        }
         if !def_is_player(manager, id, &p) {
             table_note(entry.index, entry.client, "the entity of its slot is not a player", &format!(" (entity {id})"));
             continue;
@@ -4376,9 +4238,6 @@ pub fn scan_players_once(manager: usize) -> usize {
             if guard.as_ref().and_then(|m| m.get(&p.def)) == Some(&false) {
                 continue;
             }
-        }
-        if super::guardian::is_guardian(id) {
-            continue;
         }
         if !def_is_player(manager, id, &p) {
             continue;

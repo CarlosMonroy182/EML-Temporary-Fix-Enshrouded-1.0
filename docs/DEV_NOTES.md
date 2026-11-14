@@ -328,3 +328,25 @@ Account id (Nov 8): the Dathost server's player table has no Steam id; each slot
   closes the door or walls the altar in).
 - Flame pillar, ice pillar and fire or electric totems cannot be used in an enemy base: the world permissions of a visitor
   in an owned zone. Left as is.
+
+## Guardian removed (Nov 14, 2026)
+
+- Why: Carlos perceived lag in battle with guardians present. The log showed about 50k guardian questions per 30 s against
+  about 12M relation questions in total, so the guardian's own share was small, but he prefers it gone.
+- Removed: `guardian.rs` and everything that used it: the guardian branches of `enemy_ptrs` / `friend_opts`, the values
+  variants with entity id and return address (`stub_with_caller`, `note_values`), the placement / removal requests
+  (`guardian`, `guardian_remove` of the spawn request, `queue_saved_guardian`), `m182_guardians.json` (no longer read or
+  written; the file is not deleted), the roster exclusions, the `on_create` hook, the DoNotSave component added to guardians,
+  the corpse / LifeTime code and the guardian question counters. Panel: the guardian selector, level, "Place guardian
+  here" and "Remove guardian" with their English texts.
+- Kept: shield (placements always protected, `placing()`), altar lock, zones / teams / alliances, free building, powers,
+  spawners / raids, perf counters, panel. The `isEnemy` / `isFriend` hooks stay: safe zones, PvP zones and team factions
+  need them (`faction.rs`). Also kept from round 4: `resembles_host` remembers the host's definition, the protected lists
+  are looked at only for hostile answers, and `m182_players.json` is written only when it changes.
+- Files: `guardian` and `guardian_level` in `m182_zones.json` are neither read nor touched; the native zone merge and the
+  panel's `keep_unknown_zone_keys` treat them as unknown keys and keep them as they are (test
+  `saving_zones_keeps_the_guardian_keys_of_an_older_file`).
+- Guardians alive in the world: they were created with `DoNotSave`, so they are not stored in the savegame and are gone
+  after a restart (the log shows them placed again after one). No cleanup is implemented. A guardian that is alive when
+  the new version starts (only if the server is not restarted) keeps faction 14 until the server restarts.
+- Bring it back: commit `cc3b994` has the whole feature.

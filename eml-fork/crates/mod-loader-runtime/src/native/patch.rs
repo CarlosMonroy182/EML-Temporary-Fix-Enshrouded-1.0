@@ -65,14 +65,10 @@ fn team_check_report(a: u8, b: u8, hostile: bool, via: &str) {
     }
 }
 
-extern "win64" fn enemy_values(rcx: usize, rdx: usize, id: usize, ret: usize) -> u8 {
+extern "win64" fn enemy_values(rcx: usize, rdx: usize) -> u8 {
     super::probe::hit(super::probe::ENEMY_VALUES);
     let (a, b) = (rcx as u8, rdx as u8);
-    super::guardian::note_values(a, b, "isEnemy");
-    let mut hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
-    if let Some(verdict) = super::guardian::values_verdict(a, b, id as u32, ret, "isEnemy") {
-        hostile = verdict;
-    }
+    let hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
     team_check_report(a, b, hostile, "values");
     hostile as u8
 }
@@ -81,9 +77,6 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     super::probe::hit(super::probe::ENEMY_PTRS);
     let _span = super::perf::sampled(super::perf::QUESTION);
     let (fa, fb) = (read_faction(a), read_faction(b));
-    if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isEnemy") {
-        return hostile as u8;
-    }
     // The cheap answer first: a protected player only changes a hostile answer, so the lists are looked at only then.
     let hostile = faction::enemy(fa, fb, faction::pvp_effective(LIVE.pvp()));
     if hostile && (groups::is_protected(a as usize) || groups::is_protected(b as usize)) {
@@ -93,14 +86,9 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
     hostile as u8
 }
 
-extern "win64" fn friend_values(rcx: usize, rdx: usize, id: usize, ret: usize) -> u8 {
+extern "win64" fn friend_values(rcx: usize, rdx: usize) -> u8 {
     super::probe::hit(super::probe::FRIEND_VALUES);
-    super::guardian::note_values(rcx as u8, rdx as u8, "isFriend");
-    let mut friend = faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks());
-    if let Some(verdict) = super::guardian::values_verdict(rcx as u8, rdx as u8, id as u32, ret, "isFriend") {
-        friend = !verdict;
-    }
-    friend as u8
+    faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks()) as u8
 }
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {
@@ -108,9 +96,6 @@ extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8
     let _span = super::perf::sampled(super::perf::QUESTION);
     let flag = !opts.is_null() && unsafe { opts.add(1).read() } != 0;
     let (fa, fb) = (read_faction(a), read_faction(b));
-    if let Some(hostile) = super::guardian::relation(a as usize, fa, b as usize, fb, "isFriend") {
-        return !hostile as u8;
-    }
     faction::friend_opts(fa, fb, flag, LIVE.pvp_friend_checks()) as u8
 }
 
@@ -155,53 +140,9 @@ macro_rules! stub {
     };
 }
 
-// The values variants also receive the caller's `rbx` (the target's entity id inside the impact graph's nodes)
-// and their own return address, in r8 and r9; the hook only believes them after checking the code at the
-// return address. r8 and r9 are saved above and restored below, so the hook may clobber them.
-macro_rules! stub_with_caller {
-    ($name:ident, $target:path) => {
-        #[unsafe(naked)]
-        unsafe extern "win64" fn $name() {
-            core::arch::naked_asm!(
-                "push rcx",
-                "push rdx",
-                "push r8",
-                "push r9",
-                "push r10",
-                "push r11",
-                "sub rsp, 0x88",
-                "movups [rsp + 0x20], xmm0",
-                "movups [rsp + 0x30], xmm1",
-                "movups [rsp + 0x40], xmm2",
-                "movups [rsp + 0x50], xmm3",
-                "movups [rsp + 0x60], xmm4",
-                "movups [rsp + 0x70], xmm5",
-                "mov r8, rbx",
-                "mov r9, [rsp + 0xb8]",
-                "call {f}",
-                "movups xmm0, [rsp + 0x20]",
-                "movups xmm1, [rsp + 0x30]",
-                "movups xmm2, [rsp + 0x40]",
-                "movups xmm3, [rsp + 0x50]",
-                "movups xmm4, [rsp + 0x60]",
-                "movups xmm5, [rsp + 0x70]",
-                "add rsp, 0x88",
-                "pop r11",
-                "pop r10",
-                "pop r9",
-                "pop r8",
-                "pop rdx",
-                "pop rcx",
-                "ret",
-                f = sym $target,
-            );
-        }
-    };
-}
-
-stub_with_caller!(stub_enemy_values, enemy_values);
+stub!(stub_enemy_values, enemy_values);
 stub!(stub_enemy_ptrs, enemy_ptrs);
-stub_with_caller!(stub_friend_values, friend_values);
+stub!(stub_friend_values, friend_values);
 stub!(stub_friend_opts, friend_opts);
 
 

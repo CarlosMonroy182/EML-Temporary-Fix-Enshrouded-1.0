@@ -23,7 +23,6 @@ mod divine;
 mod guard;
 
 #[cfg(windows)]
-mod guardian;
 
 #[cfg(windows)]
 mod panel_host;

@@ -32,14 +32,11 @@ pub struct Zone {
     pub pvp: bool,
     /// Nothing built inside can be broken by hits, by anybody; the hammer still removes it.
     pub shield: bool,
-    /// Creature (position in `GUARDIANS`) and level of this zone's base guardian.
-    pub guardian: usize,
-    pub guardian_level: u32,
 }
 
 impl Zone {
     pub fn new(name: String, x: f64, z: f64, radius: f64) -> Self {
-        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false, shield: false, guardian: 0, guardian_level: GUARDIAN_LEVEL }
+        Self { name, x, z, radius, enabled: true, safe: true, team: 0, lock: false, lock_admins: false, pvp: false, shield: false }
     }
 }
 
@@ -257,26 +254,6 @@ pub struct SocialState {
     pub teams_seq: u32,
     pub teams_asked: Option<Instant>,
     pub teams_last: Option<Instant>,
-    pub guardian_sent: bool,
-}
-
-/// Creatures offered as a base guardian: template name and the name the game shows.
-pub const GUARDIANS: [(&str, &str); 5] = [
-    ("Enemy_Heavy_Fogger_Monstrosity_BossHealthBar", "Fell Monstrosity"),
-    ("Enemy_Fogger_Heavy_unarmored_BossHealthBar", "Fell Thunderbrute"),
-    ("Enemy_Midboss_Vukah_Bigfoot_BossHealthBar", "Vukah Brawler"),
-    ("Enemy_Wildbeast_Wolf_Heavy_BossHealthBar", "Direwolf"),
-    ("Enemy_Boss_Fog_Dragon", "Fell Dragon Youngling (vuela)"),
-];
-
-pub const GUARDIAN_LEVEL: u32 = 40;
-
-pub fn guardian_remove_request(zone: &str) -> Value {
-    json!({ "template": "", "guardian_remove": zone })
-}
-
-pub fn guardian_request(zone: &str, template: &str, level: u32) -> Value {
-    json!({ "template": template, "count": 1, "level": level.clamp(1, 100), "guardian": zone })
 }
 
 impl Default for SocialState {
@@ -308,7 +285,6 @@ impl Default for SocialState {
             teams_seq: 0,
             teams_asked: None,
             teams_last: None,
-            guardian_sent: false,
         }
     }
 }
@@ -380,8 +356,6 @@ pub fn parse_zones(text: &str) -> Vec<Zone> {
                 lock_admins: v.get("lock_admins").and_then(|e| e.as_bool()).unwrap_or(false),
                 pvp: v.get("pvp").and_then(|e| e.as_bool()).unwrap_or(false),
                 shield: v.get("shield").and_then(|e| e.as_bool()).unwrap_or(false),
-                guardian: v.get("guardian").and_then(|e| e.as_str()).and_then(|t| GUARDIANS.iter().position(|g| g.0 == t)).unwrap_or(0),
-                guardian_level: v.get("guardian_level").and_then(|e| e.as_u64()).map(|l| l.clamp(1, 100) as u32).unwrap_or(GUARDIAN_LEVEL),
             })
         })
         .collect()
@@ -395,10 +369,6 @@ pub fn zones_json(zones: &[Zone]) -> Value {
                 let mut v = json!({"name": z.name, "x": z.x, "z": z.z, "radius": z.radius, "enabled": z.enabled, "safe": z.safe, "team": z.team, "lock": z.lock && z.team != 0, "lock_admins": z.lock_admins, "pvp": z.pvp});
                 if z.shield {
                     v["shield"] = json!(true);
-                }
-                if z.guardian != 0 || z.guardian_level != GUARDIAN_LEVEL {
-                    v["guardian"] = json!(GUARDIANS[z.guardian.min(GUARDIANS.len() - 1)].0);
-                    v["guardian_level"] = json!(z.guardian_level.clamp(1, 100));
                 }
                 v
             })
@@ -425,7 +395,7 @@ pub fn keep_unknown_zone_keys(existing: &str, mut fresh: Value) -> Value {
     fresh
 }
 
-const ZONE_KEYS: [&str; 13] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield", "guardian", "guardian_level"];
+const ZONE_KEYS: [&str; 11] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield"];
 
 pub fn parse_teams(text: &str) -> Vec<Team> {
     let Ok(Value::Object(root)) = serde_json::from_str::<Value>(text) else { return Vec::new() };
@@ -835,8 +805,6 @@ impl App {
             ui.label(RichText::new("El PvP está activado en todo el mundo (pestaña PvP). Apágalo ahí para que las zonas de PvP siempre activo se noten.").color(GOLD));
         }
         let team_names: Vec<String> = self.social.teams.iter().map(|t| t.name.clone()).collect();
-        let mut guardian_for: Option<(String, usize, u32)> = None;
-        let mut guardian_away: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (i, z) in self.social.zones.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -888,24 +856,6 @@ impl App {
                                 changed |= ui.checkbox(&mut z.lock_admins, "También a los administradores (para probarlo)").changed();
                             }
                         });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Guardián de la base (prueba)");
-                            egui::ComboBox::from_id_salt(("zone_guardian", i)).selected_text(GUARDIANS[z.guardian.min(GUARDIANS.len() - 1)].1).show_ui(ui, |ui| {
-                                for (n, (_, name)) in GUARDIANS.iter().enumerate() {
-                                    changed |= ui.selectable_value(&mut z.guardian, n, *name).changed();
-                                }
-                            });
-                            ui.label("Nivel");
-                            changed |= ui.add(egui::DragValue::new(&mut z.guardian_level).speed(1.0).range(1..=100)).changed();
-                            if button(ui, "Colocar guardián aquí", Vec2::new(190.0, 26.0), true, false) {
-                                guardian_for = Some((z.name.clone(), z.guardian.min(GUARDIANS.len() - 1), z.guardian_level));
-                            }
-                            if button(ui, "Quitar guardián", Vec2::new(150.0, 26.0), true, false) {
-                                guardian_away = Some(z.name.clone());
-                            }
-                        })
-                        .response
-                        .on_hover_text("Ponte dentro de la zona y pulsa. Cada zona tiene su propio guardián, con su criatura y su nivel; si pulsas otra vez, solo se reemplaza el de esta zona. Aparece una criatura poderosa que defiende la zona con su propia vida y daño: no ataca al equipo dueño y ataca a cualquier otro jugador y a las criaturas hostiles. Se queda: tras reiniciar el servidor vuelve a aparecer solo cuando alguien entra en la zona. «Quitar guardián» lo quita de esta zona y no vuelve.");
                     }
                 });
             }
@@ -921,47 +871,9 @@ impl App {
             let dir = self.dir.clone();
             self.social.save_zones(&dir);
         }
-        if let Some((zone, pick, level)) = guardian_for {
-            self.place_guardian(&zone, GUARDIANS[pick].0, level);
-        }
-        if let Some(zone) = guardian_away {
-            self.remove_guardian(&zone);
-        }
         if !self.social.notice.is_empty() {
             ui.label(RichText::new(&self.social.notice).color(GOOD));
         }
-        if self.social.guardian_sent {
-            let (text, color) = self.status_text();
-            if !text.is_empty() {
-                ui.label(RichText::new(text).color(color));
-            }
-        }
-    }
-
-    fn remove_guardian(&mut self, zone: &str) {
-        self.social.guardian_sent = true;
-        let request = guardian_remove_request(zone);
-        self.status = match write_atomic(&self.dir, crate::REQUEST_FILE, crate::REQUEST_TMP, &request.to_string()) {
-            Ok(()) => crate::Status::Waiting(Instant::now()),
-            Err(e) => crate::Status::Error(e),
-        };
-    }
-
-    fn place_guardian(&mut self, zone: &str, template: &str, level: u32) {
-        self.social.guardian_sent = true;
-        let inside = match (self.player, self.social.zones.iter().find(|z| z.name == zone)) {
-            (Some(p), Some(z)) => Some(zone_at(std::slice::from_ref(z), p[0], p[2]).is_some()),
-            _ => None,
-        };
-        if inside == Some(false) && !crate::remote::active() {
-            self.status = crate::Status::Error(format!("Ponte dentro de la zona «{zone}» y vuelve a pulsar."));
-            return;
-        }
-        let request = guardian_request(zone, template, level);
-        self.status = match write_atomic(&self.dir, crate::REQUEST_FILE, crate::REQUEST_TMP, &request.to_string()) {
-            Ok(()) => crate::Status::Waiting(Instant::now()),
-            Err(e) => crate::Status::Error(e),
-        };
     }
 
     pub fn teams_tab(&mut self, ui: &mut egui::Ui) {
@@ -1398,34 +1310,14 @@ mod tests {
     }
 
     #[test]
-    fn each_zone_keeps_its_own_guardian_choice() {
-        let mut a = Zone::new("Keep".into(), 0.0, 0.0, 30.0);
-        a.team = 1;
-        a.guardian = 3;
-        a.guardian_level = 70;
-        let mut b = Zone::new("Tower".into(), 90.0, 0.0, 30.0);
-        b.team = 2;
-        let value = zones_json(&[a, b]);
-        assert_eq!((value["zones"][0]["guardian"].as_str(), value["zones"][0]["guardian_level"].as_u64()), (Some(GUARDIANS[3].0), Some(70)));
-        assert!(value["zones"][1].get("guardian").is_none());
-        let back = parse_zones(&value.to_string());
-        assert_eq!((back[0].guardian, back[0].guardian_level), (3, 70));
-        assert_eq!((back[1].guardian, back[1].guardian_level), (0, GUARDIAN_LEVEL));
-    }
-
-    #[test]
-    fn the_removal_request_names_only_the_zone() {
-        let r = guardian_remove_request("Keep");
-        assert_eq!((r["guardian_remove"].as_str(), r["template"].as_str()), (Some("Keep"), Some("")));
-        assert!(r.get("guardian").is_none());
-    }
-
-    #[test]
-    fn the_guardian_request_names_the_zone_and_keeps_the_level_in_range() {
-        let r = guardian_request("Keep", GUARDIANS[0].0, 500);
-        assert_eq!((r["guardian"].as_str(), r["count"].as_u64(), r["level"].as_u64()), (Some("Keep"), Some(1), Some(100)));
-        assert_eq!(r["template"], GUARDIANS[0].0);
-        assert!(GUARDIANS.iter().all(|(t, n)| !t.is_empty() && !n.is_empty()));
+    fn saving_zones_keeps_the_guardian_keys_of_an_older_file() {
+        let old = r#"{"zones":[{"name":"Keep","x":1.0,"z":2.0,"radius":30.0,"team":1,"guardian":"Enemy_Wildbeast_Wolf_Heavy_BossHealthBar","guardian_level":55}]}"#;
+        let mut zone = Zone::new("Keep".into(), 1.0, 2.0, 30.0);
+        zone.team = 1;
+        let saved = keep_unknown_zone_keys(old, zones_json(&[zone]));
+        assert_eq!(saved["zones"][0]["guardian"], "Enemy_Wildbeast_Wolf_Heavy_BossHealthBar");
+        assert_eq!(saved["zones"][0]["guardian_level"], 55);
+        assert_eq!(parse_zones(old).len(), 1);
     }
 
     #[test]

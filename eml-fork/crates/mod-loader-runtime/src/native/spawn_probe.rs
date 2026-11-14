@@ -141,7 +141,6 @@ extern "win64" fn hook_create(manager: usize, edx: u32, desc: usize, r9: usize, 
     if hooked {
         spawner::before(manager, edx);
     }
-    super::guardian::on_create(manager);
     let shield = super::shield::before(manager, edx, desc);
     let before_done = started.elapsed();
     let ret = original_create(manager, edx, desc, r9);

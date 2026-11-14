@@ -631,7 +631,7 @@ impl serde::Serialize for ZonesDoc {
 
 /// The keys the panel writes for a zone, in the order it writes them. Any other key of a zone belongs to
 /// somebody else (an older or newer panel, the administrator) and is left as it is.
-const ZONE_KEYS: [&str; 13] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield", "guardian", "guardian_level"];
+const ZONE_KEYS: [&str; 11] = ["name", "x", "z", "radius", "enabled", "safe", "team", "lock", "lock_admins", "pvp", "shield"];
 
 /// `old` with the panel's keys taken from `new` (a key `new` leaves out is removed) and everything else kept in place.
 fn merged_zone(old: &Ordered, new: &Value) -> Ordered {
