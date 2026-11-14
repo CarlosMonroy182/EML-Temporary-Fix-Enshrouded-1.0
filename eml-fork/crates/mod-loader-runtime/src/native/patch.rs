@@ -70,8 +70,8 @@ extern "win64" fn enemy_values(rcx: usize, rdx: usize, id: usize, ret: usize) ->
     let (a, b) = (rcx as u8, rdx as u8);
     super::guardian::note_values(a, b, "isEnemy");
     let mut hostile = faction::enemy(a, b, faction::pvp_effective(LIVE.pvp()));
-    if !hostile && super::guardian::values_hostile(a, b, id as u32, ret, "isEnemy") {
-        hostile = true;
+    if let Some(verdict) = super::guardian::values_verdict(a, b, id as u32, ret, "isEnemy") {
+        hostile = verdict;
     }
     team_check_report(a, b, hostile, "values");
     hostile as u8
@@ -96,8 +96,11 @@ extern "win64" fn enemy_ptrs(a: *const u8, b: *const u8) -> u8 {
 extern "win64" fn friend_values(rcx: usize, rdx: usize, id: usize, ret: usize) -> u8 {
     super::probe::hit(super::probe::FRIEND_VALUES);
     super::guardian::note_values(rcx as u8, rdx as u8, "isFriend");
-    let friend = faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks());
-    (friend && !super::guardian::values_hostile(rcx as u8, rdx as u8, id as u32, ret, "isFriend")) as u8
+    let mut friend = faction::friend(rcx as u8, rdx as u8, LIVE.pvp_friend_checks());
+    if let Some(verdict) = super::guardian::values_verdict(rcx as u8, rdx as u8, id as u32, ret, "isFriend") {
+        friend = !verdict;
+    }
+    friend as u8
 }
 
 extern "win64" fn friend_opts(a: *const u8, b: *const u8, opts: *const u8) -> u8 {

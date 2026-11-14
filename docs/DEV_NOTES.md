@@ -297,3 +297,23 @@ Account id (Nov 8): the Dathost server's player table has no Steam id; each slot
   0.15 percent of a core; the hook is not the lag. Cheaper anyway: the protected-zone lists are looked at only when the
   answer is hostile (and not at all when nobody is protected), the team report takes no lock once every combination
   was seen, `m182_players.json` is written only when it changes.
+
+## Round 5 (guardian faction, corpse, relation traffic)
+
+- Test as a normal player: the values answer (7 vs 11 on the guardian, `IsEnemy` node) fired but normal melee did not hurt
+  the guardian, while charged and magic hits did. Reading `0x940160` in the exe: every pair inside {7, 8, 11} is "friend",
+  and the game's other damage code (for example `0x138230`, `0xf2380`) uses the pointer variant and faction tests of its
+  own, so a guardian that carries 11 is a friend for every normal hit; attacks stamped with the attacker faction
+  HitAll (1) or HitOthers (9) pass, which fits charged and magic hits. We cannot reach every such test, so the guardian
+  now carries a faction the matrix holds hostile to the players both ways (14, the Cyclops': `7 vs 14` and `14 vs 7`
+  are enemies, only `14 vs 6` is friend) and the game treats it like any hostile creature in all of its damage paths.
+  The owning team is kept safe at the places we do reach: the pointer questions (AI targeting, by faction address) and the
+  impact graph's value nodes (`values_verdict`, both directions: friend for the owning team, enemy for visitors in the
+  zone). Consequence: a hit of an owner on the guardian, or an attack of the guardian that lands on an owner by area, is
+  decided by the game's matrix (enemy). Unproven in game.
+- Corpse: the dump of the dead guardian listed four 24 byte components (#103, #110, #135, #272). The guardian now looks
+  for the `LifeTime` component by its hash (0xf22c253c) and, if it carries it, sets it to its end as the glows do; if it has
+  none the log says so (`entity N died: ...`) and nothing is deleted. No other deletion primitive is verified.
+- Traffic: the relation question volume (13 to 17 million per 30 s, against 1.2 to 6.7 million in the previous run, with no
+  creations in the windows) cannot be told apart from the creatures alive. A line `N relation questions about
+  guardians in the last 30 s (X answered enemy, Y friend)` (every 30 s, 20 times a run) now says how much of it involves a guardian.

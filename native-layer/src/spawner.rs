@@ -323,6 +323,17 @@ pub(super) fn team_of_entity(manager: usize, id: u32) -> u8 {
     faction_addresses(manager, id).into_iter().map(groups::team_of).find(|t| *t != 0).unwrap_or(0)
 }
 
+/// Brings the lifetime component found at component slot `index` to its end (the game then removes the entity itself).
+pub(super) fn expire_with_life_slot(manager: usize, id: u32, index: usize) -> bool {
+    let Some((_, _, slots)) = entity_layout(manager, id) else { return false };
+    let Some(slot) = slots.iter().find(|s| s.index == index && s.stride == LIFE_STRIDE) else { return false };
+    let Some(mut b) = read_bytes(slot.addr, LIFE_STRIDE).filter(|b| b.len() >= LIFE_STRIDE) else { return false };
+    b[0..8].copy_from_slice(&1u64.to_le_bytes());
+    b[8..16].copy_from_slice(&1u64.to_le_bytes());
+    b[16] = 1;
+    write_bytes(slot.addr, &b)
+}
+
 /// Position in meters of an entity that carries a transform component.
 pub(super) fn entity_position(manager: usize, id: u32) -> Option<[f64; 3]> {
     let (_, _, slots) = entity_layout(manager, id)?;

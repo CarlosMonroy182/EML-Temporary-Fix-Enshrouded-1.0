@@ -1,5 +1,5 @@
 //! Base guardian (trial): a creature an admin places for the team that owns a zone, at most one per zone.
-//! It carries the faction of the player group, so it is hostile to every creature, and the relation hooks
+//! It carries a faction of its own that the game's matrix holds hostile to the players, and the relation hooks
 //! decide the rest by the address of its faction (and of the attack entities that copy it, its kin): it is
 //! a friend of the owning team (and of the teams `friends` names) and an enemy of every other player. When
 //! the guardian stands outside its zone the hooks stop naming targets, so the game's own AI sends it home.
@@ -16,10 +16,14 @@ use super::groups::{self, Zone};
 use super::spawn_probe::read_bytes;
 use super::{shield, spawner};
 
-/// The faction the guardian is given: the player group's `PlayerAlly`.
-pub const FACTION_VALUE: u8 = 11;
+/// The faction the guardian is given: one the game's own matrix holds as an enemy of the players (and of the
+/// raiders' side the same way), so that the melee, charged and magic hits of the game's damage paths treat it as
+/// any hostile creature, and that almost no creature has of its own (the Cyclops'). The owning team is kept safe
+/// by the relation hooks, which decide by the address of its faction.
+pub const FACTION_VALUE: u8 = 14;
 pub const HASH_DO_NOT_SAVE: u32 = 0x41e6_78ea;
 pub const DO_NOT_SAVE_DATA: [u8; 1] = [0];
+const HASH_LIFE_TIME: u32 = 0xf22c_253c;
 const HASH_FACTION: u32 = 0xa1f3_0f21;
 const HASH_ENEMY_SETTINGS: u32 = 0x67fe_5508;
 const FACTION_COMPONENT: usize = 205;
@@ -185,6 +189,7 @@ pub fn relation(a: usize, fa: u8, b: usize, fb: u8, asked: &str) -> Option<bool>
     refresh_positions(&mut guardians, spawner::server_manager());
     let away = |g: &Guardian| g.outside.is_some_and(|(_, out)| out);
     let hostile = decide(&guardians, (a, fa), (b, fb), &groups::team_of, &away)?;
+    count_question(hostile);
     if ASKED_COUNT.load(Ordering::Relaxed) < MAX_ASKED {
         let g = guardians[index].clone();
         drop(guardians);
@@ -277,17 +282,17 @@ fn hit_between_enemies(guardians: &[Guardian], a: u8, b: u8, target: u32, scene:
 
 /// The hook point of the values variants (impact graph). `ret` is the return address of the values function and
 /// `id` the register that holds the target's entity there: both are only believed when the code at `ret` is the
-/// impact graph's own. True only when the game's answer "not enemies" has to become "enemies".
-pub fn values_hostile(a: u8, b: u8, id: u32, ret: usize, asked: &str) -> bool {
-    if !ANY.load(Ordering::Relaxed) || (a != FACTION_VALUE && b != FACTION_VALUE) || !player_group(a) || !player_group(b) {
-        return false;
+/// impact graph's own. `Some(true)` means enemies, `Some(false)` friends, `None` that the game's answer stands.
+pub fn values_verdict(a: u8, b: u8, id: u32, ret: usize, asked: &str) -> Option<bool> {
+    if !ANY.load(Ordering::Relaxed) || (a != FACTION_VALUE && b != FACTION_VALUE) || !(player_group(a) || player_group(b)) {
+        return None;
     }
     if read_bytes(ret, IMPACT_RETURN.len()).as_deref() != Some(&IMPACT_RETURN[..]) {
-        return false;
+        return None;
     }
     let manager = spawner::server_manager();
     let list = {
-        let Ok(mut held) = GUARDIANS.try_lock() else { return false };
+        let Ok(mut held) = GUARDIANS.try_lock() else { return None };
         refresh_positions(&mut held, manager);
         held.clone()
     };
@@ -304,10 +309,36 @@ pub fn values_hostile(a: u8, b: u8, id: u32, ret: usize, asked: &str) -> bool {
             .collect(),
     };
     let verdict = hit_between_enemies(&list, a, b, id, &scene, &away);
-    if verdict == Some(true) && SAID_HIT.fetch_add(1, Ordering::Relaxed) < 6 {
-        log(&format!("{asked} (values) {a} vs {b} on entity {id}: a guardian fight, answered enemy (the game said friend)"));
+    if verdict.is_some() && SAID_HIT.fetch_add(1, Ordering::Relaxed) < 6 {
+        log(&format!("{asked} (values) {a} vs {b} on entity {id}: guardian fight, answered {}", if verdict == Some(true) { "enemy" } else { "friend" }));
     }
-    verdict == Some(true)
+    verdict
+}
+
+static GQ_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GQ_HOSTILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GQ_LINES: AtomicU32 = AtomicU32::new(0);
+static GQ_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Counts the pointer questions that involve a guardian and says so at most once every 30 s (20 times a run), to
+/// tell how much of the game's relation traffic is about guardians.
+fn count_question(hostile: bool) {
+    GQ_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if hostile {
+        GQ_HOSTILE.fetch_add(1, Ordering::Relaxed);
+    }
+    let Ok(mut last) = GQ_LAST.try_lock() else { return };
+    let now = Instant::now();
+    match *last {
+        None => *last = Some(now),
+        Some(at) if at.elapsed() >= Duration::from_secs(30) && GQ_LINES.fetch_add(1, Ordering::Relaxed) < 20 => {
+            *last = Some(now);
+            let (total, hostile) = (GQ_TOTAL.swap(0, Ordering::Relaxed), GQ_HOSTILE.swap(0, Ordering::Relaxed));
+            drop(last);
+            log(&format!("{total} relation questions about guardians in the last 30 s ({hostile} answered enemy, {} friend)", total - hostile));
+        }
+        _ => {}
+    }
 }
 
 fn distance_text(g: &Guardian) -> String {
@@ -585,6 +616,8 @@ pub fn refresh(manager: usize) {
             if DIED_SAID.fetch_add(1, Ordering::Relaxed) < 3 {
                 log(&format!("entity {} died; components of 16 to 32 bytes it carries: {}", g.id, spawner::small_components(manager, g.id)));
             }
+            let removed = shield::component_index(manager, HASH_LIFE_TIME).is_some_and(|index| spawner::expire_with_life_slot(manager, g.id, index));
+            log(&format!("entity {} died: {}", g.id, if removed { "its corpse was handed to the game's lifetime to be removed" } else { "it has no lifetime component (slot of LifeTime unknown or absent), the corpse stays for the game to remove" }));
             continue;
         }
         let Some(addr) = faction_at(manager, g.id) else { continue };
@@ -651,34 +684,34 @@ mod tests {
     #[test]
     fn the_owning_team_is_a_friend_and_every_other_player_an_enemy() {
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams, &near), Some(false));
-        assert_eq!(decide(&g, (0x101, 8), (0x1000, 11), &teams, &near), Some(false));
-        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &near), Some(true));
-        assert_eq!(decide(&g, (0x300, 7), (0x1000, 11), &teams, &near), Some(true));
-        assert_eq!(decide(&g, (0x1000, 11), (0x300, 8), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x101, 8), (0x1000, FACTION_VALUE), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x300, 7), (0x1000, FACTION_VALUE), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x300, 8), &teams, &near), Some(true));
     }
 
     #[test]
     fn creatures_and_unrelated_pairs_stay_with_the_game() {
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x400, 0), &teams, &near), None);
-        assert_eq!(decide(&g, (0x400, 0), (0x1000, 11), &teams, &near), None);
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x400, 0), &teams, &near), None);
+        assert_eq!(decide(&g, (0x400, 0), (0x1000, FACTION_VALUE), &teams, &near), None);
         assert_eq!(decide(&g, (0x100, 7), (0x200, 7), &teams, &near), None);
-        assert_eq!(decide(&[], (0x1000, 11), (0x100, 7), &teams, &near), None);
+        assert_eq!(decide(&[], (0x1000, FACTION_VALUE), (0x100, 7), &teams, &near), None);
     }
 
     #[test]
     fn guardians_of_one_team_are_friends_and_of_two_teams_enemies() {
         let g = [guardian(0x1000, 1), guardian(0x1100, 1), guardian(0x1200, 2)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x1100, 11), &teams, &near), Some(false));
-        assert_eq!(decide(&g, (0x1000, 11), (0x1200, 11), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x1100, FACTION_VALUE), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x1200, FACTION_VALUE), &teams, &near), Some(true));
     }
 
     #[test]
     fn nobody_is_a_friend_of_a_guardian_without_a_team() {
         let g = [guardian(0x1000, 0)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x300, 7), &teams, &near), Some(true));
-        assert_eq!(decide(&g, (0x1000, 11), (0x100, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x300, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x100, 7), &teams, &near), Some(true));
     }
 
     #[test]
@@ -707,30 +740,30 @@ mod tests {
         assert_eq!(old.id, 1);
         let ids: Vec<u32> = list.iter().map(|g| g.id).collect();
         assert_eq!(ids, vec![2, 3]);
-        assert_eq!(decide(&list, (0x1100, 11), (0x100, 7), &teams, &near), Some(true));
-        assert_eq!(decide(&list, (0x1100, 11), (0x200, 7), &teams, &near), Some(false));
-        assert_eq!(decide(&list, (0x1200, 11), (0x100, 7), &teams, &near), Some(false));
-        assert_eq!(decide(&list, (0x1200, 11), (0x200, 7), &teams, &near), Some(true));
-        assert_eq!(decide(&list, (0x1000, 11), (0x100, 7), &teams, &near), None);
+        assert_eq!(decide(&list, (0x1100, FACTION_VALUE), (0x100, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&list, (0x1100, FACTION_VALUE), (0x200, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&list, (0x1200, FACTION_VALUE), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&list, (0x1200, FACTION_VALUE), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&list, (0x1000, FACTION_VALUE), (0x100, 7), &teams, &near), None);
     }
 
     #[test]
     fn a_guardian_outside_its_zone_names_no_target() {
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &far), Some(false));
-        assert_eq!(decide(&g, (0x1000, 11), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x200, 7), &teams, &far), Some(false));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x200, 7), &teams, &near), Some(true));
     }
 
     #[test]
     fn attacks_that_copy_the_guardian_side_are_decided_like_the_guardian() {
         let mut g = [guardian(0x1000, 1)];
-        assert!(is_kin_candidate(&g, 0x5000, 11, &teams));
+        assert!(is_kin_candidate(&g, 0x5000, FACTION_VALUE, &teams));
         assert!(!is_kin_candidate(&g, 0x5000, 7, &teams));
-        assert!(!is_kin_candidate(&g, 0x100, 11, &teams));
-        assert!(!is_kin_candidate(&g, 0x1000, 11, &teams));
+        assert!(!is_kin_candidate(&g, 0x100, FACTION_VALUE, &teams));
+        assert!(!is_kin_candidate(&g, 0x1000, FACTION_VALUE, &teams));
         g[0].kin.push(0x5000);
-        assert_eq!(decide(&g, (0x5000, 11), (0x100, 7), &teams, &near), Some(false));
-        assert_eq!(decide(&g, (0x5000, 11), (0x200, 7), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x5000, FACTION_VALUE), (0x100, 7), &teams, &near), Some(false));
+        assert_eq!(decide(&g, (0x5000, FACTION_VALUE), (0x200, 7), &teams, &near), Some(true));
     }
 
     fn scene(target: Option<(f64, f64)>, team: u8, players: &[(f64, f64, u8)]) -> Scene {
@@ -741,12 +774,12 @@ mod tests {
     fn a_guardian_hit_on_a_visitor_is_a_fight_and_on_the_owner_team_it_is_not() {
         let g = [guardian(0x1000, 1)];
         // the guardian (11) hits a player (7) that stands in its zone
-        assert_eq!(hit_between_enemies(&g, 11, 7, 77, &scene(Some((10.0, 0.0)), 2, &[]), &near), Some(true));
-        assert_eq!(hit_between_enemies(&g, 11, 7, 77, &scene(Some((10.0, 0.0)), 0, &[]), &near), Some(true));
-        assert_eq!(hit_between_enemies(&g, 11, 7, 77, &scene(Some((10.0, 0.0)), 1, &[]), &near), Some(false));
+        assert_eq!(hit_between_enemies(&g, FACTION_VALUE, 7, 77, &scene(Some((10.0, 0.0)), 2, &[]), &near), Some(true));
+        assert_eq!(hit_between_enemies(&g, FACTION_VALUE, 7, 77, &scene(Some((10.0, 0.0)), 0, &[]), &near), Some(true));
+        assert_eq!(hit_between_enemies(&g, FACTION_VALUE, 7, 77, &scene(Some((10.0, 0.0)), 1, &[]), &near), Some(false));
         // outside the zone, or far from the guardian, or with the guardian away: the game decides
-        assert_eq!(hit_between_enemies(&g, 11, 7, 77, &scene(Some((500.0, 0.0)), 2, &[]), &near), None);
-        assert_eq!(hit_between_enemies(&g, 11, 7, 77, &scene(Some((10.0, 0.0)), 2, &[]), &far), Some(false));
+        assert_eq!(hit_between_enemies(&g, FACTION_VALUE, 7, 77, &scene(Some((500.0, 0.0)), 2, &[]), &near), None);
+        assert_eq!(hit_between_enemies(&g, FACTION_VALUE, 7, 77, &scene(Some((10.0, 0.0)), 2, &[]), &far), Some(false));
         assert_eq!(hit_between_enemies(&g, 7, 7, 77, &scene(Some((10.0, 0.0)), 2, &[]), &near), None);
     }
 
@@ -754,11 +787,11 @@ mod tests {
     fn a_hit_on_the_guardian_is_a_fight_when_a_visitor_stands_in_its_zone() {
         let g = [guardian(0x1000, 1)];
         let target = 0x1000;
-        assert_eq!(hit_between_enemies(&g, 7, 11, target, &scene(None, 0, &[(5.0, 5.0, 2)]), &near), Some(true));
-        assert_eq!(hit_between_enemies(&g, 7, 11, target, &scene(None, 0, &[(5.0, 5.0, 0)]), &near), Some(true));
-        assert_eq!(hit_between_enemies(&g, 7, 11, target, &scene(None, 0, &[(5.0, 5.0, 1)]), &near), Some(false));
-        assert_eq!(hit_between_enemies(&g, 7, 11, target, &scene(None, 0, &[(900.0, 5.0, 2)]), &near), Some(false));
-        assert_eq!(hit_between_enemies(&g, 7, 11, target, &scene(None, 0, &[(5.0, 5.0, 2)]), &far), Some(false));
+        assert_eq!(hit_between_enemies(&g, 7, FACTION_VALUE, target, &scene(None, 0, &[(5.0, 5.0, 2)]), &near), Some(true));
+        assert_eq!(hit_between_enemies(&g, 7, FACTION_VALUE, target, &scene(None, 0, &[(5.0, 5.0, 0)]), &near), Some(true));
+        assert_eq!(hit_between_enemies(&g, 7, FACTION_VALUE, target, &scene(None, 0, &[(5.0, 5.0, 1)]), &near), Some(false));
+        assert_eq!(hit_between_enemies(&g, 7, FACTION_VALUE, target, &scene(None, 0, &[(900.0, 5.0, 2)]), &near), Some(false));
+        assert_eq!(hit_between_enemies(&g, 7, FACTION_VALUE, target, &scene(None, 0, &[(5.0, 5.0, 2)]), &far), Some(false));
     }
 
     #[test]
@@ -832,16 +865,16 @@ mod tests {
         assert_eq!(creature_relation(3, true), Some(false));
         assert_eq!(creature_relation(0, false), None);
         let g = [guardian(0x1000, 1)];
-        assert_eq!(decide(&g, (0x1000, 11), (0x400, 3), &teams, &near), Some(true));
-        assert_eq!(decide(&g, (0x400, 6), (0x1000, 11), &teams, &near), Some(true));
-        assert_eq!(decide(&g, (0x1000, 11), (0x400, 3), &teams, &far), Some(false));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x400, 3), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x400, 6), (0x1000, FACTION_VALUE), &teams, &near), Some(true));
+        assert_eq!(decide(&g, (0x1000, FACTION_VALUE), (0x400, 3), &teams, &far), Some(false));
     }
 
     #[test]
     fn nothing_changes_while_no_guardian_exists() {
         ANY.store(false, Ordering::SeqCst);
-        assert_eq!(relation(0x1000, 11, 0x100, 7, "isEnemy"), None);
-        note_values(11, 7, "isEnemy");
+        assert_eq!(relation(0x1000, FACTION_VALUE, 0x100, 7, "isEnemy"), None);
+        note_values(FACTION_VALUE, 7, "isEnemy");
         assert_eq!(VALUE_CALLS.load(Ordering::Relaxed), 0);
         refresh(0);
         on_create(0);
