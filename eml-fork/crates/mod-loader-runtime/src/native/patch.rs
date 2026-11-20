@@ -385,7 +385,10 @@ fn send_to_peers(out: usize, queue: usize, kind: usize, text: usize, clients: &[
     if !narrow {
         return true;
     }
-    let peers: Vec<usize> = clients.iter().map(|c| c & 0x3f).collect();
+    let Some(peers) = clients.iter().map(|c| super::table::peer_of(c & 0x3f)).collect::<Option<Vec<usize>>>() else {
+        super::spawner::log(&format!("chat: no connection known for client(s) {clients:?}; the line was sent to everybody"));
+        return true;
+    };
     if !narrow_last_entry_to(queue, &peers, line.as_bytes()) {
         super::spawner::log("chat: could not limit an answer to the players it is for; it was sent to everybody");
     }

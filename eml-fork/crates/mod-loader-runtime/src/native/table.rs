@@ -12,6 +12,11 @@ use super::spawn_probe::{hex, read_bytes, u32_at};
 use super::spawner::{log, write_bytes};
 
 const SLOTS_AT: usize = 0x1e0;
+/// One 8-byte entry per connection (`handle = index | generation << 7`, flags byte at +4, bit 0 = active);
+/// the chat queue is kept per connection.
+const PEERS_AT: usize = 0x16a0;
+/// A player's slot keeps the handle of the connection it plays through here.
+const SLOT_CONNECTION: usize = 0x4;
 const SLOT_COUNT: usize = 17;
 const MIN_STATE: u8 = 2;
 
@@ -83,6 +88,28 @@ pub fn entries() -> Vec<Entry> {
         out.push(Entry { index, client, state, permissions: slot[roster::SLOT_PERMISSIONS], name: guess.map(|g| g.0), id: platform_id });
     }
     out
+}
+
+/// Connection index the chat queue uses for the player in slot `index`; it is not the slot number itself.
+pub fn peer_of(index: usize) -> Option<usize> {
+    if index >= SLOT_COUNT {
+        return None;
+    }
+    let base = object()?;
+    let slot = read_bytes(base + SLOTS_AT + index * SLOT_SIZE, 8)?;
+    let handle = u32_at(&slot, SLOT_CONNECTION);
+    let peer = peer_from_handle(handle)?;
+    let conn = read_bytes(base + PEERS_AT + peer * 8, 8)?;
+    connection_matches(&conn, handle).then_some(peer)
+}
+
+fn connection_matches(entry: &[u8], handle: u32) -> bool {
+    entry.len() >= 5 && u32_at(entry, 0) == handle && entry[4] & 1 != 0
+}
+
+fn peer_from_handle(handle: u32) -> Option<usize> {
+    let peer = (handle & 0x7f) as usize;
+    (handle != 0 && peer < 32).then_some(peer)
 }
 
 /// The raw bytes of a connected player's slot, for finding out where an id is kept.
@@ -208,5 +235,25 @@ pub fn restore_all() {
         if current.iter().any(|e| e.index == index && e.client == h.client) {
             write_permissions(index, h.original);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{connection_matches, peer_from_handle};
+
+    #[test]
+    fn the_connection_index_comes_from_the_handle_not_the_slot() {
+        assert_eq!(peer_from_handle(0), None);
+        assert_eq!(peer_from_handle(1 << 7), Some(0));
+        assert_eq!(peer_from_handle(3 << 7 | 5), Some(5));
+        assert_eq!(peer_from_handle(40), None);
+    }
+
+    #[test]
+    fn a_player_is_reached_only_through_its_own_active_connection() {
+        assert!(connection_matches(&[0x02, 0x01, 0, 0, 3, 0, 0, 0], 0x102));
+        assert!(!connection_matches(&[0x80, 0, 0, 0, 0, 0, 0, 0], 0x80));
+        assert!(!connection_matches(&[0x81, 0, 0, 0, 3, 0, 0, 0], 0x102));
     }
 }
